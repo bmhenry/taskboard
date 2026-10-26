@@ -97,6 +97,8 @@ pub struct UiState {
     pointer_cursor: bool,
     /// The settings modal shows keybindings instead of settings.
     show_keybindings: bool,
+    /// The filter dropdown under the search bar is open.
+    filters_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -132,6 +134,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     }
 
     read_filter_inputs(ui, app, &mut actions);
+    close_filters_on_outside_click(ui, state);
     handle_keys(ui, app, state, &mut actions);
     handle_drag(ui, app, state, &mut actions);
 
@@ -201,6 +204,31 @@ fn read_filter_inputs(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     }
 }
 
+/// Closes the filter dropdown when a press lands outside it and its button,
+/// using last frame's layout.
+fn close_filters_on_outside_click(ui: &mut Ui, state: &mut UiState) {
+    if state.filters_open
+        && is_mouse_button_pressed(MouseButton::Left)
+        && !ui.pointer_over("filter_menu")
+        && !ui.pointer_over("filter_button")
+    {
+        close_filters(ui, state);
+    }
+}
+
+/// Hides the filter dropdown, dropping focus from its inputs so typing
+/// doesn't go to a hidden field.
+fn close_filters(ui: &mut Ui, state: &mut UiState) {
+    state.filters_open = false;
+    let focused = ui.focused_element().map(|f| f.id);
+    if [Id::from("date_after"), Id::from("date_before")]
+        .iter()
+        .any(|i| Some(i.id) == focused)
+    {
+        ui.clear_focus();
+    }
+}
+
 fn handle_keys(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
     let ctrl = is_key_down(KeyCode::LeftControl)
         || is_key_down(KeyCode::RightControl)
@@ -211,6 +239,8 @@ fn handle_keys(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
         state.drag = None;
         if app.settings_open {
             actions.push(Action::ShowSettings(false));
+        } else if state.filters_open {
+            close_filters(ui, state);
         } else if app.viewing_file.is_some() {
             actions.push(Action::ViewFile(None));
         } else if app.editing.is_some() {
@@ -478,37 +508,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 false,
             );
 
-            for status in Status::ALL {
-                let on = app.filter.statuses.contains(&status);
-                if chip(ui, state, status.label(), status_color(status), on) {
-                    actions.push(Action::ToggleStatusFilter(status));
-                }
-            }
-
-            ui.element().width(fixed!(8.0)).height(fixed!(1.0)).empty();
-            let (field_label, next) = match app.filter.date_field {
-                DateField::Created => ("Created ▾", DateField::Updated),
-                DateField::Updated => ("Updated ▾", DateField::Closed),
-                DateField::Closed => ("Closed ▾", DateField::Created),
-            };
-            if button(ui, state, field_label, Style::Quiet) {
-                actions.push(Action::SetDateField(next));
-            }
-            let bad = |s: &str| !s.trim().is_empty() && taskboard_core::parse_date(s).is_err();
-            text_input(
-                ui,
-                "date_after",
-                "from YYYY-MM-DD",
-                fixed!(px(128.0)),
-                bad(&app.date_inputs.0),
-            );
-            text_input(
-                ui,
-                "date_before",
-                "to YYYY-MM-DD",
-                fixed!(px(128.0)),
-                bad(&app.date_inputs.1),
-            );
+            filter_button(ui, app, state, actions);
 
             if !app.filter.is_empty() && button(ui, state, "Clear", Style::Quiet) {
                 ui.set_text_value("search", "");
@@ -516,6 +516,121 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 ui.set_text_value("date_before", "");
                 actions.push(Action::ClearFilters);
             }
+        });
+}
+
+/// The toolbar's filter button, with the status and date filters in a
+/// dropdown below it.
+fn filter_button(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    let f = &app.filter;
+    let active = f.statuses.len() + f.after.is_some() as usize + f.before.is_some() as usize;
+    let label = if active > 0 {
+        format!("Filter ({active}) ▾")
+    } else {
+        "Filter ▾".to_string()
+    };
+    let style = if active > 0 {
+        Style::Primary
+    } else {
+        Style::Normal
+    };
+    ui.element()
+        .id("filter_button")
+        .width(fit!())
+        .height(fit!())
+        .children(|ui| {
+            if button(ui, state, &label, style) {
+                if state.filters_open {
+                    close_filters(ui, state);
+                } else {
+                    state.filters_open = true;
+                }
+            }
+            if state.filters_open {
+                filter_menu(ui, app, state, actions);
+            }
+        });
+}
+
+fn filter_menu(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    let width = px(330.0);
+    // Shift left if hanging off the button's left edge would leave the window.
+    let shift = ui
+        .bounding_box("filter_button")
+        .map(|b| (screen_width() - 12.0 - (b.x + width)).min(0.0))
+        .unwrap_or(0.0);
+    ui.element()
+        .id("filter_menu")
+        .width(fixed!(width))
+        .height(fit!())
+        .floating(|f| {
+            f.attach_parent()
+                .anchor((Left, Top), (Left, Bottom))
+                .offset((shift, 4.0))
+                .z_index(40)
+        })
+        .background_color(PANEL)
+        .corner_radius(8.0)
+        .border(|b| b.all(1).color(BORDER))
+        .layout(|l| l.direction(TopToBottom).padding(12).gap(8))
+        .children(|ui| {
+            label(ui, "Status");
+            ui.element()
+                .width(grow!())
+                .height(fit!())
+                .layout(|l| l.direction(LeftToRight).gap(6).wrap().wrap_gap(6))
+                .children(|ui| {
+                    for status in Status::ALL {
+                        let on = app.filter.statuses.contains(&status);
+                        if chip(ui, state, status.label(), status_color(status), on) {
+                            actions.push(Action::ToggleStatusFilter(status));
+                        }
+                    }
+                });
+
+            ui.element()
+                .width(grow!())
+                .height(fit!())
+                .layout(|l| {
+                    l.direction(LeftToRight)
+                        .gap(8)
+                        .padding((6, 0, 0, 0))
+                        .align(Left, CenterY)
+                })
+                .children(|ui| {
+                    ui.element().width(grow!()).height(fit!()).children(|ui| {
+                        label(ui, "Date");
+                    });
+                    let (field_label, next) = match app.filter.date_field {
+                        DateField::Created => ("Created ▾", DateField::Updated),
+                        DateField::Updated => ("Updated ▾", DateField::Closed),
+                        DateField::Closed => ("Closed ▾", DateField::Created),
+                    };
+                    if button(ui, state, field_label, Style::Quiet) {
+                        actions.push(Action::SetDateField(next));
+                    }
+                });
+            let bad = |s: &str| !s.trim().is_empty() && taskboard_core::parse_date(s).is_err();
+            ui.element()
+                .width(grow!())
+                .height(fit!())
+                .layout(|l| l.direction(LeftToRight).gap(8))
+                .children(|ui| {
+                    text_input(
+                        ui,
+                        "date_after",
+                        "from YYYY-MM-DD",
+                        grow!(),
+                        bad(&app.date_inputs.0),
+                    );
+                    text_input(
+                        ui,
+                        "date_before",
+                        "to YYYY-MM-DD",
+                        grow!(),
+                        bad(&app.date_inputs.1),
+                    );
+                });
         });
 }
 
