@@ -1,0 +1,15 @@
+[package]
+name = "taskboard"
+version.workspace = true
+edition.workspace = true
+description = "Local Kanban GUI for Taskboard"
+
+[dependencies]
+taskboard-core.workspace = true
+chrono.workspace = true
+ply-engine = "1.1"
+notify = "8"
+pulldown-cmark = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
