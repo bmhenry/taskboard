@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use ply_engine::layout::Sizing;
 use ply_engine::prelude::*;
+use taskboard_core::settings::DEFAULT_FONT_SIZE;
 use taskboard_core::{Attachment, DateField, FileKind, LinkKind, Status, Task, Ulid};
 
 use crate::app::{Action, App, DRAG_THRESHOLD, Drag, EditTarget, View, drop_index, drop_position};
@@ -43,6 +44,24 @@ const MUTED: u32 = 0x8F96A3;
 const ACCENT: u32 = 0x6EA8FE;
 const DANGER: u32 = 0xE5534B;
 
+/// Body text size the hardcoded sizes below are designed around; the user's
+/// font size setting scales every size relative to it.
+const BASE_FONT_SIZE: f32 = 14.0;
+
+thread_local! {
+    static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Scales a font size (or other text metric) designed for the base size.
+fn fs(size: u16) -> u16 {
+    (size as f32 * SCALE.get()).round().max(1.0) as u16
+}
+
+/// Scales a pixel dimension that has to fit text, like a button's height.
+fn px(n: f32) -> f32 {
+    (n * SCALE.get()).round()
+}
+
 fn status_color(status: Status) -> u32 {
     match status {
         Status::Open => 0x8F96A3,
@@ -76,6 +95,8 @@ pub struct UiState {
     textures: HashMap<Ulid, Texture2D>,
     file_text: HashMap<Ulid, String>,
     pointer_cursor: bool,
+    /// The settings modal shows keybindings instead of settings.
+    show_keybindings: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,6 +111,10 @@ enum Style {
 pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     let mut actions = Vec::new();
     state.pointer_cursor = false;
+    SCALE.set(app.settings.font_size as f32 / BASE_FONT_SIZE);
+    if !app.settings_open {
+        state.show_keybindings = false;
+    }
 
     if app.editor_needs_init {
         let (title, desc) = match app.editing {
@@ -144,6 +169,9 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
             {
                 file_viewer(ui, app, att, state, &mut actions, (w, h));
             }
+            if app.settings_open {
+                settings_modal(ui, app, state, &mut actions, (w, h));
+            }
             if let Some(drag) = state.drag.filter(|d| d.active)
                 && let Some(task) = app.board.get(drag.id)
             {
@@ -181,7 +209,9 @@ fn handle_keys(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
 
     if is_key_pressed(KeyCode::Escape) {
         state.drag = None;
-        if app.viewing_file.is_some() {
+        if app.settings_open {
+            actions.push(Action::ShowSettings(false));
+        } else if app.viewing_file.is_some() {
             actions.push(Action::ViewFile(None));
         } else if app.editing.is_some() {
             actions.push(Action::CancelEdit);
@@ -203,7 +233,24 @@ fn handle_keys(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
     if ctrl && is_key_pressed(KeyCode::N) && app.editing.is_none() {
         actions.push(Action::Edit(EditTarget::New(Status::Open)));
     }
+    let size = app.settings.font_size;
+    if ctrl && (is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd)) {
+        actions.push(Action::SetFontSize(size + 1));
+    }
+    if ctrl && (is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract)) {
+        actions.push(Action::SetFontSize(size - 1));
+    }
 }
+
+/// Shown in the settings modal's keybindings page.
+const KEYBINDINGS: &[(&str, &str)] = &[
+    ("Ctrl+F", "Focus search"),
+    ("Ctrl+N", "New task"),
+    ("Ctrl+S / Ctrl+Enter", "Save the task being edited"),
+    ("Ctrl+=", "Increase font size"),
+    ("Ctrl+-", "Decrease font size"),
+    ("Esc", "Close a dialog, cancel editing, or deselect"),
+];
 
 fn save_action(ui: &Ui) -> Action {
     Action::Save {
@@ -261,7 +308,7 @@ fn button(ui: &mut Ui, state: &mut UiState, label: &str, style: Style) -> bool {
     let mut clicked = false;
     ui.element()
         .width(fit!())
-        .height(fixed!(28.0))
+        .height(fixed!(px(28.0)))
         .children(|ui| {
             clicked = ui.just_released();
             let hovered = ui.hovered();
@@ -286,7 +333,7 @@ fn button(ui: &mut Ui, state: &mut UiState, label: &str, style: Style) -> bool {
                 .layout(|l| l.padding((0, 10, 0, 10)).align(CenterX, CenterY))
                 .children(|ui| {
                     ui.text(label, |t| {
-                        t.font_size(13).color(fg).wrap_mode(WrapMode::None)
+                        t.font_size(fs(13)).color(fg).wrap_mode(WrapMode::None)
                     })
                 });
         });
@@ -298,8 +345,8 @@ fn chip(ui: &mut Ui, state: &mut UiState, label: &str, color: u32, on: bool) -> 
     let mut clicked = false;
     ui.element()
         .width(fit!())
-        .height(fixed!(24.0))
-        .corner_radius(12.0)
+        .height(fixed!(px(24.0)))
+        .corner_radius(px(12.0))
         .background_color(if on { color } else { PANEL })
         .border(|b| b.all(1).color(color))
         .layout(|l| l.padding((0, 10, 0, 10)).align(CenterX, CenterY))
@@ -309,7 +356,7 @@ fn chip(ui: &mut Ui, state: &mut UiState, label: &str, color: u32, on: bool) -> 
                 state.pointer_cursor = true;
             }
             ui.text(label, |t| {
-                t.font_size(12)
+                t.font_size(fs(12))
                     .color(if on { BG } else { color })
                     .wrap_mode(WrapMode::None)
             });
@@ -337,14 +384,14 @@ fn input_frame(
 }
 
 fn text_input(ui: &mut Ui, id: &'static str, placeholder: &str, width: Sizing, invalid: bool) {
-    input_frame(ui, width, fixed!(30.0), invalid, |ui| {
+    input_frame(ui, width, fixed!(px(30.0)), invalid, |ui| {
         ui.element()
             .id(id)
             .width(grow!())
             .height(grow!())
             .text_input(|t| {
                 t.placeholder(placeholder)
-                    .font_size(14)
+                    .font_size(fs(14))
                     .text_color(TEXT)
                     .placeholder_color(MUTED)
                     .cursor_color(ACCENT)
@@ -354,7 +401,7 @@ fn text_input(ui: &mut Ui, id: &'static str, placeholder: &str, width: Sizing, i
 }
 
 fn label(ui: &mut Ui, text: &str) {
-    ui.text(text, |t| t.font_size(12).color(MUTED));
+    ui.text(text, |t| t.font_size(fs(12)).color(MUTED));
 }
 
 fn section_title(ui: &mut Ui, text: &str) {
@@ -363,7 +410,7 @@ fn section_title(ui: &mut Ui, text: &str) {
         .height(fit!())
         .layout(|l| l.padding((8, 0, 2, 0)))
         .children(|ui| {
-            ui.text(text, |t| t.font_size(13).font(&BOLD).color(MUTED));
+            ui.text(text, |t| t.font_size(fs(13)).font(&BOLD).color(MUTED));
         });
 }
 
@@ -378,7 +425,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 .align(Left, CenterY)
         })
         .children(|ui| {
-            ui.text("Taskboard", |t| t.font_size(18).font(&BOLD).color(TEXT));
+            ui.text("Taskboard", |t| t.font_size(fs(18)).font(&BOLD).color(TEXT));
             ui.element()
                 .width(grow!())
                 .height(fit!())
@@ -391,7 +438,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
                     ui.text(&root, |t| {
-                        t.font_size(12).color(MUTED).wrap_mode(WrapMode::None)
+                        t.font_size(fs(12)).color(MUTED).wrap_mode(WrapMode::None)
                     });
                 });
             for (view, name) in [(View::Board, "Board"), (View::List, "List")] {
@@ -407,6 +454,9 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
             if button(ui, state, "+ New task", Style::Normal) {
                 actions.push(Action::Edit(EditTarget::New(Status::Open)));
             }
+            if button(ui, state, "⚙ Settings", Style::Quiet) {
+                actions.push(Action::ShowSettings(true));
+            }
         });
     ui.element()
         .width(grow!())
@@ -414,6 +464,8 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
         .layout(|l| {
             l.direction(LeftToRight)
                 .gap(8)
+                .wrap()
+                .wrap_gap(8)
                 .padding((6, 12, 12, 12))
                 .align(Left, CenterY)
         })
@@ -422,7 +474,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 ui,
                 "search",
                 "Search title, description, links  (Ctrl+F)",
-                grow!(110.0, 360.0),
+                grow!(px(110.0), px(360.0)),
                 false,
             );
 
@@ -447,14 +499,14 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 ui,
                 "date_after",
                 "from YYYY-MM-DD",
-                fixed!(128.0),
+                fixed!(px(128.0)),
                 bad(&app.date_inputs.0),
             );
             text_input(
                 ui,
                 "date_before",
                 "to YYYY-MM-DD",
-                fixed!(128.0),
+                fixed!(px(128.0)),
                 bad(&app.date_inputs.1),
             );
 
@@ -480,13 +532,13 @@ fn error_bar(ui: &mut Ui, err: &str, actions: &mut Vec<Action>) {
         })
         .children(|ui| {
             ui.element().width(grow!()).height(fit!()).children(|ui| {
-                ui.text(err, |t| t.font_size(13).color(0xFFD7D4));
+                ui.text(err, |t| t.font_size(fs(13)).color(0xFFD7D4));
             });
             ui.element().width(fit!()).height(fit!()).children(|ui| {
                 if ui.just_released() {
                     actions.push(Action::DismissError);
                 }
-                ui.text("Dismiss", |t| t.font_size(13).color(TEXT));
+                ui.text("Dismiss", |t| t.font_size(fs(13)).color(TEXT));
             });
         });
 }
@@ -514,7 +566,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
     let drop_target = dragging.is_some() && ui.pointer_over(column_id(status));
     ui.element()
         .id(column_id(status))
-        .width(grow!(210.0))
+        .width(grow!(px(210.0)))
         .height(grow!())
         .background_color(PANEL)
         .corner_radius(8.0)
@@ -526,7 +578,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
         .children(|ui| {
             ui.element()
                 .width(grow!())
-                .height(fixed!(28.0))
+                .height(fixed!(px(28.0)))
                 .layout(|l| {
                     l.direction(LeftToRight)
                         .gap(8)
@@ -541,12 +593,14 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         .background_color(status_color(status))
                         .empty();
                     ui.text(status.label(), |t| {
-                        t.font_size(14)
+                        t.font_size(fs(14))
                             .font(&BOLD)
                             .color(TEXT)
                             .wrap_mode(WrapMode::None)
                     });
-                    ui.text(&tasks.len().to_string(), |t| t.font_size(12).color(MUTED));
+                    ui.text(&tasks.len().to_string(), |t| {
+                        t.font_size(fs(12)).color(MUTED)
+                    });
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
                     if button(ui, state, "+", Style::Quiet) {
                         actions.push(Action::Edit(EditTarget::New(status)));
@@ -616,7 +670,7 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
 
 fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
     ui.text(&task.title, |t| {
-        t.font_size(14).color(if faded { MUTED } else { TEXT })
+        t.font_size(fs(14)).color(if faded { MUTED } else { TEXT })
     });
     ui.element()
         .width(grow!())
@@ -624,19 +678,19 @@ fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
         .layout(|l| l.direction(LeftToRight).gap(10))
         .children(|ui| {
             ui.text(&task.short_id(), |t| {
-                t.font_size(11)
+                t.font_size(fs(11))
                     .font(&MONO)
                     .color(MUTED)
                     .wrap_mode(WrapMode::None)
             });
             if !task.links.is_empty() {
                 ui.text(&plural(task.links.len(), "link"), |t| {
-                    t.font_size(11).color(MUTED).wrap_mode(WrapMode::None)
+                    t.font_size(fs(11)).color(MUTED).wrap_mode(WrapMode::None)
                 });
             }
             if !task.files.is_empty() {
                 ui.text(&plural(task.files.len(), "file"), |t| {
-                    t.font_size(11).color(MUTED).wrap_mode(WrapMode::None)
+                    t.font_size(fs(11)).color(MUTED).wrap_mode(WrapMode::None)
                 });
             }
         });
@@ -653,7 +707,7 @@ fn plural(n: usize, word: &str) -> String {
 fn drag_ghost(ui: &mut Ui, task: &Task) {
     let (mx, my) = mouse_position();
     ui.element()
-        .width(fixed!(240.0))
+        .width(fixed!(px(240.0)))
         .height(fit!())
         .floating(|f| {
             f.attach_root()
@@ -694,7 +748,7 @@ fn list_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Acti
                             .height(fit!())
                             .layout(|l| l.padding(16))
                             .children(|ui| {
-                                ui.text("No tasks match.", |t| t.font_size(14).color(MUTED));
+                                ui.text("No tasks match.", |t| t.font_size(fs(14)).color(MUTED));
                             });
                     }
                     for task in tasks {
@@ -756,15 +810,15 @@ fn list_row(
                     .align(Left, CenterY)
             })
             .children(|ui| {
-                let size = if header { 12 } else { 14 };
+                let size = fs(if header { 12 } else { 14 });
                 ui.element()
-                    .width(fixed!(120.0))
+                    .width(fixed!(px(120.0)))
                     .height(fit!())
                     .children(|ui| {
                         ui.text(cells[0], |t| t.font_size(size).color(color));
                     });
                 ui.element()
-                    .width(fixed!(90.0))
+                    .width(fixed!(px(90.0)))
                     .height(fit!())
                     .children(|ui| {
                         ui.text(cells[1], |t| t.font_size(size).font(&MONO).color(MUTED));
@@ -775,7 +829,7 @@ fn list_row(
                     });
                 });
                 ui.element()
-                    .width(fixed!(140.0))
+                    .width(fixed!(px(140.0)))
                     .height(fit!())
                     .children(|ui| {
                         ui.text(cells[3], |t| t.font_size(size).color(MUTED));
@@ -788,7 +842,11 @@ fn list_row(
 fn side_panel(ui: &mut Ui, id: &'static str, body: impl FnOnce(&mut Ui)) {
     ui.element()
         .id(id)
-        .width(fixed!((screen_width() * 0.42).clamp(340.0, 480.0)))
+        .width(fixed!(
+            (screen_width() * 0.42)
+                .clamp(px(340.0), px(480.0))
+                .min(screen_width() * 0.6)
+        ))
         .height(grow!())
         .background_color(PANEL)
         .corner_radius(8.0)
@@ -814,7 +872,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                     .background_color(status_color(task.status))
                     .empty();
                 ui.text(&task.short_id(), |t| {
-                    t.font_size(12).font(&MONO).color(MUTED)
+                    t.font_size(fs(12)).font(&MONO).color(MUTED)
                 });
                 ui.element().width(grow!()).height(fixed!(1.0)).empty();
                 if button(ui, state, "Edit", Style::Normal) {
@@ -833,7 +891,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                 }
             });
 
-        ui.text(&task.title, |t| t.font_size(20).font(&BOLD).color(TEXT));
+        ui.text(&task.title, |t| t.font_size(fs(20)).font(&BOLD).color(TEXT));
 
         ui.element()
             .width(grow!())
@@ -893,7 +951,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                         MUTED
                     };
                     ui.text(&link.kind.to_string(), |t| {
-                        t.font_size(11).color(kind_color)
+                        t.font_size(fs(11)).color(kind_color)
                     });
                     ui.element().width(grow!()).height(fit!()).children(|ui| {
                         let hovered = ui.hovered();
@@ -902,7 +960,8 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                             actions.push(Action::OpenUrl(link.url.clone()));
                         }
                         ui.text(link.display_text(), |t| {
-                            t.font_size(13).color(if hovered { TEXT } else { ACCENT })
+                            t.font_size(fs(13))
+                                .color(if hovered { TEXT } else { ACCENT })
                         });
                     });
                     if button(ui, state, "×", Style::Quiet) {
@@ -950,7 +1009,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                         FileKind::Markdown => "md",
                         FileKind::Text => "text",
                     };
-                    ui.text(kind, |t| t.font_size(11).color(MUTED));
+                    ui.text(kind, |t| t.font_size(fs(11)).color(MUTED));
                     ui.element().width(grow!()).height(fit!()).children(|ui| {
                         let hovered = ui.hovered();
                         state.pointer_cursor |= hovered;
@@ -958,7 +1017,8 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                             actions.push(Action::ViewFile(Some((task.id, att.id))));
                         }
                         ui.text(&att.name, |t| {
-                            t.font_size(13).color(if hovered { TEXT } else { ACCENT })
+                            t.font_size(fs(13))
+                                .color(if hovered { TEXT } else { ACCENT })
                         });
                     });
                     if button(ui, state, "×", Style::Quiet) {
@@ -998,11 +1058,11 @@ fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<A
         _ => "Edit task".to_string(),
     };
     side_panel(ui, "editor", |ui| {
-        ui.text(&heading, |t| t.font_size(18).font(&BOLD).color(TEXT));
+        ui.text(&heading, |t| t.font_size(fs(18)).font(&BOLD).color(TEXT));
         label(ui, "Title");
         text_input(ui, "edit_title", "What needs doing?", grow!(), false);
         label(ui, "Description (Markdown)");
-        input_frame(ui, grow!(), grow!(200.0), false, |ui| {
+        input_frame(ui, grow!(), grow!(px(200.0)), false, |ui| {
             ui.element()
                 .id("edit_desc")
                 .width(grow!())
@@ -1011,7 +1071,7 @@ fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<A
                     t.multiline()
                         .drag_select()
                         .font(&MONO)
-                        .font_size(13)
+                        .font_size(fs(13))
                         .text_color(TEXT)
                         .placeholder("Details, acceptance criteria, notes…")
                         .placeholder_color(MUTED)
@@ -1039,11 +1099,11 @@ fn render_markdown(ui: &mut Ui, src: &str) {
     for block in markdown::parse(src) {
         match block.kind {
             BlockKind::Heading(level) => {
-                let size = match level {
+                let size = fs(match level {
                     1 => 20,
                     2 => 17,
                     _ => 15,
-                };
+                });
                 ui.element()
                     .width(grow!())
                     .height(fit!())
@@ -1052,27 +1112,32 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                         ui.text(&block.text, |t| t.font_size(size).font(&BOLD).color(TEXT));
                     });
             }
-            BlockKind::Paragraph => {
-                ui.text(&block.text, |t| t.font_size(14).line_height(20).color(TEXT))
-            }
+            BlockKind::Paragraph => ui.text(&block.text, |t| {
+                t.font_size(fs(14)).line_height(fs(20)).color(TEXT)
+            }),
             BlockKind::ListItem { depth, marker } => {
                 ui.element()
                     .width(grow!())
                     .height(fit!())
                     .layout(|l| {
-                        l.direction(LeftToRight)
-                            .gap(6)
-                            .padding((0, 0, 0, 4 + 16 * depth as u16))
+                        l.direction(LeftToRight).gap(6).padding((
+                            0,
+                            0,
+                            0,
+                            4 + fs(16) * depth as u16,
+                        ))
                     })
                     .children(|ui| {
                         ui.element()
-                            .width(fixed!(18.0))
+                            .width(fixed!(px(18.0)))
                             .height(fit!())
                             .children(|ui| {
-                                ui.text(&marker, |t| t.font_size(14).color(MUTED));
+                                ui.text(&marker, |t| t.font_size(fs(14)).color(MUTED));
                             });
                         ui.element().width(grow!()).height(fit!()).children(|ui| {
-                            ui.text(&block.text, |t| t.font_size(14).line_height(20).color(TEXT));
+                            ui.text(&block.text, |t| {
+                                t.font_size(fs(14)).line_height(fs(20)).color(TEXT)
+                            });
                         });
                     });
             }
@@ -1085,7 +1150,10 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                     .layout(|l| l.padding(10))
                     .children(|ui| {
                         ui.text(&block.text, |t| {
-                            t.font_size(13).font(&MONO).line_height(18).color(TEXT)
+                            t.font_size(fs(13))
+                                .font(&MONO)
+                                .line_height(fs(18))
+                                .color(TEXT)
                         });
                     });
             }
@@ -1097,7 +1165,7 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                     .layout(|l| l.padding((2, 0, 2, 12)))
                     .children(|ui| {
                         ui.text(&block.text, |t| {
-                            t.font_size(14).line_height(20).color(MUTED)
+                            t.font_size(fs(14)).line_height(fs(20)).color(MUTED)
                         })
                     });
             }
@@ -1142,7 +1210,7 @@ fn file_viewer(
                         .height(fit!())
                         .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
                         .children(|ui| {
-                            ui.text(&att.name, |t| t.font_size(16).font(&BOLD).color(TEXT));
+                            ui.text(&att.name, |t| t.font_size(fs(16)).font(&BOLD).color(TEXT));
                             ui.element().width(grow!()).height(fixed!(1.0)).empty();
                             if button(ui, state, "Close", Style::Normal) {
                                 actions.push(Action::ViewFile(None));
@@ -1185,15 +1253,125 @@ fn file_viewer(
                                     render_markdown(ui, text);
                                 } else {
                                     ui.text(text, |t| {
-                                        t.font_size(13)
+                                        t.font_size(fs(13))
                                             .font(&MONO)
-                                            .line_height(18)
+                                            .line_height(fs(18))
                                             .color(TEXT)
                                             .wrap_mode(WrapMode::Newline)
                                     });
                                 }
                             }
                         });
+                });
+        });
+}
+
+fn settings_modal(
+    ui: &mut Ui,
+    app: &App,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    (w, h): (f32, f32),
+) {
+    let size = app.settings.font_size;
+    // Scrim covering the window; the dialog sits centered inside it.
+    ui.element()
+        .width(fixed!(w))
+        .height(fixed!(h))
+        .floating(|f| f.attach_root().z_index(60))
+        .background_color((0.0, 0.0, 0.0, 0.6))
+        .layout(|l| l.align(CenterX, CenterY))
+        .children(|ui| {
+            ui.element()
+                .width(fixed!(px(460.0).min(w * 0.9)))
+                .height(fit!(0.0, h * 0.85))
+                .background_color(PANEL)
+                .corner_radius(10.0)
+                .border(|b| b.all(1).color(BORDER))
+                .overflow(|o| o.scroll_y())
+                .layout(|l| l.direction(TopToBottom).padding(16).gap(12))
+                .children(|ui| {
+                    ui.element()
+                        .width(grow!())
+                        .height(fit!())
+                        .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                        .children(|ui| {
+                            let title = if state.show_keybindings {
+                                "Keybindings"
+                            } else {
+                                "Settings"
+                            };
+                            ui.text(title, |t| t.font_size(fs(16)).font(&BOLD).color(TEXT));
+                            ui.element().width(grow!()).height(fixed!(1.0)).empty();
+                            let toggle = if state.show_keybindings {
+                                "⚙ Settings"
+                            } else {
+                                "⌨ Keybindings"
+                            };
+                            if button(ui, state, toggle, Style::Quiet) {
+                                state.show_keybindings = !state.show_keybindings;
+                            }
+                            if button(ui, state, "Close", Style::Normal) {
+                                actions.push(Action::ShowSettings(false));
+                            }
+                        });
+                    if state.show_keybindings {
+                        for (keys, what) in KEYBINDINGS {
+                            ui.element()
+                                .width(grow!())
+                                .height(fit!())
+                                .layout(|l| l.direction(LeftToRight).gap(12).align(Left, CenterY))
+                                .children(|ui| {
+                                    ui.element()
+                                        .width(fixed!(px(160.0)))
+                                        .height(fit!())
+                                        .children(|ui| {
+                                            ui.text(keys, |t| {
+                                                t.font_size(fs(13)).font(&MONO).color(ACCENT)
+                                            });
+                                        });
+                                    ui.element().width(grow!()).height(fit!()).children(|ui| {
+                                        ui.text(what, |t| t.font_size(fs(14)).color(TEXT));
+                                    });
+                                });
+                        }
+                        return;
+                    }
+                    section_title(ui, "Global");
+                    ui.element()
+                        .width(grow!())
+                        .height(fit!())
+                        .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                        .children(|ui| {
+                            ui.element().width(grow!()).height(fit!()).children(|ui| {
+                                ui.text("Font size", |t| t.font_size(fs(14)).color(TEXT));
+                            });
+                            if button(ui, state, "−", Style::Normal) {
+                                actions.push(Action::SetFontSize(size - 1));
+                            }
+                            ui.element()
+                                .width(fixed!(px(32.0)))
+                                .height(fit!())
+                                .layout(|l| l.align(CenterX, CenterY))
+                                .children(|ui| {
+                                    ui.text(&size.to_string(), |t| {
+                                        t.font_size(fs(14)).font(&MONO).color(TEXT)
+                                    });
+                                });
+                            if button(ui, state, "+", Style::Normal) {
+                                actions.push(Action::SetFontSize(size + 1));
+                            }
+                            if size != DEFAULT_FONT_SIZE && button(ui, state, "Reset", Style::Quiet)
+                            {
+                                actions.push(Action::SetFontSize(DEFAULT_FONT_SIZE));
+                            }
+                        });
+                    label(ui, "Ctrl+= / Ctrl+- also change the font size.");
+                    let saved_to = match &app.settings_path {
+                        Some(p) => format!("Saved to {}", p.display()),
+                        None => "Not saved: neither XDG_CONFIG_HOME nor HOME is set.".to_string(),
+                    };
+                    label(ui, &saved_to);
                 });
         });
 }

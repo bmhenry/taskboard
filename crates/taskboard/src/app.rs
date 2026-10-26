@@ -3,9 +3,10 @@
 
 use std::path::PathBuf;
 
+use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
 use taskboard_core::{
-    Board, DateField, Filter, Link, LinkKind, NewTask, Status, Store, Task, TaskPatch, Ulid,
-    parse_date,
+    Board, DateField, Filter, GlobalSettings, Link, LinkKind, NewTask, Status, Store, Task,
+    TaskPatch, Ulid, parse_date,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,8 @@ pub enum Action {
     ClearFilters,
     OpenUrl(String),
     DismissError,
+    ShowSettings(bool),
+    SetFontSize(u16),
 }
 
 pub struct App {
@@ -96,10 +99,15 @@ pub struct App {
     /// The raw date bound inputs, kept so invalid text can be shown and fixed.
     pub date_inputs: (String, String),
     pub error: Option<String>,
+    pub settings: GlobalSettings,
+    /// Where global settings are saved; `None` keeps changes in memory only.
+    pub settings_path: Option<PathBuf>,
+    pub settings_open: bool,
 }
 
 impl App {
-    pub fn new(store: Store) -> App {
+    /// Opens the board and loads global settings from `settings_path`.
+    pub fn new(store: Store, settings_path: Option<PathBuf>) -> App {
         let mut app = App {
             board: Board::default(),
             store,
@@ -111,7 +119,16 @@ impl App {
             viewing_file: None,
             date_inputs: (String::new(), String::new()),
             error: None,
+            settings: GlobalSettings::default(),
+            settings_path,
+            settings_open: false,
         };
+        if let Some(path) = &app.settings_path {
+            match GlobalSettings::load(path) {
+                Ok(settings) => app.settings = settings,
+                Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
+            }
+        }
         app.reload();
         app
     }
@@ -287,6 +304,13 @@ impl App {
             }
             Action::OpenUrl(url) => open_url(&url)?,
             Action::DismissError => self.error = None,
+            Action::ShowSettings(open) => self.settings_open = open,
+            Action::SetFontSize(size) => {
+                self.settings.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                if let Some(path) = &self.settings_path {
+                    self.settings.save(path)?;
+                }
+            }
         }
         // Show our own write right away rather than waiting for the watcher.
         if writes {
@@ -352,7 +376,7 @@ mod tests {
 
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
-        let app = App::new(Store::open(dir.path()).unwrap());
+        let app = App::new(Store::open(dir.path()).unwrap(), None);
         (dir, app)
     }
 
@@ -406,6 +430,20 @@ mod tests {
         app.store.delete(a).unwrap(); // as if `tb rm` ran
         app.reload();
         assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn font_size_is_clamped_and_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/tb/settings.json");
+        let mut app = App::new(Store::open(dir.path()).unwrap(), Some(path.clone()));
+        app.apply(Action::SetFontSize(MAX_FONT_SIZE + 10));
+        assert_eq!(app.error, None);
+        assert_eq!(app.settings.font_size, MAX_FONT_SIZE);
+        assert_eq!(GlobalSettings::load(&path).unwrap(), app.settings);
+
+        let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
+        assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
     }
 
     #[test]

@@ -4,11 +4,13 @@
 pub mod board;
 pub mod filter;
 pub mod model;
+pub mod settings;
 pub mod store;
 
 pub use board::{NewTask, TaskPatch};
 pub use filter::{DateField, Filter, parse_date};
 pub use model::{Attachment, Board, FileKind, Link, LinkKind, Status, Task, short_id};
+pub use settings::GlobalSettings;
 pub use store::{Store, project_root};
 pub use ulid::Ulid;
 

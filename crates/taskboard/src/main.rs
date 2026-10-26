@@ -11,7 +11,7 @@ mod watch;
 use std::path::PathBuf;
 
 use ply_engine::prelude::*;
-use taskboard_core::Store;
+use taskboard_core::{GlobalSettings, Store};
 
 use app::App;
 use watch::TaskWatcher;
@@ -43,7 +43,7 @@ async fn main() {
     };
 
     let watcher = TaskWatcher::new(store.dir(), &store.tasks_path());
-    let mut app = App::new(store);
+    let mut app = App::new(store, GlobalSettings::default_path());
     if let Err(e) = &watcher {
         app.error = Some(format!("Live updates are off; couldn't watch .tb/: {e}"));
     }
