@@ -18,12 +18,15 @@ pub const DEFAULT_FONT_SIZE: u16 = 14;
 pub struct GlobalSettings {
     /// Size of normal body text in the GUI; everything else scales with it.
     pub font_size: u16,
+    /// Draw board columns for statuses with no tasks as thin strips.
+    pub collapse_empty_columns: bool,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
         GlobalSettings {
             font_size: DEFAULT_FONT_SIZE,
+            collapse_empty_columns: true,
         }
     }
 }
@@ -82,7 +85,10 @@ mod tests {
             GlobalSettings::default()
         );
 
-        let s = GlobalSettings { font_size: 18 };
+        let s = GlobalSettings {
+            font_size: 18,
+            collapse_empty_columns: false,
+        };
         s.save(&path).unwrap();
         assert_eq!(GlobalSettings::load(&path).unwrap(), s);
     }

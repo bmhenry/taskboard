@@ -49,6 +49,9 @@ async fn main() {
     }
 
     let mut ply = Ply::<()>::new(&ui::FONT).await;
+    // Culling tests each element's unrotated layout box, which wrongly drops
+    // the rotated titles on collapsed columns near the window edges.
+    ply.set_culling(false);
     let mut state = ui::UiState::default();
 
     loop {

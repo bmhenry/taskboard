@@ -325,7 +325,12 @@ fn handle_drag(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
         .filter_map(|id| ui.bounding_box(card_id(*id)))
         .map(|b| b.y + b.height / 2.0)
         .collect();
-    let index = drop_index(&mids, my);
+    // A collapsed column shows no cards, so drops land at its bottom.
+    let index = if app.column_collapsed(status) {
+        visible.len()
+    } else {
+        drop_index(&mids, my)
+    };
     let position = drop_position(&app.board, status, &visible, index, drag.id);
     actions.push(Action::Move {
         id: drag.id,
@@ -670,8 +675,73 @@ fn board_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Act
         .layout(|l| l.direction(LeftToRight).gap(10))
         .children(|ui| {
             for status in Status::ALL {
-                column(ui, app, state, actions, status);
+                if app.column_collapsed(status) {
+                    collapsed_column(ui, app, state, actions, status);
+                } else {
+                    column(ui, app, state, actions, status);
+                }
             }
+        });
+}
+
+/// A collapsed column drawn as a thin strip with its title along it like a
+/// book spine. Clicking expands it; it still accepts dropped cards.
+fn collapsed_column(
+    ui: &mut Ui,
+    app: &App,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    status: Status,
+) {
+    let count = app.visible_column(status).len();
+    let dragging = state.drag.is_some_and(|d| d.active);
+    let drop_target = dragging && ui.pointer_over(column_id(status));
+    // The spine is laid out horizontally, then rotated about its center into
+    // place along the top of the strip.
+    let (strip_w, spine_len) = (px(34.0), px(180.0));
+    ui.element()
+        .id(column_id(status))
+        .width(fixed!(strip_w))
+        .height(grow!())
+        .background_color(PANEL)
+        .corner_radius(8.0)
+        .border(|b| {
+            b.all(if drop_target { 2 } else { 1 })
+                .color(if drop_target { ACCENT } else { PANEL })
+        })
+        .children(|ui| {
+            if ui.hovered() {
+                state.pointer_cursor = true;
+            }
+            if ui.just_released() && !dragging {
+                actions.push(Action::ToggleColumn(status));
+            }
+            ui.element()
+                .width(fixed!(spine_len))
+                .height(fixed!(strip_w))
+                .floating(|f| {
+                    f.attach_parent()
+                        .anchor((CenterX, CenterY), (CenterX, Top))
+                        .offset((0.0, px(8.0) + spine_len / 2.0))
+                        .passthrough()
+                })
+                .rotate_visual(|r| r.degrees(90.0))
+                .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                .children(|ui| {
+                    ui.element()
+                        .width(fixed!(8.0))
+                        .height(fixed!(8.0))
+                        .corner_radius(4.0)
+                        .background_color(status_color(status))
+                        .empty();
+                    ui.text(status.label(), |t| {
+                        t.font_size(fs(14))
+                            .font(&BOLD)
+                            .color(TEXT)
+                            .wrap_mode(WrapMode::None)
+                    });
+                    ui.text(&count.to_string(), |t| t.font_size(fs(12)).color(MUTED));
+                });
         });
 }
 
@@ -717,6 +787,9 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         t.font_size(fs(12)).color(MUTED)
                     });
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
+                    if button(ui, state, "«", Style::Quiet) {
+                        actions.push(Action::ToggleColumn(status));
+                    }
                     if button(ui, state, "+", Style::Quiet) {
                         actions.push(Action::Edit(EditTarget::New(status)));
                     }
@@ -1482,6 +1555,30 @@ fn settings_modal(
                             }
                         });
                     label(ui, "Ctrl+= / Ctrl+- also change the font size.");
+                    let collapse = app.settings.collapse_empty_columns;
+                    ui.element()
+                        .width(grow!())
+                        .height(fit!())
+                        .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                        .children(|ui| {
+                            ui.element().width(grow!()).height(fit!()).children(|ui| {
+                                ui.text("Collapse empty columns", |t| {
+                                    t.font_size(fs(14)).color(TEXT)
+                                });
+                            });
+                            let (text, style) = if collapse {
+                                ("On", Style::Primary)
+                            } else {
+                                ("Off", Style::Normal)
+                            };
+                            if button(ui, state, text, style) {
+                                actions.push(Action::SetCollapseEmptyColumns(!collapse));
+                            }
+                        });
+                    label(
+                        ui,
+                        "Empty columns start as strips. « collapses any column; click a strip to expand it.",
+                    );
                     let saved_to = match &app.settings_path {
                         Some(p) => format!("Saved to {}", p.display()),
                         None => "Not saved: neither XDG_CONFIG_HOME nor HOME is set.".to_string(),

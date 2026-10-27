@@ -1,6 +1,7 @@
 //! GUI state and the actions that change it. Kept free of rendering code so
 //! it can be tested without a window.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
@@ -83,6 +84,8 @@ pub enum Action {
     DismissError,
     ShowSettings(bool),
     SetFontSize(u16),
+    SetCollapseEmptyColumns(bool),
+    ToggleColumn(Status),
 }
 
 pub struct App {
@@ -103,6 +106,9 @@ pub struct App {
     /// Where global settings are saved; `None` keeps changes in memory only.
     pub settings_path: Option<PathBuf>,
     pub settings_open: bool,
+    /// Columns the user collapsed (`true`) or expanded (`false`) by hand,
+    /// overriding the `collapse_empty_columns` default.
+    pub column_overrides: HashMap<Status, bool>,
 }
 
 impl App {
@@ -122,6 +128,7 @@ impl App {
             settings: GlobalSettings::default(),
             settings_path,
             settings_open: false,
+            column_overrides: HashMap::new(),
         };
         if let Some(path) = &app.settings_path {
             match GlobalSettings::load(path) {
@@ -168,6 +175,17 @@ impl App {
             .into_iter()
             .filter(|t| self.filter.matches(t))
             .collect()
+    }
+
+    /// Whether a board column is drawn as a thin strip: as the user last set
+    /// it, or by default when it has no tasks and the setting is on.
+    pub fn column_collapsed(&self, status: Status) -> bool {
+        self.column_overrides
+            .get(&status)
+            .copied()
+            .unwrap_or_else(|| {
+                self.settings.collapse_empty_columns && self.board.column(status).is_empty()
+            })
     }
 
     /// Every task passing the filter, ordered by status then board order.
@@ -307,9 +325,15 @@ impl App {
             Action::ShowSettings(open) => self.settings_open = open,
             Action::SetFontSize(size) => {
                 self.settings.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-                if let Some(path) = &self.settings_path {
-                    self.settings.save(path)?;
-                }
+                self.save_settings()?;
+            }
+            Action::SetCollapseEmptyColumns(collapse) => {
+                self.settings.collapse_empty_columns = collapse;
+                self.save_settings()?;
+            }
+            Action::ToggleColumn(status) => {
+                let collapsed = self.column_collapsed(status);
+                self.column_overrides.insert(status, !collapsed);
             }
         }
         // Show our own write right away rather than waiting for the watcher.
@@ -317,6 +341,13 @@ impl App {
             self.reload();
         }
         Ok(())
+    }
+
+    fn save_settings(&self) -> taskboard_core::Result<()> {
+        match &self.settings_path {
+            Some(path) => self.settings.save(path),
+            None => Ok(()),
+        }
     }
 }
 
@@ -444,6 +475,29 @@ mod tests {
 
         let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
         assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn empty_columns_collapsed_by_default() {
+        let (_dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        assert!(!app.column_collapsed(Status::Backlog));
+        assert!(app.column_collapsed(Status::Closed));
+
+        app.apply(Action::ToggleColumn(Status::Closed));
+        assert!(!app.column_collapsed(Status::Closed));
+        app.apply(Action::ToggleColumn(Status::Closed));
+        assert!(app.column_collapsed(Status::Closed));
+
+        // A column with tasks collapses too, and stays as set once emptied.
+        app.apply(Action::ToggleColumn(Status::Backlog));
+        assert!(app.column_collapsed(Status::Backlog));
+        app.apply(Action::Delete(a));
+        app.apply(Action::ToggleColumn(Status::Backlog));
+        assert!(!app.column_collapsed(Status::Backlog));
+
+        app.apply(Action::SetCollapseEmptyColumns(false));
+        assert!(!app.column_collapsed(Status::Open));
     }
 
     #[test]
