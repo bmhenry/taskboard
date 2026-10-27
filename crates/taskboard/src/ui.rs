@@ -663,8 +663,41 @@ fn error_bar(ui: &mut Ui, err: &str, actions: &mut Vec<Action>) {
         });
 }
 
+/// Ply sends the wheel only to the innermost scroll container under the
+/// pointer, so over a column's cards a sideways scroll (shift+wheel or a
+/// horizontal wheel) would be lost on the vertical-only card list. Pass it
+/// on to the board, using the same speed and shift mapping as Ply.
+fn forward_board_scroll(ui: &mut Ui, app: &App) {
+    // Modals cover the board, so the wheel belongs to them.
+    if app.settings_open || app.viewing_file.is_some() {
+        return;
+    }
+    let over_cards = Status::ALL
+        .into_iter()
+        .any(|s| ui.pointer_over(("cards", status_index(s))));
+    if !over_cards {
+        return;
+    }
+    // Scrolling a board that fits would only flash its scrollbar.
+    let Some(board) = ui
+        .scroll_container_data("board")
+        .filter(|b| b.content_dimensions.width > b.scroll_container_dimensions.width)
+    else {
+        return;
+    };
+    let (wheel_x, wheel_y) = mouse_wheel();
+    let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+    let dx = if shift { wheel_x + wheel_y } else { wheel_x } * 20.0;
+    if dx != 0.0 {
+        let pos = board.scroll_position;
+        ui.set_scroll_position("board", (-(pos.x + dx), -pos.y));
+    }
+}
+
 fn board_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    forward_board_scroll(ui, app);
     ui.element()
+        .id("board")
         .width(grow!())
         .height(grow!())
         .overflow(|o| {
