@@ -581,7 +581,14 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
             ui.text("Taskboard", |t| {
                 t.font_size(fs(18)).font(&BOLD).color(pal().text)
             });
+            // Last frame's width of the path's slot, which grows into whatever
+            // the buttons leave, so it doesn't depend on the path drawn in it.
+            let room = ui
+                .bounding_box("project_path")
+                .map(|b| (b.width / (fs(12) as f32 * PATH_CHAR_WIDTH)) as usize)
+                .unwrap_or(usize::MAX);
             ui.element()
+                .id("project_path")
                 .width(grow!())
                 .height(fit!())
                 .overflow(|o| o.clip_x())
@@ -592,6 +599,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                         .parent()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
+                    let root = shorten_path(&root, room.min(MAX_PATH_CHARS));
                     ui.text(&root, |t| {
                         t.font_size(fs(12))
                             .color(pal().muted)
@@ -644,6 +652,33 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 actions.push(Action::ClearFilters);
             }
         });
+}
+
+/// The longest project path the toolbar shows before collapsing it.
+const MAX_PATH_CHARS: usize = 30;
+/// A generous average glyph width for paths, as a fraction of the font size.
+const PATH_CHAR_WIDTH: f32 = 0.65;
+
+/// Collapses `path` to `…` plus as many trailing components (with their
+/// leading separator) as fit in `max_chars`. The last component is always
+/// kept, even if it alone is longer.
+fn shorten_path(path: &str, max_chars: usize) -> String {
+    const SEPARATORS: [char; 2] = ['/', '\\'];
+    if path.chars().count() <= max_chars {
+        return path.to_string();
+    }
+    let path = path.trim_end_matches(SEPARATORS);
+    let mut seps = path.rmatch_indices(SEPARATORS).map(|(i, _)| i);
+    let Some(mut start) = seps.next() else {
+        return path.to_string();
+    };
+    for sep in seps {
+        if path[sep..].chars().count() + 1 > max_chars {
+            break;
+        }
+        start = sep;
+    }
+    format!("…{}", &path[start..])
 }
 
 /// The toolbar's filter button, with the status and date filters in a
@@ -1933,4 +1968,46 @@ fn settings_modal(
                     }
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_paths_are_left_alone() {
+        assert_eq!(
+            shorten_path("/home/me/dev/taskboard", 30),
+            "/home/me/dev/taskboard"
+        );
+    }
+
+    #[test]
+    fn long_paths_keep_the_trailing_components_that_fit() {
+        let path = "/home/someone/projects/clients/acme/taskboard";
+        assert_eq!(shorten_path(path, 30), "…/clients/acme/taskboard");
+        assert_eq!(shorten_path(path, 20), "…/acme/taskboard");
+        assert!(shorten_path(path, 30).chars().count() <= 30);
+    }
+
+    #[test]
+    fn the_last_component_is_kept_even_if_too_long() {
+        assert_eq!(
+            shorten_path("/srv/a-very-long-project-name", 10),
+            "…/a-very-long-project-name"
+        );
+        assert_eq!(shorten_path("/srv/project/", 5), "…/project");
+        assert_eq!(
+            shorten_path("a-very-long-project-name", 10),
+            "a-very-long-project-name"
+        );
+    }
+
+    #[test]
+    fn windows_paths_collapse_at_backslashes() {
+        assert_eq!(
+            shorten_path(r"C:\Users\someone\projects\clients\taskboard", 22),
+            r"…\clients\taskboard"
+        );
+    }
 }
