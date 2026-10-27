@@ -907,6 +907,9 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
         })
         .layout(|l| l.direction(TopToBottom).padding(8).gap(8))
         .children(|ui| {
+            // The whole header collapses the column, like clicking its strip
+            // expands it; « just makes that visible. A click on a button also
+            // counts as a click on the header, so + has to opt out.
             ui.element()
                 .width(grow!())
                 .height(fixed!(px(28.0)))
@@ -917,6 +920,10 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         .padding((0, 0, 0, 4))
                 })
                 .children(|ui| {
+                    if ui.hovered() {
+                        state.pointer_cursor = true;
+                    }
+                    let header_clicked = ui.just_released();
                     ui.element()
                         .width(fixed!(8.0))
                         .height(fixed!(8.0))
@@ -931,11 +938,11 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                     });
                     count_badge(ui, tasks.len());
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
-                    if button(ui, state, "«", Style::Quiet) {
-                        actions.push(Action::ToggleColumn(status));
-                    }
+                    let collapse = button(ui, state, "«", Style::Quiet);
                     if button(ui, state, "+", Style::Quiet) {
                         actions.push(Action::Edit(EditTarget::New(status)));
+                    } else if collapse || header_clicked {
+                        actions.push(Action::ToggleColumn(status));
                     }
                 });
             ui.element()
@@ -1880,7 +1887,7 @@ fn settings_modal(
                         });
                     label(
                         ui,
-                        "Empty columns start as strips. « collapses any column; click a strip to expand it.",
+                        "Empty columns start as strips. Click a column's header or « to collapse it; click a strip to expand it.",
                     );
                     let saved_to = match &app.settings_path {
                         Some(p) => format!("Saved to {}", p.display()),
