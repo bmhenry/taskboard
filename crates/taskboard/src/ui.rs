@@ -41,6 +41,9 @@ pub struct Palette {
     panel: u32,
     card: u32,
     card_hover: u32,
+    /// Outline of cards and card-colored buttons, so they hold their shape
+    /// on a background close to their own color.
+    card_edge: u32,
     input: u32,
     border: u32,
     text: u32,
@@ -64,6 +67,7 @@ static DARK: Palette = Palette {
     panel: 0x1C1F26,
     card: 0x252932,
     card_hover: 0x2D323D,
+    card_edge: 0x252932,
     input: 0x111318,
     border: 0x343A46,
     text: 0xE6E8EE,
@@ -80,27 +84,29 @@ static DARK: Palette = Palette {
     error_bar: 0x3A1D1C,
 };
 
-/// Columns are a shade darker than the window so white cards stand out, and
-/// status colors are deeper than the dark theme's so they read on white.
+/// Neutral grays in the style of Apple's site: a white window, columns only a
+/// hair off white, and white cards held apart by thin edges rather than heavy
+/// fills. Status colors are deeper than the dark theme's so they read on white.
 static LIGHT: Palette = Palette {
-    bg: 0xF6F7F9,
-    panel: 0xE8EBF0,
+    bg: 0xFFFFFF,
+    panel: 0xF5F5F7,
     card: 0xFFFFFF,
-    card_hover: 0xF1F4F9,
+    card_hover: 0xEDEDF0,
+    card_edge: 0xDCDCE1,
     input: 0xFFFFFF,
-    border: 0xC3C9D3,
-    text: 0x1F2329,
-    muted: 0x5C6470,
-    accent: 0x1A66D2,
-    danger: 0xCF222E,
-    status: [0x6A737D, 0x1A66D2, 0x9A6700, 0x8250DF, 0xBF3989, 0x1A7F37],
-    primary: 0x1F6FEB,
-    primary_hover: 0x1A5FCC,
-    danger_button: 0xFFE1DE,
-    danger_button_hover: 0xFFCBC6,
-    danger_text: 0xA40E26,
-    danger_text_hover: 0x82071E,
-    error_bar: 0xFFE7E5,
+    border: 0xD2D2D7,
+    text: 0x1D1D1F,
+    muted: 0x6E6E73,
+    accent: 0x0071E3,
+    danger: 0xD70015,
+    status: [0x6E6E73, 0x0071E3, 0xB25F00, 0x8944AB, 0xC4307A, 0x248A3D],
+    primary: 0x0071E3,
+    primary_hover: 0x0062C4,
+    danger_button: 0xFFE5E5,
+    danger_button_hover: 0xFFD0D0,
+    danger_text: 0xB0000F,
+    danger_text_hover: 0x8A000C,
+    error_bar: 0xFFEBEB,
 };
 
 pub fn palette(theme: Theme) -> &'static Palette {
@@ -453,6 +459,13 @@ fn button(ui: &mut Ui, state: &mut UiState, label: &str, style: Style) -> bool {
                 .height(grow!())
                 .background_color(bg)
                 .corner_radius(6.0)
+                .border(|b| {
+                    b.all(1).color(if style == Style::Normal {
+                        pal().card_edge
+                    } else {
+                        bg
+                    })
+                })
                 .layout(|l| l.padding((0, 10, 0, 10)).align(CenterX, CenterY))
                 .children(|ui| {
                     ui.text(label, |t| {
@@ -1097,7 +1110,7 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
                     } else if dragged {
                         pal().border
                     } else {
-                        pal().card
+                        pal().card_edge
                     })
                 })
                 .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
