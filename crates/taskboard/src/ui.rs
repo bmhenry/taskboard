@@ -939,7 +939,8 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                     count_badge(ui, tasks.len());
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
                     let collapse = button(ui, state, "«", Style::Quiet);
-                    if button(ui, state, "+", Style::Quiet) {
+                    let add = button(ui, state, "+", Style::Quiet);
+                    if add {
                         actions.push(Action::Edit(EditTarget::New(status)));
                     } else if collapse || header_clicked {
                         actions.push(Action::ToggleColumn(status));
