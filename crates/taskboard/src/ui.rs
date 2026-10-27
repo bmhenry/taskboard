@@ -981,8 +981,12 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
         .width(grow!())
         .height(fit!())
         .children(|ui| {
-            let hovered = ui.hovered();
-            if ui.just_pressed() {
+            // Ply only tests a card against its nearest clip, the column's
+            // card list, whose box runs on past the board's edge and under
+            // the side panel. Check the board too, or hidden cards there
+            // would light up and take clicks meant for the panel.
+            let hovered = ui.hovered() && ui.pointer_over("board");
+            if hovered && ui.just_pressed() {
                 state.drag = Some(Drag {
                     id: task.id,
                     start: mouse_position(),
