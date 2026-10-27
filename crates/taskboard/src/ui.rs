@@ -899,6 +899,17 @@ fn collapsed_column(
     // The spine is laid out horizontally, then rotated about its center into
     // place along the top of the strip.
     let (strip_w, spine_len) = (px(34.0), px(180.0));
+    // Ply draws a rotated element into a texture with the screen's clip still
+    // applied, which wipes it out, so the spine floats free of the board's
+    // clip instead. Left unclipped it would draw over the side panel or the
+    // window edge once the board scrolls, so show it only while the whole
+    // strip is on the visible board (as of last frame's layout).
+    let spine_shown = match (ui.bounding_box(column_id(status)), ui.bounding_box("board")) {
+        (Some(strip), Some(board)) => {
+            strip.x >= board.x - 0.5 && strip.x + strip.width <= board.x + board.width + 0.5
+        }
+        _ => true,
+    };
     ui.element()
         .id(column_id(status))
         .width(fixed!(strip_w))
@@ -919,6 +930,9 @@ fn collapsed_column(
             }
             if ui.just_released() && !dragging {
                 actions.push(Action::ToggleColumn(status));
+            }
+            if !spine_shown {
+                return;
             }
             ui.element()
                 .width(fixed!(spine_len))
