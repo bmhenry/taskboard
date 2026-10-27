@@ -238,7 +238,7 @@ impl App {
                 let Some(target) = self.editing else {
                     return Ok(());
                 };
-                let id = match target {
+                match target {
                     EditTarget::Existing(id) => {
                         let patch = TaskPatch {
                             title: Some(title),
@@ -246,7 +246,7 @@ impl App {
                             status: None,
                         };
                         self.store.update(|b| b.edit(id, patch))?;
-                        id
+                        self.selected = Some(id);
                     }
                     EditTarget::New(status) => {
                         let new = NewTask {
@@ -255,11 +255,12 @@ impl App {
                             status: Some(status),
                             links: Vec::new(),
                         };
-                        self.store.update(|b| b.create(new))?
+                        self.store.update(|b| b.create(new))?;
+                        // A new task closes the panel rather than selecting it.
+                        self.selected = None;
                     }
-                };
+                }
                 self.editing = None;
-                self.selected = Some(id);
             }
             Action::Move {
                 id,
@@ -424,7 +425,7 @@ mod tests {
             title: title.into(),
             description: String::new(),
         });
-        app.selected.unwrap()
+        app.board.column(Status::Backlog).last().unwrap().id
     }
 
     #[test]
@@ -462,9 +463,27 @@ mod tests {
     }
 
     #[test]
+    fn saving_new_task_closes_panel_but_edit_keeps_selection() {
+        let (_dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        assert_eq!(app.error, None);
+        assert_eq!(app.editing, None);
+        assert_eq!(app.selected, None);
+
+        app.apply(Action::Edit(EditTarget::Existing(a)));
+        app.apply(Action::Save {
+            title: "alpha 2".into(),
+            description: String::new(),
+        });
+        assert_eq!(app.editing, None);
+        assert_eq!(app.selected_task().unwrap().title, "alpha 2");
+    }
+
+    #[test]
     fn selection_cleared_when_task_deleted_elsewhere() {
         let (_dir, mut app) = app();
         let a = add(&mut app, "alpha");
+        app.apply(Action::Select(Some(a)));
         app.store.delete(a).unwrap(); // as if `tb rm` ran
         app.reload();
         assert_eq!(app.selected, None);
