@@ -530,6 +530,33 @@ fn label(ui: &mut Ui, text: &str) {
     ui.text(text, |t| t.font_size(fs(12)).color(pal().muted));
 }
 
+/// A muted `prefix` followed by `path`, wrapping after any `/` so a long path
+/// stays within `width` (Ply only wraps text at whitespace).
+fn path_label(ui: &mut Ui, width: f32, prefix: &str, path: &str) {
+    // Ply wraps a growing row against its unshrunk width; give it its final width.
+    ui.element()
+        .width(fixed!(width))
+        .height(fit!())
+        .layout(|l| l.direction(LeftToRight).wrap())
+        .children(|ui| {
+            for word in prefix.split_inclusive(' ') {
+                label_segment(ui, word);
+            }
+            label_segment(ui, " ");
+            for part in path.split_inclusive('/') {
+                label_segment(ui, part);
+            }
+        });
+}
+
+fn label_segment(ui: &mut Ui, text: &str) {
+    ui.text(text, |t| {
+        t.font_size(fs(12))
+            .color(pal().muted)
+            .wrap_mode(WrapMode::None)
+    });
+}
+
 fn section_title(ui: &mut Ui, text: &str) {
     ui.element()
         .width(grow!())
@@ -1758,6 +1785,7 @@ fn settings_modal(
     (w, h): (f32, f32),
 ) {
     let size = app.settings.font_size;
+    let (dialog_w, pad) = (px(460.0).min(w * 0.9), 16);
     // Scrim covering the window; the dialog sits centered inside it.
     ui.element()
         .width(fixed!(w))
@@ -1767,13 +1795,13 @@ fn settings_modal(
         .layout(|l| l.align(CenterX, CenterY))
         .children(|ui| {
             ui.element()
-                .width(fixed!(px(460.0).min(w * 0.9)))
+                .width(fixed!(dialog_w))
                 .height(fit!(0.0, h * 0.85))
                 .background_color(pal().panel)
                 .corner_radius(10.0)
                 .border(|b| b.all(1).color(pal().border))
                 .overflow(|o| o.scroll_y())
-                .layout(|l| l.direction(TopToBottom).padding(16).gap(12))
+                .layout(|l| l.direction(TopToBottom).padding(pad).gap(12))
                 .children(|ui| {
                     ui.element()
                         .width(grow!())
@@ -1894,11 +1922,15 @@ fn settings_modal(
                         ui,
                         "Empty columns start as strips. Click a column's header or « to collapse it; click a strip to expand it.",
                     );
-                    let saved_to = match &app.settings_path {
-                        Some(p) => format!("Saved to {}", p.display()),
-                        None => "Not saved: neither XDG_CONFIG_HOME nor HOME is set.".to_string(),
-                    };
-                    label(ui, &saved_to);
+                    match &app.settings_path {
+                        Some(p) => path_label(
+                            ui,
+                            dialog_w - 2.0 * pad as f32,
+                            "Saved to",
+                            &p.display().to_string(),
+                        ),
+                        None => label(ui, "Not saved: neither XDG_CONFIG_HOME nor HOME is set."),
+                    }
                 });
         });
 }
