@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use ply_engine::ElementBuilder;
 use ply_engine::layout::Sizing;
 use ply_engine::prelude::*;
-use taskboard_core::settings::DEFAULT_FONT_SIZE;
+use taskboard_core::settings::{DEFAULT_FONT_SIZE, Theme};
 use taskboard_core::{Attachment, DateField, FileKind, LinkKind, Status, Task, Ulid};
 
 use crate::app::{Action, App, DRAG_THRESHOLD, Drag, EditTarget, View, drop_index, drop_position};
@@ -34,16 +34,81 @@ static MONO: FontAsset = FontAsset::Bytes {
     data: include_bytes!("../assets/fonts/DejaVuSansMono.ttf"),
 };
 
-pub const BG: u32 = 0x15171C;
-const PANEL: u32 = 0x1C1F26;
-const CARD: u32 = 0x252932;
-const CARD_HOVER: u32 = 0x2D323D;
-const INPUT: u32 = 0x111318;
-const BORDER: u32 = 0x343A46;
-const TEXT: u32 = 0xE6E8EE;
-const MUTED: u32 = 0x8F96A3;
-const ACCENT: u32 = 0x6EA8FE;
-const DANGER: u32 = 0xE5534B;
+/// The colors the UI draws with, one set per [`Theme`].
+pub struct Palette {
+    /// Window background, behind the panels.
+    pub bg: u32,
+    panel: u32,
+    card: u32,
+    card_hover: u32,
+    input: u32,
+    border: u32,
+    text: u32,
+    muted: u32,
+    accent: u32,
+    danger: u32,
+    /// Indexed like [`Status::ALL`].
+    status: [u32; 6],
+    primary: u32,
+    primary_hover: u32,
+    danger_button: u32,
+    danger_button_hover: u32,
+    /// Text on the danger button and the error bar.
+    danger_text: u32,
+    danger_text_hover: u32,
+    error_bar: u32,
+}
+
+static DARK: Palette = Palette {
+    bg: 0x15171C,
+    panel: 0x1C1F26,
+    card: 0x252932,
+    card_hover: 0x2D323D,
+    input: 0x111318,
+    border: 0x343A46,
+    text: 0xE6E8EE,
+    muted: 0x8F96A3,
+    accent: 0x6EA8FE,
+    danger: 0xE5534B,
+    status: [0x8F96A3, 0x6EA8FE, 0xE3B341, 0xD2A8FF, 0xF778BA, 0x56D364],
+    primary: 0x2F5FAE,
+    primary_hover: 0x3A71CC,
+    danger_button: 0x5A2422,
+    danger_button_hover: 0x7A2E2A,
+    danger_text: 0xFFD7D4,
+    danger_text_hover: 0xFFFFFF,
+    error_bar: 0x3A1D1C,
+};
+
+/// Columns are a shade darker than the window so white cards stand out, and
+/// status colors are deeper than the dark theme's so they read on white.
+static LIGHT: Palette = Palette {
+    bg: 0xF6F7F9,
+    panel: 0xE8EBF0,
+    card: 0xFFFFFF,
+    card_hover: 0xF1F4F9,
+    input: 0xFFFFFF,
+    border: 0xC3C9D3,
+    text: 0x1F2329,
+    muted: 0x5C6470,
+    accent: 0x1A66D2,
+    danger: 0xCF222E,
+    status: [0x6A737D, 0x1A66D2, 0x9A6700, 0x8250DF, 0xBF3989, 0x1A7F37],
+    primary: 0x1F6FEB,
+    primary_hover: 0x1A5FCC,
+    danger_button: 0xFFE1DE,
+    danger_button_hover: 0xFFCBC6,
+    danger_text: 0xA40E26,
+    danger_text_hover: 0x82071E,
+    error_bar: 0xFFE7E5,
+};
+
+pub fn palette(theme: Theme) -> &'static Palette {
+    match theme {
+        Theme::Dark => &DARK,
+        Theme::Light => &LIGHT,
+    }
+}
 
 /// Unscaled minimum width of the status dropdown's list.
 const STATUS_MENU_MIN_WIDTH: f32 = 160.0;
@@ -57,6 +122,12 @@ const BASE_FONT_SIZE: f32 = 14.0;
 
 thread_local! {
     static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+    static PALETTE: std::cell::Cell<&'static Palette> = const { std::cell::Cell::new(&DARK) };
+}
+
+/// This frame's colors, from the theme setting.
+fn pal() -> &'static Palette {
+    PALETTE.get()
 }
 
 /// Scales a font size (or other text metric) designed for the base size.
@@ -70,14 +141,7 @@ fn px(n: f32) -> f32 {
 }
 
 fn status_color(status: Status) -> u32 {
-    match status {
-        Status::Open => 0x8F96A3,
-        Status::Backlog => 0x6EA8FE,
-        Status::InProgress => 0xE3B341,
-        Status::NeedsReview => 0xD2A8FF,
-        Status::InReview => 0xF778BA,
-        Status::Closed => 0x56D364,
-    }
+    pal().status[status_index(status) as usize]
 }
 
 fn status_index(status: Status) -> u32 {
@@ -123,6 +187,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     let mut actions = Vec::new();
     state.pointer_cursor = false;
     SCALE.set(app.settings.font_size as f32 / BASE_FONT_SIZE);
+    PALETTE.set(palette(app.settings.theme));
     if !app.settings_open {
         state.show_keybindings = false;
     }
@@ -154,7 +219,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     ui.element()
         .width(fixed!(w))
         .height(fixed!(h))
-        .background_color(BG)
+        .background_color(pal().bg)
         .layout(|l| l.direction(TopToBottom))
         .children(|ui| {
             toolbar(ui, app, state, &mut actions);
@@ -374,14 +439,14 @@ fn button(ui: &mut Ui, state: &mut UiState, label: &str, style: Style) -> bool {
                 state.pointer_cursor = true;
             }
             let (bg, fg) = match (style, hovered) {
-                (Style::Primary, false) => (0x2F5FAE, 0xFFFFFF),
-                (Style::Primary, true) => (0x3A71CC, 0xFFFFFF),
-                (Style::Danger, false) => (0x5A2422, 0xFFD7D4),
-                (Style::Danger, true) => (0x7A2E2A, 0xFFFFFF),
-                (Style::Quiet, false) => (PANEL, MUTED),
-                (Style::Quiet, true) => (CARD_HOVER, TEXT),
-                (Style::Normal, false) => (CARD, TEXT),
-                (Style::Normal, true) => (CARD_HOVER, TEXT),
+                (Style::Primary, false) => (pal().primary, 0xFFFFFF),
+                (Style::Primary, true) => (pal().primary_hover, 0xFFFFFF),
+                (Style::Danger, false) => (pal().danger_button, pal().danger_text),
+                (Style::Danger, true) => (pal().danger_button_hover, pal().danger_text_hover),
+                (Style::Quiet, false) => (pal().panel, pal().muted),
+                (Style::Quiet, true) => (pal().card_hover, pal().text),
+                (Style::Normal, false) => (pal().card, pal().text),
+                (Style::Normal, true) => (pal().card_hover, pal().text),
             };
             ui.element()
                 .width(fit!())
@@ -405,7 +470,7 @@ fn chip(ui: &mut Ui, state: &mut UiState, label: &str, color: u32, on: bool) -> 
         .width(fit!())
         .height(fixed!(px(26.0)))
         .corner_radius(px(13.0))
-        .background_color(if on { color } else { PANEL })
+        .background_color(if on { color } else { pal().panel })
         .border(|b| b.all(1).color(color))
         .layout(|l| l.padding((0, fs(12), 0, fs(12))).align(CenterX, CenterY))
         .children(|ui| {
@@ -415,7 +480,7 @@ fn chip(ui: &mut Ui, state: &mut UiState, label: &str, color: u32, on: bool) -> 
             }
             ui.text(label, |t| {
                 t.font_size(fs(12))
-                    .color(if on { BG } else { color })
+                    .color(if on { pal().bg } else { color })
                     .wrap_mode(WrapMode::None)
             });
         });
@@ -434,9 +499,12 @@ fn input_frame(
     ui.element()
         .width(width)
         .height(height)
-        .background_color(INPUT)
+        .background_color(pal().input)
         .corner_radius(6.0)
-        .border(|b| b.all(1).color(if invalid { DANGER } else { BORDER }))
+        .border(|b| {
+            b.all(1)
+                .color(if invalid { pal().danger } else { pal().border })
+        })
         .layout(|l| l.padding((7, 8, 7, 8)))
         .children(input);
 }
@@ -450,16 +518,16 @@ fn text_input(ui: &mut Ui, id: &'static str, placeholder: &str, width: Sizing, i
             .text_input(|t| {
                 t.placeholder(placeholder)
                     .font_size(fs(14))
-                    .text_color(TEXT)
-                    .placeholder_color(MUTED)
-                    .cursor_color(ACCENT)
+                    .text_color(pal().text)
+                    .placeholder_color(pal().muted)
+                    .cursor_color(pal().accent)
             })
             .empty();
     });
 }
 
 fn label(ui: &mut Ui, text: &str) {
-    ui.text(text, |t| t.font_size(fs(12)).color(MUTED));
+    ui.text(text, |t| t.font_size(fs(12)).color(pal().muted));
 }
 
 fn section_title(ui: &mut Ui, text: &str) {
@@ -468,7 +536,7 @@ fn section_title(ui: &mut Ui, text: &str) {
         .height(fit!())
         .layout(|l| l.padding((8, 0, 2, 0)))
         .children(|ui| {
-            ui.text(text, |t| t.font_size(fs(13)).font(&BOLD).color(MUTED));
+            ui.text(text, |t| t.font_size(fs(13)).font(&BOLD).color(pal().muted));
         });
 }
 
@@ -483,7 +551,9 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 .align(Left, CenterY)
         })
         .children(|ui| {
-            ui.text("Taskboard", |t| t.font_size(fs(18)).font(&BOLD).color(TEXT));
+            ui.text("Taskboard", |t| {
+                t.font_size(fs(18)).font(&BOLD).color(pal().text)
+            });
             ui.element()
                 .width(grow!())
                 .height(fit!())
@@ -496,7 +566,9 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
                     ui.text(&root, |t| {
-                        t.font_size(fs(12)).color(MUTED).wrap_mode(WrapMode::None)
+                        t.font_size(fs(12))
+                            .color(pal().muted)
+                            .wrap_mode(WrapMode::None)
                     });
                 });
             for (view, name) in [(View::Board, "Board"), (View::List, "List")] {
@@ -593,9 +665,9 @@ fn dropdown<'a>(ui: &'a mut Ui, id: &'static str, shift: f32, up: bool) -> Eleme
                 f.anchor((Left, Top), (Left, Bottom)).offset((shift, 4.0))
             }
         })
-        .background_color(PANEL)
+        .background_color(pal().panel)
         .corner_radius(8.0)
-        .border(|b| b.all(1).color(BORDER))
+        .border(|b| b.all(1).color(pal().border))
 }
 
 fn filter_menu(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
@@ -676,7 +748,7 @@ fn error_bar(ui: &mut Ui, err: &str, actions: &mut Vec<Action>) {
     ui.element()
         .width(grow!())
         .height(fit!())
-        .background_color(0x3A1D1C)
+        .background_color(pal().error_bar)
         .layout(|l| {
             l.direction(LeftToRight)
                 .padding((8, 12, 8, 12))
@@ -685,13 +757,13 @@ fn error_bar(ui: &mut Ui, err: &str, actions: &mut Vec<Action>) {
         })
         .children(|ui| {
             ui.element().width(grow!()).height(fit!()).children(|ui| {
-                ui.text(err, |t| t.font_size(fs(13)).color(0xFFD7D4));
+                ui.text(err, |t| t.font_size(fs(13)).color(pal().danger_text));
             });
             ui.element().width(fit!()).height(fit!()).children(|ui| {
                 if ui.just_released() {
                     actions.push(Action::DismissError);
                 }
-                ui.text("Dismiss", |t| t.font_size(fs(13)).color(TEXT));
+                ui.text("Dismiss", |t| t.font_size(fs(13)).color(pal().text));
             });
         });
 }
@@ -736,7 +808,7 @@ fn board_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Act
         .overflow(|o| {
             o.scroll_x()
                 .no_drag_scroll()
-                .scrollbar(|s| s.width(6.0).thumb_color(BORDER).hide_after_frames(90))
+                .scrollbar(|s| s.width(6.0).thumb_color(pal().border).hide_after_frames(90))
         })
         .layout(|l| l.direction(LeftToRight).gap(10))
         .children(|ui| {
@@ -769,11 +841,15 @@ fn collapsed_column(
         .id(column_id(status))
         .width(fixed!(strip_w))
         .height(grow!())
-        .background_color(PANEL)
+        .background_color(pal().panel)
         .corner_radius(8.0)
         .border(|b| {
             b.all(if drop_target { 2 } else { 1 })
-                .color(if drop_target { ACCENT } else { PANEL })
+                .color(if drop_target {
+                    pal().accent
+                } else {
+                    pal().panel
+                })
         })
         .children(|ui| {
             if ui.hovered() {
@@ -803,7 +879,7 @@ fn collapsed_column(
                     ui.text(status.label(), |t| {
                         t.font_size(fs(14))
                             .font(&BOLD)
-                            .color(TEXT)
+                            .color(pal().text)
                             .wrap_mode(WrapMode::None)
                     });
                     count_badge(ui, count);
@@ -819,11 +895,15 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
         .id(column_id(status))
         .width(grow!(px(210.0)))
         .height(grow!())
-        .background_color(PANEL)
+        .background_color(pal().panel)
         .corner_radius(8.0)
         .border(|b| {
             b.all(if drop_target { 2 } else { 1 })
-                .color(if drop_target { ACCENT } else { PANEL })
+                .color(if drop_target {
+                    pal().accent
+                } else {
+                    pal().panel
+                })
         })
         .layout(|l| l.direction(TopToBottom).padding(8).gap(8))
         .children(|ui| {
@@ -846,7 +926,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                     ui.text(status.label(), |t| {
                         t.font_size(fs(14))
                             .font(&BOLD)
-                            .color(TEXT)
+                            .color(pal().text)
                             .wrap_mode(WrapMode::None)
                     });
                     count_badge(ui, tasks.len());
@@ -865,7 +945,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                 .overflow(|o| {
                     o.scroll_y()
                         .no_drag_scroll()
-                        .scrollbar(|s| s.width(4.0).thumb_color(BORDER).hide_after_frames(90))
+                        .scrollbar(|s| s.width(4.0).thumb_color(pal().border).hide_after_frames(90))
                 })
                 .layout(|l| l.direction(TopToBottom).gap(8))
                 .children(|ui| {
@@ -882,11 +962,13 @@ fn count_badge(ui: &mut Ui, count: usize) {
         .width(fit!())
         .height(fixed!(px(18.0)))
         .corner_radius(px(9.0))
-        .background_color(CARD)
+        .background_color(pal().card)
         .layout(|l| l.padding((0, fs(7), 0, fs(7))).align(CenterX, CenterY))
         .children(|ui| {
             ui.text(&count.to_string(), |t| {
-                t.font_size(fs(12)).color(MUTED).wrap_mode(WrapMode::None)
+                t.font_size(fs(12))
+                    .color(pal().muted)
+                    .wrap_mode(WrapMode::None)
             });
         });
 }
@@ -914,20 +996,20 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
                 .width(grow!())
                 .height(fit!())
                 .background_color(if dragged {
-                    PANEL
+                    pal().panel
                 } else if hovered {
-                    CARD_HOVER
+                    pal().card_hover
                 } else {
-                    CARD
+                    pal().card
                 })
                 .corner_radius(6.0)
                 .border(|b| {
                     b.all(1).color(if selected {
-                        ACCENT
+                        pal().accent
                     } else if dragged {
-                        BORDER
+                        pal().border
                     } else {
-                        CARD
+                        pal().card
                     })
                 })
                 .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
@@ -937,7 +1019,8 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
 
 fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
     ui.text(&task.title, |t| {
-        t.font_size(fs(14)).color(if faded { MUTED } else { TEXT })
+        t.font_size(fs(14))
+            .color(if faded { pal().muted } else { pal().text })
     });
     ui.element()
         .width(grow!())
@@ -947,17 +1030,21 @@ fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
             ui.text(&task.short_id(), |t| {
                 t.font_size(fs(11))
                     .font(&MONO)
-                    .color(MUTED)
+                    .color(pal().muted)
                     .wrap_mode(WrapMode::None)
             });
             if !task.links.is_empty() {
                 ui.text(&plural(task.links.len(), "link"), |t| {
-                    t.font_size(fs(11)).color(MUTED).wrap_mode(WrapMode::None)
+                    t.font_size(fs(11))
+                        .color(pal().muted)
+                        .wrap_mode(WrapMode::None)
                 });
             }
             if !task.files.is_empty() {
                 ui.text(&plural(task.files.len(), "file"), |t| {
-                    t.font_size(fs(11)).color(MUTED).wrap_mode(WrapMode::None)
+                    t.font_size(fs(11))
+                        .color(pal().muted)
+                        .wrap_mode(WrapMode::None)
                 });
             }
         });
@@ -982,9 +1069,9 @@ fn drag_ghost(ui: &mut Ui, task: &Task) {
                 .z_index(100)
                 .passthrough()
         })
-        .background_color(CARD_HOVER)
+        .background_color(pal().card_hover)
         .corner_radius(6.0)
-        .border(|b| b.all(1).color(ACCENT))
+        .border(|b| b.all(1).color(pal().accent))
         .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
         .children(|ui| card_body(ui, task, false));
 }
@@ -994,7 +1081,7 @@ fn list_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Acti
     ui.element()
         .width(grow!())
         .height(grow!())
-        .background_color(PANEL)
+        .background_color(pal().panel)
         .corner_radius(8.0)
         .layout(|l| l.direction(TopToBottom).padding(8))
         .children(|ui| {
@@ -1005,7 +1092,7 @@ fn list_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Acti
                 .height(grow!())
                 .overflow(|o| {
                     o.scroll_y()
-                        .scrollbar(|s| s.width(4.0).thumb_color(BORDER).hide_after_frames(90))
+                        .scrollbar(|s| s.width(4.0).thumb_color(pal().border).hide_after_frames(90))
                 })
                 .layout(|l| l.direction(TopToBottom))
                 .children(|ui| {
@@ -1015,7 +1102,9 @@ fn list_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Acti
                             .height(fit!())
                             .layout(|l| l.padding(16))
                             .children(|ui| {
-                                ui.text("No tasks match.", |t| t.font_size(fs(14)).color(MUTED));
+                                ui.text("No tasks match.", |t| {
+                                    t.font_size(fs(14)).color(pal().muted)
+                                });
                             });
                     }
                     for task in tasks {
@@ -1054,7 +1143,7 @@ fn list_row(
         clicked = !header && ui.just_released();
         let color = match &status {
             Some((s, _)) => status_color(*s),
-            None => MUTED,
+            None => pal().muted,
         };
         if let Some((_, state)) = status {
             state.pointer_cursor |= hovered;
@@ -1063,11 +1152,11 @@ fn list_row(
             .width(grow!())
             .height(fit!())
             .background_color(if selected {
-                CARD_HOVER
+                pal().card_hover
             } else if hovered {
-                CARD
+                pal().card
             } else {
-                PANEL
+                pal().panel
             })
             .corner_radius(4.0)
             .layout(|l| {
@@ -1088,18 +1177,21 @@ fn list_row(
                     .width(fixed!(px(90.0)))
                     .height(fit!())
                     .children(|ui| {
-                        ui.text(cells[1], |t| t.font_size(size).font(&MONO).color(MUTED));
+                        ui.text(cells[1], |t| {
+                            t.font_size(size).font(&MONO).color(pal().muted)
+                        });
                     });
                 ui.element().width(grow!()).height(fit!()).children(|ui| {
                     ui.text(cells[2], |t| {
-                        t.font_size(size).color(if header { MUTED } else { TEXT })
+                        t.font_size(size)
+                            .color(if header { pal().muted } else { pal().text })
                     });
                 });
                 ui.element()
                     .width(fixed!(px(140.0)))
                     .height(fit!())
                     .children(|ui| {
-                        ui.text(cells[3], |t| t.font_size(size).color(MUTED));
+                        ui.text(cells[3], |t| t.font_size(size).color(pal().muted));
                     });
             });
     });
@@ -1115,11 +1207,11 @@ fn side_panel(ui: &mut Ui, id: &'static str, body: impl FnOnce(&mut Ui)) {
                 .min(screen_width() * 0.6)
         ))
         .height(grow!())
-        .background_color(PANEL)
+        .background_color(pal().panel)
         .corner_radius(8.0)
         .overflow(|o| {
             o.scroll_y()
-                .scrollbar(|s| s.width(4.0).thumb_color(BORDER).hide_after_frames(90))
+                .scrollbar(|s| s.width(4.0).thumb_color(pal().border).hide_after_frames(90))
         })
         .layout(|l| l.direction(TopToBottom).padding(16).gap(10))
         .children(body);
@@ -1134,7 +1226,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
             .children(|ui| {
                 status_dot(ui, task.status);
                 ui.text(&task.short_id(), |t| {
-                    t.font_size(fs(12)).font(&MONO).color(MUTED)
+                    t.font_size(fs(12)).font(&MONO).color(pal().muted)
                 });
                 ui.element().width(grow!()).height(fixed!(1.0)).empty();
                 if button(ui, state, "Edit", Style::Normal) {
@@ -1153,7 +1245,9 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                 }
             });
 
-        ui.text(&task.title, |t| t.font_size(fs(20)).font(&BOLD).color(TEXT));
+        ui.text(&task.title, |t| {
+            t.font_size(fs(20)).font(&BOLD).color(pal().text)
+        });
 
         status_dropdown(ui, task, state, actions);
 
@@ -1187,9 +1281,9 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                 .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
                 .children(|ui| {
                     let kind_color = if link.kind == LinkKind::Source {
-                        0xE3B341
+                        status_color(Status::InProgress)
                     } else {
-                        MUTED
+                        pal().muted
                     };
                     ui.text(&link.kind.to_string(), |t| {
                         t.font_size(fs(11)).color(kind_color)
@@ -1201,8 +1295,11 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                             actions.push(Action::OpenUrl(link.url.clone()));
                         }
                         ui.text(link.display_text(), |t| {
-                            t.font_size(fs(13))
-                                .color(if hovered { TEXT } else { ACCENT })
+                            t.font_size(fs(13)).color(if hovered {
+                                pal().text
+                            } else {
+                                pal().accent
+                            })
                         });
                     });
                     if button(ui, state, "×", Style::Quiet) {
@@ -1250,7 +1347,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                         FileKind::Markdown => "md",
                         FileKind::Text => "text",
                     };
-                    ui.text(kind, |t| t.font_size(fs(11)).color(MUTED));
+                    ui.text(kind, |t| t.font_size(fs(11)).color(pal().muted));
                     ui.element().width(grow!()).height(fit!()).children(|ui| {
                         let hovered = ui.hovered();
                         state.pointer_cursor |= hovered;
@@ -1258,8 +1355,11 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                             actions.push(Action::ViewFile(Some((task.id, att.id))));
                         }
                         ui.text(&att.name, |t| {
-                            t.font_size(fs(13))
-                                .color(if hovered { TEXT } else { ACCENT })
+                            t.font_size(fs(13)).color(if hovered {
+                                pal().text
+                            } else {
+                                pal().accent
+                            })
                         });
                     });
                     if button(ui, state, "×", Style::Quiet) {
@@ -1325,7 +1425,11 @@ fn status_dropdown(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut 
                     ui.element()
                         .width(fit!())
                         .height(grow!())
-                        .background_color(if hovered { CARD_HOVER } else { CARD })
+                        .background_color(if hovered {
+                            pal().card_hover
+                        } else {
+                            pal().card
+                        })
                         .corner_radius(6.0)
                         .border(|b| b.all(1).color(status_color(task.status)))
                         .layout(|l| {
@@ -1341,7 +1445,7 @@ fn status_dropdown(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut 
                                     .color(status_color(task.status))
                                     .wrap_mode(WrapMode::None)
                             });
-                            ui.text("▾", |t| t.font_size(fs(13)).color(MUTED));
+                            ui.text("▾", |t| t.font_size(fs(13)).color(pal().muted));
                         });
                 });
             if state.status_open == Some(task.id) {
@@ -1381,11 +1485,11 @@ fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<
                         let hovered = ui.hovered();
                         state.pointer_cursor |= hovered;
                         let bg = if hovered {
-                            CARD_HOVER
+                            pal().card_hover
                         } else if task.status == status {
-                            CARD
+                            pal().card
                         } else {
-                            PANEL
+                            pal().panel
                         };
                         ui.element()
                             .width(grow!())
@@ -1417,7 +1521,9 @@ fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<A
         _ => "Edit task".to_string(),
     };
     side_panel(ui, "editor", |ui| {
-        ui.text(&heading, |t| t.font_size(fs(18)).font(&BOLD).color(TEXT));
+        ui.text(&heading, |t| {
+            t.font_size(fs(18)).font(&BOLD).color(pal().text)
+        });
         label(ui, "Title");
         text_input(ui, "edit_title", "What needs doing?", grow!(), false);
         label(ui, "Description (Markdown)");
@@ -1431,10 +1537,10 @@ fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<A
                         .drag_select()
                         .font(&MONO)
                         .font_size(fs(13))
-                        .text_color(TEXT)
+                        .text_color(pal().text)
                         .placeholder("Details, acceptance criteria, notes…")
-                        .placeholder_color(MUTED)
-                        .cursor_color(ACCENT)
+                        .placeholder_color(pal().muted)
+                        .cursor_color(pal().accent)
                 })
                 .empty();
         });
@@ -1468,11 +1574,13 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                     .height(fit!())
                     .layout(|l| l.padding((4, 0, 0, 0)))
                     .children(|ui| {
-                        ui.text(&block.text, |t| t.font_size(size).font(&BOLD).color(TEXT));
+                        ui.text(&block.text, |t| {
+                            t.font_size(size).font(&BOLD).color(pal().text)
+                        });
                     });
             }
             BlockKind::Paragraph => ui.text(&block.text, |t| {
-                t.font_size(fs(14)).line_height(fs(20)).color(TEXT)
+                t.font_size(fs(14)).line_height(fs(20)).color(pal().text)
             }),
             BlockKind::ListItem { depth, marker } => {
                 ui.element()
@@ -1491,11 +1599,11 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                             .width(fixed!(px(18.0)))
                             .height(fit!())
                             .children(|ui| {
-                                ui.text(&marker, |t| t.font_size(fs(14)).color(MUTED));
+                                ui.text(&marker, |t| t.font_size(fs(14)).color(pal().muted));
                             });
                         ui.element().width(grow!()).height(fit!()).children(|ui| {
                             ui.text(&block.text, |t| {
-                                t.font_size(fs(14)).line_height(fs(20)).color(TEXT)
+                                t.font_size(fs(14)).line_height(fs(20)).color(pal().text)
                             });
                         });
                     });
@@ -1504,7 +1612,7 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                 ui.element()
                     .width(grow!())
                     .height(fit!())
-                    .background_color(INPUT)
+                    .background_color(pal().input)
                     .corner_radius(6.0)
                     .layout(|l| l.padding(10))
                     .children(|ui| {
@@ -1512,7 +1620,7 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                             t.font_size(fs(13))
                                 .font(&MONO)
                                 .line_height(fs(18))
-                                .color(TEXT)
+                                .color(pal().text)
                         });
                     });
             }
@@ -1520,11 +1628,11 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                 ui.element()
                     .width(grow!())
                     .height(fit!())
-                    .border(|b| b.left(3).color(BORDER))
+                    .border(|b| b.left(3).color(pal().border))
                     .layout(|l| l.padding((2, 0, 2, 12)))
                     .children(|ui| {
                         ui.text(&block.text, |t| {
-                            t.font_size(fs(14)).line_height(fs(20)).color(MUTED)
+                            t.font_size(fs(14)).line_height(fs(20)).color(pal().muted)
                         })
                     });
             }
@@ -1532,7 +1640,7 @@ fn render_markdown(ui: &mut Ui, src: &str) {
                 ui.element()
                     .width(grow!())
                     .height(fixed!(1.0))
-                    .background_color(BORDER)
+                    .background_color(pal().border)
                     .empty();
             }
         }
@@ -1559,9 +1667,9 @@ fn file_viewer(
             ui.element()
                 .width(fixed!((w * 0.8).min(1100.0)))
                 .height(fixed!(h * 0.85))
-                .background_color(PANEL)
+                .background_color(pal().panel)
                 .corner_radius(10.0)
-                .border(|b| b.all(1).color(BORDER))
+                .border(|b| b.all(1).color(pal().border))
                 .layout(|l| l.direction(TopToBottom).padding(16).gap(12))
                 .children(|ui| {
                     ui.element()
@@ -1569,7 +1677,9 @@ fn file_viewer(
                         .height(fit!())
                         .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
                         .children(|ui| {
-                            ui.text(&att.name, |t| t.font_size(fs(16)).font(&BOLD).color(TEXT));
+                            ui.text(&att.name, |t| {
+                                t.font_size(fs(16)).font(&BOLD).color(pal().text)
+                            });
                             ui.element().width(grow!()).height(fixed!(1.0)).empty();
                             if button(ui, state, "Close", Style::Normal) {
                                 actions.push(Action::ViewFile(None));
@@ -1579,7 +1689,10 @@ fn file_viewer(
                         .id("file_body")
                         .width(grow!())
                         .height(grow!())
-                        .overflow(|o| o.scroll().scrollbar(|s| s.width(6.0).thumb_color(BORDER)))
+                        .overflow(|o| {
+                            o.scroll()
+                                .scrollbar(|s| s.width(6.0).thumb_color(pal().border))
+                        })
                         .layout(|l| l.direction(TopToBottom).gap(8))
                         .children(|ui| match att.kind {
                             FileKind::Image => {
@@ -1615,7 +1728,7 @@ fn file_viewer(
                                         t.font_size(fs(13))
                                             .font(&MONO)
                                             .line_height(fs(18))
-                                            .color(TEXT)
+                                            .color(pal().text)
                                             .wrap_mode(WrapMode::Newline)
                                     });
                                 }
@@ -1644,9 +1757,9 @@ fn settings_modal(
             ui.element()
                 .width(fixed!(px(460.0).min(w * 0.9)))
                 .height(fit!(0.0, h * 0.85))
-                .background_color(PANEL)
+                .background_color(pal().panel)
                 .corner_radius(10.0)
-                .border(|b| b.all(1).color(BORDER))
+                .border(|b| b.all(1).color(pal().border))
                 .overflow(|o| o.scroll_y())
                 .layout(|l| l.direction(TopToBottom).padding(16).gap(12))
                 .children(|ui| {
@@ -1660,7 +1773,7 @@ fn settings_modal(
                             } else {
                                 "Settings"
                             };
-                            ui.text(title, |t| t.font_size(fs(16)).font(&BOLD).color(TEXT));
+                            ui.text(title, |t| t.font_size(fs(16)).font(&BOLD).color(pal().text));
                             ui.element().width(grow!()).height(fixed!(1.0)).empty();
                             let toggle = if state.show_keybindings {
                                 "⚙ Settings"
@@ -1686,11 +1799,11 @@ fn settings_modal(
                                         .height(fit!())
                                         .children(|ui| {
                                             ui.text(keys, |t| {
-                                                t.font_size(fs(13)).font(&MONO).color(ACCENT)
+                                                t.font_size(fs(13)).font(&MONO).color(pal().accent)
                                             });
                                         });
                                     ui.element().width(grow!()).height(fit!()).children(|ui| {
-                                        ui.text(what, |t| t.font_size(fs(14)).color(TEXT));
+                                        ui.text(what, |t| t.font_size(fs(14)).color(pal().text));
                                     });
                                 });
                         }
@@ -1703,7 +1816,26 @@ fn settings_modal(
                         .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
                         .children(|ui| {
                             ui.element().width(grow!()).height(fit!()).children(|ui| {
-                                ui.text("Font size", |t| t.font_size(fs(14)).color(TEXT));
+                                ui.text("Theme", |t| t.font_size(fs(14)).color(pal().text));
+                            });
+                            for (theme, name) in [(Theme::Dark, "Dark"), (Theme::Light, "Light")] {
+                                let style = if app.settings.theme == theme {
+                                    Style::Primary
+                                } else {
+                                    Style::Normal
+                                };
+                                if button(ui, state, name, style) {
+                                    actions.push(Action::SetTheme(theme));
+                                }
+                            }
+                        });
+                    ui.element()
+                        .width(grow!())
+                        .height(fit!())
+                        .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                        .children(|ui| {
+                            ui.element().width(grow!()).height(fit!()).children(|ui| {
+                                ui.text("Font size", |t| t.font_size(fs(14)).color(pal().text));
                             });
                             if button(ui, state, "−", Style::Normal) {
                                 actions.push(Action::SetFontSize(size - 1));
@@ -1714,7 +1846,7 @@ fn settings_modal(
                                 .layout(|l| l.align(CenterX, CenterY))
                                 .children(|ui| {
                                     ui.text(&size.to_string(), |t| {
-                                        t.font_size(fs(14)).font(&MONO).color(TEXT)
+                                        t.font_size(fs(14)).font(&MONO).color(pal().text)
                                     });
                                 });
                             if button(ui, state, "+", Style::Normal) {
@@ -1734,7 +1866,7 @@ fn settings_modal(
                         .children(|ui| {
                             ui.element().width(grow!()).height(fit!()).children(|ui| {
                                 ui.text("Collapse empty columns", |t| {
-                                    t.font_size(fs(14)).color(TEXT)
+                                    t.font_size(fs(14)).color(pal().text)
                                 });
                             });
                             let (text, style) = if collapse {

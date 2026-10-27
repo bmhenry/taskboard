@@ -17,6 +17,15 @@ pub const MIN_FONT_SIZE: u16 = 10;
 pub const MAX_FONT_SIZE: u16 = 28;
 pub const DEFAULT_FONT_SIZE: u16 = 14;
 
+/// The GUI's color scheme.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalSettings {
@@ -24,6 +33,8 @@ pub struct GlobalSettings {
     pub font_size: u16,
     /// Draw board columns for statuses with no tasks as thin strips.
     pub collapse_empty_columns: bool,
+    /// Light or dark colors in the GUI.
+    pub theme: Theme,
 }
 
 impl Default for GlobalSettings {
@@ -31,6 +42,7 @@ impl Default for GlobalSettings {
         GlobalSettings {
             font_size: DEFAULT_FONT_SIZE,
             collapse_empty_columns: true,
+            theme: Theme::Dark,
         }
     }
 }
@@ -120,6 +132,7 @@ mod tests {
         let s = GlobalSettings {
             font_size: 18,
             collapse_empty_columns: false,
+            theme: Theme::Light,
         };
         s.save(&path).unwrap();
         assert_eq!(GlobalSettings::load(&path).unwrap(), s);
@@ -134,6 +147,13 @@ mod tests {
             GlobalSettings::load(&path).unwrap(),
             GlobalSettings::default()
         );
+        // Files from before the theme setting keep loading, as dark.
+        fs::write(
+            &path,
+            r#"{"font_size": 16, "collapse_empty_columns": false}"#,
+        )
+        .unwrap();
+        assert_eq!(GlobalSettings::load(&path).unwrap().theme, Theme::Dark);
         fs::write(&path, r#"{"font_size": 300}"#).unwrap();
         assert_eq!(
             GlobalSettings::load(&path).unwrap().font_size,

@@ -60,7 +60,7 @@ async fn main() {
         }
 
         ui::ensure_fonts().await;
-        clear_background(Color::from(ui::BG).into());
+        clear_background(Color::from(ui::palette(app.settings.theme).bg).into());
         let mut frame = ply.begin();
         let actions = ui::frame(&mut frame, &app, &mut state);
         frame.show(|_| {}).await;

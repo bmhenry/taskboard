@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
+use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
 use taskboard_core::{
     Board, DateField, Filter, GlobalSettings, Link, LinkKind, NewTask, ProjectSettings, Status,
     Store, Task, TaskPatch, Ulid, parse_date,
@@ -84,6 +84,7 @@ pub enum Action {
     ShowSettings(bool),
     SetFontSize(u16),
     SetCollapseEmptyColumns(bool),
+    SetTheme(Theme),
     ToggleColumn(Status),
 }
 
@@ -336,6 +337,10 @@ impl App {
                 self.settings.collapse_empty_columns = collapse;
                 self.save_settings()?;
             }
+            Action::SetTheme(theme) => {
+                self.settings.theme = theme;
+                self.save_settings()?;
+            }
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
                 self.project_settings
@@ -501,6 +506,19 @@ mod tests {
 
         let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
         assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn theme_defaults_to_dark_and_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/tb/settings.json");
+        let mut app = App::new(Store::open(dir.path()).unwrap(), Some(path.clone()));
+        assert_eq!(app.settings.theme, Theme::Dark);
+        app.apply(Action::SetTheme(Theme::Light));
+        assert_eq!(app.error, None);
+
+        let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
+        assert_eq!(reopened.settings.theme, Theme::Light);
     }
 
     #[test]
