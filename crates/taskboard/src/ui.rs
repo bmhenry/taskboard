@@ -48,6 +48,9 @@ const DANGER: u32 = 0xE5534B;
 /// Unscaled minimum width of the status dropdown's list.
 const STATUS_MENU_MIN_WIDTH: f32 = 160.0;
 
+/// Unscaled space between the window's edges and the UI inside it.
+const EDGE: u16 = 18;
+
 /// Body text size the hardcoded sizes below are designed around; the user's
 /// font size setting scales every size relative to it.
 const BASE_FONT_SIZE: f32 = 14.0;
@@ -161,7 +164,11 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
             ui.element()
                 .width(grow!())
                 .height(grow!())
-                .layout(|l| l.direction(LeftToRight).gap(12).padding((0, 12, 12, 12)))
+                .layout(|l| {
+                    l.direction(LeftToRight)
+                        .gap(12)
+                        .padding((0, fs(EDGE), fs(EDGE), fs(EDGE)))
+                })
                 .children(|ui| {
                     match app.view {
                         View::Board => board_view(ui, app, state, &mut actions),
@@ -396,11 +403,11 @@ fn chip(ui: &mut Ui, state: &mut UiState, label: &str, color: u32, on: bool) -> 
     let mut clicked = false;
     ui.element()
         .width(fit!())
-        .height(fixed!(px(24.0)))
-        .corner_radius(px(12.0))
+        .height(fixed!(px(26.0)))
+        .corner_radius(px(13.0))
         .background_color(if on { color } else { PANEL })
         .border(|b| b.all(1).color(color))
-        .layout(|l| l.padding((0, 10, 0, 10)).align(CenterX, CenterY))
+        .layout(|l| l.padding((0, fs(12), 0, fs(12))).align(CenterX, CenterY))
         .children(|ui| {
             clicked = ui.just_released();
             if ui.hovered() {
@@ -472,7 +479,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
         .layout(|l| {
             l.direction(LeftToRight)
                 .gap(10)
-                .padding((12, 12, 6, 12))
+                .padding((fs(EDGE), fs(EDGE), 6, fs(EDGE)))
                 .align(Left, CenterY)
         })
         .children(|ui| {
@@ -517,7 +524,7 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                 .gap(8)
                 .wrap()
                 .wrap_gap(8)
-                .padding((6, 12, 12, 12))
+                .padding((6, fs(EDGE), 12, fs(EDGE)))
                 .align(Left, CenterY)
         })
         .children(|ui| {
@@ -592,22 +599,24 @@ fn dropdown<'a>(ui: &'a mut Ui, id: &'static str, shift: f32, up: bool) -> Eleme
 }
 
 fn filter_menu(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
-    let width = px(330.0);
+    let (width, pad) = (px(330.0), fs(14));
     // Shift left if hanging off the button's left edge would leave the window.
     let shift = ui
         .bounding_box("filter_button")
-        .map(|b| (screen_width() - 12.0 - (b.x + width)).min(0.0))
+        .map(|b| (screen_width() - fs(EDGE) as f32 - (b.x + width)).min(0.0))
         .unwrap_or(0.0);
     dropdown(ui, "filter_menu", shift, false)
         .width(fixed!(width))
         .height(fit!())
-        .layout(|l| l.direction(TopToBottom).padding(12).gap(8))
+        .layout(|l| l.direction(TopToBottom).padding(pad).gap(8))
         .children(|ui| {
             label(ui, "Status");
+            // Ply wraps a growing row against its unshrunk width, so the
+            // chips would overflow the menu; give the row its final width.
             ui.element()
-                .width(grow!())
+                .width(fixed!(width - 2.0 * pad as f32))
                 .height(fit!())
-                .layout(|l| l.direction(LeftToRight).gap(6).wrap().wrap_gap(6))
+                .layout(|l| l.direction(LeftToRight).gap(8).wrap().wrap_gap(8))
                 .children(|ui| {
                     for status in Status::ALL {
                         let on = app.filter.statuses.contains(&status);
@@ -797,7 +806,7 @@ fn collapsed_column(
                             .color(TEXT)
                             .wrap_mode(WrapMode::None)
                     });
-                    ui.text(&count.to_string(), |t| t.font_size(fs(12)).color(MUTED));
+                    count_badge(ui, count);
                 });
         });
 }
@@ -840,9 +849,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                             .color(TEXT)
                             .wrap_mode(WrapMode::None)
                     });
-                    ui.text(&tasks.len().to_string(), |t| {
-                        t.font_size(fs(12)).color(MUTED)
-                    });
+                    count_badge(ui, tasks.len());
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
                     if button(ui, state, "«", Style::Quiet) {
                         actions.push(Action::ToggleColumn(status));
@@ -866,6 +873,21 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         card(ui, app, state, task);
                     }
                 });
+        });
+}
+
+/// A column's task count, in a small pill next to its title.
+fn count_badge(ui: &mut Ui, count: usize) {
+    ui.element()
+        .width(fit!())
+        .height(fixed!(px(18.0)))
+        .corner_radius(px(9.0))
+        .background_color(CARD)
+        .layout(|l| l.padding((0, fs(7), 0, fs(7))).align(CenterX, CenterY))
+        .children(|ui| {
+            ui.text(&count.to_string(), |t| {
+                t.font_size(fs(12)).color(MUTED).wrap_mode(WrapMode::None)
+            });
         });
 }
 
@@ -1309,7 +1331,7 @@ fn status_dropdown(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut 
                         .layout(|l| {
                             l.direction(LeftToRight)
                                 .gap(8)
-                                .padding((0, 10, 0, 10))
+                                .padding((0, fs(12), 0, fs(12)))
                                 .align(Left, CenterY)
                         })
                         .children(|ui| {
@@ -1331,7 +1353,7 @@ fn status_dropdown(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut 
 fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<Action>) {
     // Open upward if the list would run off the bottom of the window and
     // there's more room above.
-    let height = Status::ALL.len() as f32 * px(28.0) + 10.0;
+    let height = Status::ALL.len() as f32 * (px(28.0) + 2.0) + 14.0;
     let up = ui.bounding_box("status_button").is_some_and(|b| {
         let below = screen_height() - (b.y + b.height);
         below < height + 8.0 && b.y > below
@@ -1339,7 +1361,7 @@ fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<
     dropdown(ui, "status_menu", 0.0, up)
         .width(fit!(px(STATUS_MENU_MIN_WIDTH)))
         .height(fit!())
-        .layout(|l| l.direction(TopToBottom).padding(4))
+        .layout(|l| l.direction(TopToBottom).padding(6).gap(2))
         .children(|ui| {
             for status in Status::ALL {
                 ui.element()
@@ -1373,7 +1395,7 @@ fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<
                             .layout(|l| {
                                 l.direction(LeftToRight)
                                     .gap(8)
-                                    .padding((0, 8, 0, 8))
+                                    .padding((0, fs(10), 0, fs(10)))
                                     .align(Left, CenterY)
                             })
                             .children(|ui| {
