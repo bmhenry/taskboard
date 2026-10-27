@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use ply_engine::ElementBuilder;
 use ply_engine::layout::Sizing;
 use ply_engine::prelude::*;
 use taskboard_core::settings::DEFAULT_FONT_SIZE;
@@ -43,6 +44,9 @@ const TEXT: u32 = 0xE6E8EE;
 const MUTED: u32 = 0x8F96A3;
 const ACCENT: u32 = 0x6EA8FE;
 const DANGER: u32 = 0xE5534B;
+
+/// Unscaled minimum width of the status dropdown's list.
+const STATUS_MENU_MIN_WIDTH: f32 = 160.0;
 
 /// Body text size the hardcoded sizes below are designed around; the user's
 /// font size setting scales every size relative to it.
@@ -99,6 +103,8 @@ pub struct UiState {
     show_keybindings: bool,
     /// The filter dropdown under the search bar is open.
     filters_open: bool,
+    /// The task whose status dropdown in the detail panel is open.
+    status_open: Option<Ulid>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -117,6 +123,9 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     if !app.settings_open {
         state.show_keybindings = false;
     }
+    if app.editing.is_some() || app.selected != state.status_open {
+        state.status_open = None;
+    }
 
     if app.editor_needs_init {
         let (title, desc) = match app.editing {
@@ -134,7 +143,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     }
 
     read_filter_inputs(ui, app, &mut actions);
-    close_filters_on_outside_click(ui, state);
+    close_menus_on_outside_click(ui, state);
     handle_keys(ui, app, state, &mut actions);
     handle_drag(ui, app, state, &mut actions);
 
@@ -204,15 +213,20 @@ fn read_filter_inputs(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     }
 }
 
-/// Closes the filter dropdown when a press lands outside it and its button,
-/// using last frame's layout.
-fn close_filters_on_outside_click(ui: &mut Ui, state: &mut UiState) {
-    if state.filters_open
-        && is_mouse_button_pressed(MouseButton::Left)
-        && !ui.pointer_over("filter_menu")
-        && !ui.pointer_over("filter_button")
-    {
+/// Closes the filter and status dropdowns when a press lands outside the
+/// dropdown and its button, using last frame's layout.
+fn close_menus_on_outside_click(ui: &mut Ui, state: &mut UiState) {
+    if !is_mouse_button_pressed(MouseButton::Left) {
+        return;
+    }
+    if state.filters_open && !ui.pointer_over("filter_menu") && !ui.pointer_over("filter_button") {
         close_filters(ui, state);
+    }
+    if state.status_open.is_some()
+        && !ui.pointer_over("status_menu")
+        && !ui.pointer_over("status_button")
+    {
+        state.status_open = None;
     }
 }
 
@@ -241,6 +255,8 @@ fn handle_keys(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
             actions.push(Action::ShowSettings(false));
         } else if state.filters_open {
             close_filters(ui, state);
+        } else if state.status_open.is_some() {
+            state.status_open = None;
         } else if app.viewing_file.is_some() {
             actions.push(Action::ViewFile(None));
         } else if app.editing.is_some() {
@@ -279,7 +295,7 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+S / Ctrl+Enter", "Save the task being edited"),
     ("Ctrl+=", "Increase font size"),
     ("Ctrl+-", "Decrease font size"),
-    ("Esc", "Close a dialog, cancel editing, or deselect"),
+    ("Esc", "Close a dialog or menu, cancel editing, or deselect"),
 ];
 
 fn save_action(ui: &Ui) -> Action {
@@ -557,6 +573,24 @@ fn filter_button(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<
         });
 }
 
+/// A panel floating just below its parent (or above it, if `up`), moved
+/// `shift` px sideways.
+fn dropdown<'a>(ui: &'a mut Ui, id: &'static str, shift: f32, up: bool) -> ElementBuilder<'a> {
+    ui.element()
+        .id(id)
+        .floating(|f| {
+            let f = f.attach_parent().z_index(40);
+            if up {
+                f.anchor((Left, Bottom), (Left, Top)).offset((shift, -4.0))
+            } else {
+                f.anchor((Left, Top), (Left, Bottom)).offset((shift, 4.0))
+            }
+        })
+        .background_color(PANEL)
+        .corner_radius(8.0)
+        .border(|b| b.all(1).color(BORDER))
+}
+
 fn filter_menu(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
     let width = px(330.0);
     // Shift left if hanging off the button's left edge would leave the window.
@@ -564,19 +598,9 @@ fn filter_menu(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Ac
         .bounding_box("filter_button")
         .map(|b| (screen_width() - 12.0 - (b.x + width)).min(0.0))
         .unwrap_or(0.0);
-    ui.element()
-        .id("filter_menu")
+    dropdown(ui, "filter_menu", shift, false)
         .width(fixed!(width))
         .height(fit!())
-        .floating(|f| {
-            f.attach_parent()
-                .anchor((Left, Top), (Left, Bottom))
-                .offset((shift, 4.0))
-                .z_index(40)
-        })
-        .background_color(PANEL)
-        .corner_radius(8.0)
-        .border(|b| b.all(1).color(BORDER))
         .layout(|l| l.direction(TopToBottom).padding(12).gap(8))
         .children(|ui| {
             label(ui, "Status");
@@ -1086,12 +1110,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
             .height(fit!())
             .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
             .children(|ui| {
-                ui.element()
-                    .width(fixed!(8.0))
-                    .height(fixed!(8.0))
-                    .corner_radius(4.0)
-                    .background_color(status_color(task.status))
-                    .empty();
+                status_dot(ui, task.status);
                 ui.text(&task.short_id(), |t| {
                     t.font_size(fs(12)).font(&MONO).color(MUTED)
                 });
@@ -1114,28 +1133,7 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
 
         ui.text(&task.title, |t| t.font_size(fs(20)).font(&BOLD).color(TEXT));
 
-        ui.element()
-            .width(grow!())
-            .height(fit!())
-            .layout(|l| l.direction(LeftToRight).gap(6).wrap().wrap_gap(6))
-            .children(|ui| {
-                for status in Status::ALL {
-                    if chip(
-                        ui,
-                        state,
-                        status.label(),
-                        status_color(status),
-                        task.status == status,
-                    ) && task.status != status
-                    {
-                        actions.push(Action::Move {
-                            id: task.id,
-                            status,
-                            position: None,
-                        });
-                    }
-                }
-            });
+        status_dropdown(ui, task, state, actions);
 
         let fmt = |d: chrono::DateTime<chrono::Utc>| {
             d.with_timezone(&chrono::Local)
@@ -1271,6 +1269,124 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
                 }
             });
     });
+}
+
+fn status_dot(ui: &mut Ui, status: Status) {
+    ui.element()
+        .width(fixed!(8.0))
+        .height(fixed!(8.0))
+        .corner_radius(4.0)
+        .background_color(status_color(status))
+        .empty();
+}
+
+/// Shows the task's status; clicking it opens a list of statuses to move the
+/// task to.
+fn status_dropdown(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<Action>) {
+    ui.element()
+        .id("status_button")
+        .width(fit!())
+        .height(fit!())
+        .children(|ui| {
+            ui.element()
+                .width(fit!())
+                .height(fixed!(px(28.0)))
+                .children(|ui| {
+                    if ui.just_released() {
+                        state.status_open = match state.status_open {
+                            Some(_) => None,
+                            None => Some(task.id),
+                        };
+                    }
+                    let hovered = ui.hovered();
+                    state.pointer_cursor |= hovered;
+                    ui.element()
+                        .width(fit!())
+                        .height(grow!())
+                        .background_color(if hovered { CARD_HOVER } else { CARD })
+                        .corner_radius(6.0)
+                        .border(|b| b.all(1).color(status_color(task.status)))
+                        .layout(|l| {
+                            l.direction(LeftToRight)
+                                .gap(8)
+                                .padding((0, 10, 0, 10))
+                                .align(Left, CenterY)
+                        })
+                        .children(|ui| {
+                            status_dot(ui, task.status);
+                            ui.text(task.status.label(), |t| {
+                                t.font_size(fs(13))
+                                    .color(status_color(task.status))
+                                    .wrap_mode(WrapMode::None)
+                            });
+                            ui.text("▾", |t| t.font_size(fs(13)).color(MUTED));
+                        });
+                });
+            if state.status_open == Some(task.id) {
+                status_menu(ui, task, state, actions);
+            }
+        });
+}
+
+fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<Action>) {
+    // Open upward if the list would run off the bottom of the window and
+    // there's more room above.
+    let height = Status::ALL.len() as f32 * px(28.0) + 10.0;
+    let up = ui.bounding_box("status_button").is_some_and(|b| {
+        let below = screen_height() - (b.y + b.height);
+        below < height + 8.0 && b.y > below
+    });
+    dropdown(ui, "status_menu", 0.0, up)
+        .width(fit!(px(STATUS_MENU_MIN_WIDTH)))
+        .height(fit!())
+        .layout(|l| l.direction(TopToBottom).padding(4))
+        .children(|ui| {
+            for status in Status::ALL {
+                ui.element()
+                    .width(grow!())
+                    .height(fixed!(px(28.0)))
+                    .children(|ui| {
+                        if ui.just_released() {
+                            state.status_open = None;
+                            if task.status != status {
+                                actions.push(Action::Move {
+                                    id: task.id,
+                                    status,
+                                    position: None,
+                                });
+                            }
+                        }
+                        let hovered = ui.hovered();
+                        state.pointer_cursor |= hovered;
+                        let bg = if hovered {
+                            CARD_HOVER
+                        } else if task.status == status {
+                            CARD
+                        } else {
+                            PANEL
+                        };
+                        ui.element()
+                            .width(grow!())
+                            .height(grow!())
+                            .background_color(bg)
+                            .corner_radius(4.0)
+                            .layout(|l| {
+                                l.direction(LeftToRight)
+                                    .gap(8)
+                                    .padding((0, 8, 0, 8))
+                                    .align(Left, CenterY)
+                            })
+                            .children(|ui| {
+                                status_dot(ui, status);
+                                ui.text(status.label(), |t| {
+                                    t.font_size(fs(13))
+                                        .color(status_color(status))
+                                        .wrap_mode(WrapMode::None)
+                                });
+                            });
+                    });
+            }
+        });
 }
 
 fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
