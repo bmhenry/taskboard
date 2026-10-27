@@ -67,6 +67,10 @@ async fn main() {
         for action in actions {
             app.apply(action);
         }
+        // Ply only drains typed characters while a text input is focused, and
+        // macroquad never clears them, so keys pressed elsewhere (Ctrl+= to
+        // zoom, Ctrl+N) would land in the next input that gets focus.
+        clear_input_queue();
         next_frame().await;
     }
 }
