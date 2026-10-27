@@ -10,6 +10,7 @@ use crate::{Error, Result};
 
 pub const TB_DIR: &str = ".tb";
 const TASKS_FILE: &str = "tasks.json";
+const SETTINGS_FILE: &str = "settings.json";
 const LOCK_FILE: &str = "lock";
 const FILES_DIR: &str = "files";
 
@@ -57,6 +58,11 @@ impl Store {
 
     pub fn tasks_path(&self) -> PathBuf {
         self.dir.join(TASKS_FILE)
+    }
+
+    /// The project's settings file (see [`crate::settings::ProjectSettings`]).
+    pub fn settings_path(&self) -> PathBuf {
+        self.dir.join(SETTINGS_FILE)
     }
 
     pub fn file_path(&self, att: &Attachment) -> PathBuf {

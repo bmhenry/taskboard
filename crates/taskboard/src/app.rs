@@ -1,13 +1,12 @@
 //! GUI state and the actions that change it. Kept free of rendering code so
 //! it can be tested without a window.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
 use taskboard_core::{
-    Board, DateField, Filter, GlobalSettings, Link, LinkKind, NewTask, Status, Store, Task,
-    TaskPatch, Ulid, parse_date,
+    Board, DateField, Filter, GlobalSettings, Link, LinkKind, NewTask, ProjectSettings, Status,
+    Store, Task, TaskPatch, Ulid, parse_date,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,13 +105,13 @@ pub struct App {
     /// Where global settings are saved; `None` keeps changes in memory only.
     pub settings_path: Option<PathBuf>,
     pub settings_open: bool,
-    /// Columns the user collapsed (`true`) or expanded (`false`) by hand,
-    /// overriding the `collapse_empty_columns` default.
-    pub column_overrides: HashMap<Status, bool>,
+    /// Settings for this project, saved in `.tb/settings.json`.
+    pub project_settings: ProjectSettings,
 }
 
 impl App {
-    /// Opens the board and loads global settings from `settings_path`.
+    /// Opens the board, loads global settings from `settings_path`, and loads
+    /// the project's settings from its `.tb/`.
     pub fn new(store: Store, settings_path: Option<PathBuf>) -> App {
         let mut app = App {
             board: Board::default(),
@@ -128,13 +127,17 @@ impl App {
             settings: GlobalSettings::default(),
             settings_path,
             settings_open: false,
-            column_overrides: HashMap::new(),
+            project_settings: ProjectSettings::default(),
         };
         if let Some(path) = &app.settings_path {
             match GlobalSettings::load(path) {
                 Ok(settings) => app.settings = settings,
                 Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
             }
+        }
+        match ProjectSettings::load(&app.store.settings_path()) {
+            Ok(settings) => app.project_settings = settings,
+            Err(e) => app.error = Some(format!("Couldn't read project settings: {e}")),
         }
         app.reload();
         app
@@ -180,7 +183,8 @@ impl App {
     /// Whether a board column is drawn as a thin strip: as the user last set
     /// it, or by default when it has no tasks and the setting is on.
     pub fn column_collapsed(&self, status: Status) -> bool {
-        self.column_overrides
+        self.project_settings
+            .collapsed_columns
             .get(&status)
             .copied()
             .unwrap_or_else(|| {
@@ -333,7 +337,10 @@ impl App {
             }
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
-                self.column_overrides.insert(status, !collapsed);
+                self.project_settings
+                    .collapsed_columns
+                    .insert(status, !collapsed);
+                self.project_settings.save(&self.store.settings_path())?;
             }
         }
         // Show our own write right away rather than waiting for the watcher.
@@ -479,7 +486,7 @@ mod tests {
 
     #[test]
     fn empty_columns_collapsed_by_default() {
-        let (_dir, mut app) = app();
+        let (dir, mut app) = app();
         let a = add(&mut app, "alpha");
         assert!(!app.column_collapsed(Status::Backlog));
         assert!(app.column_collapsed(Status::Closed));
@@ -492,6 +499,8 @@ mod tests {
         // A column with tasks collapses too, and stays as set once emptied.
         app.apply(Action::ToggleColumn(Status::Backlog));
         assert!(app.column_collapsed(Status::Backlog));
+        let reopened = App::new(Store::open(dir.path()).unwrap(), None);
+        assert!(reopened.column_collapsed(Status::Backlog));
         app.apply(Action::Delete(a));
         app.apply(Action::ToggleColumn(Status::Backlog));
         assert!(!app.column_collapsed(Status::Backlog));

@@ -19,7 +19,7 @@ Taskboard tasks are powerful:
     - arbitrary URLs: clickable links which can be tagged as a "source" or as "context"
     - arbitrary files, which may be images, markdown, or plain text which is useful for the task
 
-Tasks are stored in a `.tb/` folder local to each project for machine readability and storage, with the task itself being stored in JSON. Tasks should all be stored in a single JSON file, but can reference other files which are written or copied into the `.tb/` folder with ULIDs. The task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema so it can be migrated later if necessary. A project is designated as the root of the current git repo if Taskboard was started inside one, otherwise as the directory taskboard was started from.
+Tasks are stored in a `.tb/` folder local to each project for machine readability and storage, with the task itself being stored in JSON. Tasks should all be stored in a single JSON file, but can reference other files which are written or copied into the `.tb/` folder with ULIDs. The task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema so it can be migrated later if necessary. Per-project UI settings (such as which board columns are collapsed) are kept in `.tb/settings.json`; global settings (such as font size) are kept in `$XDG_CONFIG_HOME/tb/settings.json`. A project is designated as the root of the current git repo if Taskboard was started inside one, otherwise as the directory taskboard was started from.
 
 Taskboard is actually two distinct programs:
 - `taskboard`: The main application, which runs a local GUI

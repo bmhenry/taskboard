@@ -1,12 +1,16 @@
 //! User settings. Global settings apply to every project and live in
-//! `$XDG_CONFIG_HOME/tb/settings.json` (falling back to `~/.config`).
+//! `$XDG_CONFIG_HOME/tb/settings.json` (falling back to `~/.config`); project
+//! settings live in the project's `.tb/settings.json`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::model::Status;
 use crate::{Error, Result};
 
 pub const MIN_FONT_SIZE: u16 = 10;
@@ -44,25 +48,12 @@ impl GlobalSettings {
 
     /// Reads settings from `path`; a missing file gives the defaults.
     pub fn load(path: &Path) -> Result<GlobalSettings> {
-        match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str::<GlobalSettings>(&text)
-                .map(GlobalSettings::clamped)
-                .map_err(|e| Error::Invalid(format!("invalid {}: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalSettings::default()),
-            Err(e) => Err(e.into()),
-        }
+        load_json(path).map(GlobalSettings::clamped)
     }
 
     /// Writes settings to `path` atomically, creating its directory if needed.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(dir)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        serde_json::to_writer_pretty(&mut tmp, self)?;
-        tmp.write_all(b"\n")?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(path).map_err(|e| Error::Io(e.error))?;
-        Ok(())
+        save_json(self, path)
     }
 
     /// Pulls out-of-range values (e.g. from a hand-edited file) into range.
@@ -70,6 +61,47 @@ impl GlobalSettings {
         self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         self
     }
+}
+
+/// Settings for one project, kept in its `.tb/settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectSettings {
+    /// Board columns the user collapsed (`true`) or expanded (`false`) by
+    /// hand. Columns not listed follow `GlobalSettings::collapse_empty_columns`.
+    pub collapsed_columns: BTreeMap<Status, bool>,
+}
+
+impl ProjectSettings {
+    /// Reads settings from `path`; a missing file gives the defaults.
+    pub fn load(path: &Path) -> Result<ProjectSettings> {
+        load_json(path)
+    }
+
+    /// Writes settings to `path` atomically.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        save_json(self, path)
+    }
+}
+
+fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| Error::Invalid(format!("invalid {}: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_json<T: Serialize>(value: &T, path: &Path) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    serde_json::to_writer_pretty(&mut tmp, value)?;
+    tmp.write_all(b"\n")?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| Error::Io(e.error))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -107,5 +139,20 @@ mod tests {
             GlobalSettings::load(&path).unwrap().font_size,
             MAX_FONT_SIZE
         );
+    }
+
+    #[test]
+    fn project_settings_round_trip_with_status_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut s = ProjectSettings::default();
+        s.collapsed_columns.insert(Status::InProgress, true);
+        s.save(&path).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"in_progress\": true")
+        );
+        assert_eq!(ProjectSettings::load(&path).unwrap(), s);
     }
 }
