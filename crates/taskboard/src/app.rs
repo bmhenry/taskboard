@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
 use taskboard_core::{
-    Board, DateField, Filter, GlobalSettings, Link, LinkKind, NewTask, ProjectSettings, Status,
-    Store, Task, TaskPatch, Ulid, parse_date,
+    Board, DateField, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind, NewTask,
+    ProjectSettings, Status, Store, Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +86,15 @@ pub enum Action {
     SetCollapseEmptyColumns(bool),
     SetTheme(Theme),
     ToggleColumn(Status),
+    AddHook,
+    RemoveHook(usize),
+    SetHookEvent(usize, HookEvent),
+    /// Changes a hook's command in memory only, so typing doesn't write the
+    /// settings file on every key; see [`Action::SaveSettings`].
+    SetHookCommand(usize, String),
+    SetHookPassTaskId(usize, bool),
+    /// Saves settings changed in memory, if any.
+    SaveSettings,
 }
 
 pub struct App {
@@ -106,6 +115,8 @@ pub struct App {
     /// Where global settings are saved; `None` keeps changes in memory only.
     pub settings_path: Option<PathBuf>,
     pub settings_open: bool,
+    /// Settings were changed without being saved.
+    pub settings_dirty: bool,
     /// Settings for this project, saved in `.tb/settings.json`.
     pub project_settings: ProjectSettings,
 }
@@ -128,6 +139,7 @@ impl App {
             settings: GlobalSettings::default(),
             settings_path,
             settings_open: false,
+            settings_dirty: false,
             project_settings: ProjectSettings::default(),
         };
         if let Some(path) = &app.settings_path {
@@ -256,7 +268,8 @@ impl App {
                             status: Some(status),
                             links: Vec::new(),
                         };
-                        self.store.update(|b| b.create(new))?;
+                        let (_, events) = self.store.update_with_events(|b| b.create(new))?;
+                        self.run_hooks(&events);
                         // A new task closes the panel rather than selecting it.
                         self.selected = None;
                     }
@@ -268,7 +281,10 @@ impl App {
                 status,
                 position,
             } => {
-                self.store.update(|b| b.move_to(id, status, position))?;
+                let ((), events) = self
+                    .store
+                    .update_with_events(|b| b.move_to(id, status, position))?;
+                self.run_hooks(&events);
             }
             Action::Delete(id) => {
                 self.store.delete(id)?;
@@ -328,7 +344,12 @@ impl App {
             }
             Action::OpenUrl(url) => open_url(&url)?,
             Action::DismissError => self.error = None,
-            Action::ShowSettings(open) => self.settings_open = open,
+            Action::ShowSettings(open) => {
+                self.settings_open = open;
+                if !open && self.settings_dirty {
+                    self.save_settings()?;
+                }
+            }
             Action::SetFontSize(size) => {
                 self.settings.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
                 self.save_settings()?;
@@ -348,6 +369,39 @@ impl App {
                     .insert(status, !collapsed);
                 self.project_settings.save(&self.store.settings_path())?;
             }
+            Action::AddHook => {
+                self.settings.hooks.push(Hook::default());
+                self.save_settings()?;
+            }
+            Action::RemoveHook(i) => {
+                if i < self.settings.hooks.len() {
+                    self.settings.hooks.remove(i);
+                    self.save_settings()?;
+                }
+            }
+            Action::SetHookEvent(i, event) => {
+                if let Some(hook) = self.settings.hooks.get_mut(i) {
+                    hook.event = event;
+                    self.save_settings()?;
+                }
+            }
+            Action::SetHookCommand(i, command) => {
+                if let Some(hook) = self.settings.hooks.get_mut(i) {
+                    hook.command = command;
+                    self.settings_dirty = true;
+                }
+            }
+            Action::SaveSettings => {
+                if self.settings_dirty {
+                    self.save_settings()?;
+                }
+            }
+            Action::SetHookPassTaskId(i, pass) => {
+                if let Some(hook) = self.settings.hooks.get_mut(i) {
+                    hook.pass_task_id = pass;
+                    self.save_settings()?;
+                }
+            }
         }
         // Show our own write right away rather than waiting for the watcher.
         if writes {
@@ -356,11 +410,20 @@ impl App {
         Ok(())
     }
 
-    fn save_settings(&self) -> taskboard_core::Result<()> {
-        match &self.settings_path {
-            Some(path) => self.settings.save(path),
-            None => Ok(()),
+    /// Starts the user's hooks for `events`, showing any that fail to start.
+    fn run_hooks(&mut self, events: &[TaskEvent]) {
+        let failures = hooks::run(&self.settings.hooks, events, self.store.project_dir());
+        if !failures.is_empty() {
+            self.error = Some(failures.join("; "));
         }
+    }
+
+    fn save_settings(&mut self) -> taskboard_core::Result<()> {
+        if let Some(path) = &self.settings_path {
+            self.settings.save(path)?;
+        }
+        self.settings_dirty = false;
+        Ok(())
     }
 }
 
@@ -544,6 +607,73 @@ mod tests {
 
         app.apply(Action::SetCollapseEmptyColumns(false));
         assert!(!app.column_collapsed(Status::Open));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hooks_run_on_create_and_status_change_but_not_reorder() {
+        let (dir, mut app) = app();
+        let log = dir.path().join("log");
+        let command = format!("sh -c 'echo $0 $1 >> {}'", log.display());
+        for (i, event) in [HookEvent::Created, HookEvent::Moved]
+            .into_iter()
+            .enumerate()
+        {
+            app.apply(Action::AddHook);
+            app.apply(Action::SetHookEvent(i, event));
+            app.apply(Action::SetHookCommand(i, format!("{command} {event:?}")));
+            app.apply(Action::SetHookPassTaskId(i, true));
+        }
+        let a = add(&mut app, "alpha");
+        let b = add(&mut app, "beta");
+        app.apply(Action::Move {
+            id: b,
+            status: Status::Backlog,
+            position: Some(0),
+        });
+        app.apply(Action::Move {
+            id: a,
+            status: Status::Closed,
+            position: None,
+        });
+        assert_eq!(app.error, None);
+
+        // Hooks run concurrently, so compare the lines in any order.
+        let mut want = [
+            format!("Created {a}"),
+            format!("Created {b}"),
+            format!("Moved {a}"),
+        ];
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>();
+            if got.len() >= want.len() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+
+        // Typed commands are saved once editing is done.
+        let path = dir.path().join("settings.json");
+        app.settings_path = Some(path.clone());
+        app.apply(Action::SetHookCommand(1, "true".into()));
+        assert!(!path.exists());
+        app.apply(Action::SaveSettings);
+        assert_eq!(
+            GlobalSettings::load(&path).unwrap().hooks[1].command,
+            "true"
+        );
+
+        app.apply(Action::RemoveHook(0));
+        assert_eq!(app.settings.hooks.len(), 1);
+        assert_eq!(app.settings.hooks[0].event, HookEvent::Moved);
     }
 
     #[test]

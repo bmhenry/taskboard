@@ -7,7 +7,9 @@ use ply_engine::ElementBuilder;
 use ply_engine::layout::Sizing;
 use ply_engine::prelude::*;
 use taskboard_core::settings::{DEFAULT_FONT_SIZE, Theme};
-use taskboard_core::{Attachment, DateField, FileKind, LinkKind, Status, Task, Ulid};
+use taskboard_core::{
+    Attachment, DateField, FileKind, HookEvent, LinkKind, Status, Task, Ulid, hooks,
+};
 
 use crate::app::{Action, App, DRAG_THRESHOLD, Drag, EditTarget, View, drop_index, drop_position};
 use crate::markdown::{self, BlockKind};
@@ -162,6 +164,10 @@ fn column_id(status: Status) -> Id {
     ("column", status_index(status)).into()
 }
 
+fn hook_input_id(index: usize) -> Id {
+    ("hook_command", index as u32).into()
+}
+
 /// UI-only state that doesn't belong in [`App`].
 #[derive(Default)]
 pub struct UiState {
@@ -178,6 +184,11 @@ pub struct UiState {
     filters_open: bool,
     /// The task whose status dropdown in the detail panel is open.
     status_open: Option<Ulid>,
+    /// How many hooks' commands were copied into the settings inputs, or
+    /// `None` while the inputs aren't shown.
+    hook_inputs: Option<usize>,
+    /// When a hook command was last typed in, while that edit is unsaved.
+    hook_edited_at: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -217,6 +228,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     }
 
     read_filter_inputs(ui, app, &mut actions);
+    sync_hook_inputs(ui, app, state, &mut actions);
     close_menus_on_outside_click(ui, state);
     handle_keys(ui, app, state, &mut actions);
     handle_drag(ui, app, state, &mut actions);
@@ -288,6 +300,40 @@ fn read_filter_inputs(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     let before = ui.get_text_value("date_before").to_string();
     if (&after, &before) != (&app.date_inputs.0, &app.date_inputs.1) {
         actions.push(Action::SetDateBounds { after, before });
+    }
+}
+
+/// Fills the hook command inputs when the settings page appears or a hook is
+/// added or removed (which shifts the inputs), and passes on edits made in
+/// them, saving once the user leaves the input or stops typing for a second.
+/// Closing settings saves too.
+fn sync_hook_inputs(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    if !app.settings_open || state.show_keybindings {
+        state.hook_inputs = None;
+        return;
+    }
+    let hooks = &app.settings.hooks;
+    if state.hook_inputs != Some(hooks.len()) {
+        for (i, hook) in hooks.iter().enumerate() {
+            ui.set_text_value(hook_input_id(i), &hook.command);
+        }
+        state.hook_inputs = Some(hooks.len());
+        return;
+    }
+    for (i, hook) in hooks.iter().enumerate() {
+        let command = ui.get_text_value(hook_input_id(i));
+        if command != hook.command {
+            actions.push(Action::SetHookCommand(i, command.to_string()));
+            state.hook_edited_at = Some(get_time());
+        }
+    }
+    let focused = ui.focused_element().map(|f| f.id);
+    let typing = (0..hooks.len()).any(|i| Some(hook_input_id(i).id) == focused);
+    if let Some(at) = state.hook_edited_at
+        && (!typing || get_time() - at > 1.0)
+    {
+        state.hook_edited_at = None;
+        actions.push(Action::SaveSettings);
     }
 }
 
@@ -522,7 +568,7 @@ fn input_frame(
         .children(input);
 }
 
-fn text_input(ui: &mut Ui, id: &'static str, placeholder: &str, width: Sizing, invalid: bool) {
+fn text_input(ui: &mut Ui, id: impl Into<Id>, placeholder: &str, width: Sizing, invalid: bool) {
     input_frame(ui, width, fixed!(px(30.0)), invalid, |ui| {
         ui.element()
             .id(id)
@@ -537,6 +583,84 @@ fn text_input(ui: &mut Ui, id: &'static str, placeholder: &str, width: Sizing, i
             })
             .empty();
     });
+}
+
+/// A box that's ticked when `on`, followed by `text`. Returns true when
+/// either is clicked.
+fn checkbox(ui: &mut Ui, state: &mut UiState, text: &str, on: bool) -> bool {
+    let mut clicked = false;
+    ui.element()
+        .width(fit!())
+        .height(fit!())
+        .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+        .children(|ui| {
+            clicked = ui.just_released();
+            let hovered = ui.hovered();
+            if hovered {
+                state.pointer_cursor = true;
+            }
+            let edge = if on || hovered {
+                pal().primary
+            } else {
+                pal().border
+            };
+            ui.element()
+                .width(fixed!(px(16.0)))
+                .height(fixed!(px(16.0)))
+                .corner_radius(4.0)
+                .background_color(if on { pal().primary } else { pal().input })
+                .border(|b| b.all(1).color(edge))
+                .layout(|l| l.align(CenterX, CenterY))
+                .children(|ui| {
+                    if on {
+                        ui.text("✓", |t| t.font_size(fs(12)).color(0xFFFFFF));
+                    }
+                });
+            ui.text(text, |t| t.font_size(fs(14)).color(pal().text));
+        });
+    clicked
+}
+
+/// A small "?" that shows `paragraphs` in a bubble below it while hovered.
+/// Paragraphs marked `true` are code and drawn in the monospace font.
+fn help_bubble(ui: &mut Ui, paragraphs: &[(&str, bool)]) {
+    let size = px(18.0);
+    ui.element()
+        .width(fixed!(size))
+        .height(fixed!(size))
+        .corner_radius(size / 2.0)
+        .border(|b| b.all(1).color(pal().muted))
+        .layout(|l| l.align(CenterX, CenterY))
+        .children(|ui| {
+            let hovered = ui.hovered();
+            ui.text("?", |t| t.font_size(fs(11)).font(&BOLD).color(pal().muted));
+            if hovered {
+                ui.element()
+                    .width(fixed!(px(360.0)))
+                    .height(fit!())
+                    .floating(|f| {
+                        f.attach_parent()
+                            .z_index(70)
+                            .anchor((CenterX, Top), (CenterX, Bottom))
+                            .offset((0.0, 6.0))
+                    })
+                    .background_color(pal().card)
+                    .corner_radius(8.0)
+                    .border(|b| b.all(1).color(pal().border))
+                    .layout(|l| l.direction(TopToBottom).padding(fs(10)).gap(6))
+                    .children(|ui| {
+                        for &(para, code) in paragraphs {
+                            if code {
+                                ui.text(para, |t| {
+                                    t.font_size(fs(12)).font(&MONO).color(pal().accent)
+                                });
+                            } else {
+                                ui.text(para, |t| t.font_size(fs(13)).color(pal().text));
+                            }
+                        }
+                    });
+            }
+        });
 }
 
 fn label(ui: &mut Ui, text: &str) {
@@ -1984,6 +2108,7 @@ fn settings_modal(
                         ui,
                         "Empty columns start as strips. Click a column's header or « to collapse it; click a strip to expand it.",
                     );
+                    hooks_settings(ui, app, state, actions);
                     match &app.settings_path {
                         Some(p) => path_label(
                             ui,
@@ -1995,6 +2120,82 @@ fn settings_modal(
                     }
                 });
         });
+}
+
+const PASS_ID_HELP: &[(&str, bool)] = &[
+    (
+        "When ticked, the task's full ID is added as the last argument, so a hook set to",
+        false,
+    ),
+    ("notify-send Moved", true),
+    ("runs as", false),
+    ("notify-send Moved 01M6197HP62B5BKZRPNK3SCY8K", true),
+    (
+        "A script gets the ID as $1 (with bash -c '…' it's $0). Look the task up with tb show <ID>.",
+        false,
+    ),
+];
+
+fn hooks_settings(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    section_title(ui, "Hooks");
+    label(
+        ui,
+        "Commands to run when a task is created or moved to another column, here or with tb. They run in the project folder without a shell, so for pipes or redirects use bash -c '…'.",
+    );
+    for (i, hook) in app.settings.hooks.iter().enumerate() {
+        ui.element()
+            .width(grow!())
+            .height(fit!())
+            .background_color(pal().card)
+            .corner_radius(8.0)
+            .border(|b| b.all(1).color(pal().card_edge))
+            .layout(|l| l.direction(TopToBottom).padding(10).gap(8))
+            .children(|ui| {
+                ui.element()
+                    .width(grow!())
+                    .height(fit!())
+                    .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                    .children(|ui| {
+                        ui.text("When a task is", |t| t.font_size(fs(14)).color(pal().text));
+                        for (event, name) in
+                            [(HookEvent::Created, "Created"), (HookEvent::Moved, "Moved")]
+                        {
+                            let style = if hook.event == event {
+                                Style::Primary
+                            } else {
+                                Style::Normal
+                            };
+                            if button(ui, state, name, style) {
+                                actions.push(Action::SetHookEvent(i, event));
+                            }
+                        }
+                        ui.element().width(grow!()).height(fixed!(1.0)).empty();
+                        if button(ui, state, "Remove", Style::Quiet) {
+                            actions.push(Action::RemoveHook(i));
+                        }
+                    });
+                text_input(
+                    ui,
+                    hook_input_id(i),
+                    "Command, e.g. /path/to/script or bash -c '…'",
+                    grow!(),
+                    hooks::split_command(&hook.command).is_err(),
+                );
+                ui.element()
+                    .width(grow!())
+                    .height(fit!())
+                    .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+                    .children(|ui| {
+                        if checkbox(ui, state, "Pass the task ID", hook.pass_task_id) {
+                            actions.push(Action::SetHookPassTaskId(i, !hook.pass_task_id));
+                        }
+                        help_bubble(ui, PASS_ID_HELP);
+                    });
+            });
+    }
+    if button(ui, state, "+ Add hook", Style::Normal) {
+        actions.push(Action::AddHook);
+    }
 }
 
 #[cfg(test)]

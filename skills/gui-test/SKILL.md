@@ -22,7 +22,7 @@ Everything goes through `skills/gui-test/scripts/gui.sh` (run `gui.sh help`):
 | `drag X1 Y1 X2 Y2` | press, move in steps (passes the drag threshold), release |
 | `scroll X Y up\|down [N]` | wheel at a point |
 | `type TEXT`, `key KEY...` | keyboard; key names are xdotool's (`Return`, `Escape`, `ctrl+s`, `ctrl+a BackSpace`) |
-| `tb ARGS...` | the `tb` CLI against the sandbox project |
+| `tb ARGS...` | the `tb` CLI against the sandbox project and settings (so it runs the sandbox's hooks) |
 | `env` | prints sandbox paths and the display |
 
 ## Sandbox
