@@ -37,6 +37,10 @@ Taskboard is actually two distinct programs:
 The two programs share a common core which handles modifying the tasks on disk with atomic writes, so that each program can focus
 just on its specific use case for UX. All changes are written to disk immediately on save.
 
+## Hooks
+
+Settings → Hooks lists commands to run when a task is created or moved to another column, whether by the GUI or by `tb`. Reordering within a column and editing a task's text don't trigger them. Each hook is a program and its arguments, split like a shell would but run without one (use `bash -c '…'` for pipes and redirects), started in the project directory without waiting for it to finish; its stdout is discarded. Tick "Pass the task ID" to append the task's full ULID as the last argument, e.g. `notify-send Moved 01M6197HP62B5BKZRPNK3SCY8K`. Hooks are global settings, so they run in every project.
+
 
 Taskboard is built with Rust in a Cargo workspace, using [Ply](https://plyx.iz.rs/docs/getting-started/) for the GUI framework.
 

@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use taskboard_core::{
-    Board, DateField, Error, Filter, Link, LinkKind, NewTask, Status, Store, Task, TaskPatch, Ulid,
-    parse_date, short_id,
+    Board, DateField, Error, Filter, GlobalSettings, Hook, Link, LinkKind, NewTask, Status, Store,
+    Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date, short_id,
 };
 
 #[derive(Parser, Debug)]
@@ -152,8 +152,20 @@ fn main() -> ExitCode {
         None => std::env::current_dir().expect("current directory is accessible"),
     };
     let json = cli.json;
-    let result =
-        Store::discover(&start).and_then(|store| run(cli, &store, &mut io::stdout().lock()));
+    // Only commands that create or move tasks can fire hooks.
+    let fires_hooks = matches!(
+        cli.command,
+        Command::Add { .. } | Command::Edit { .. } | Command::Move { .. } | Command::Close { .. }
+    );
+    let settings = match GlobalSettings::default_path().filter(|_| fires_hooks) {
+        Some(path) => GlobalSettings::load(&path).unwrap_or_else(|e| {
+            eprintln!("tb: warning: hooks are off: {e}");
+            GlobalSettings::default()
+        }),
+        None => GlobalSettings::default(),
+    };
+    let result = Store::discover(&start)
+        .and_then(|store| run(cli, &store, &settings.hooks, &mut io::stdout().lock()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -167,8 +179,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, store: &Store, out: &mut impl Write) -> Result<(), Error> {
+fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<(), Error> {
     let json = cli.json;
+    let fire = |events: Vec<TaskEvent>| {
+        for failure in hooks::run(hooks, &events, store.project_dir()) {
+            eprintln!("tb: warning: {failure}");
+        }
+    };
     match cli.command {
         Command::Add {
             title,
@@ -197,10 +214,13 @@ fn run(cli: Cli, store: &Store, out: &mut impl Write) -> Result<(), Error> {
                 status,
                 links,
             };
-            let id = store.update(|b| b.create(new))?;
-            for path in &file {
-                store.attach(id, path)?;
-            }
+            let (id, events) = store.update_with_events(|b| b.create(new))?;
+            // Hooks run once the files are attached, so they see the whole task.
+            let attached = file
+                .iter()
+                .try_for_each(|path| store.attach(id, path).map(|_| ()));
+            fire(events);
+            attached?;
             let board = store.load()?;
             let task = board.get(id).expect("task was just created");
             if json {
@@ -243,10 +263,11 @@ fn run(cli: Cli, store: &Store, out: &mut impl Write) -> Result<(), Error> {
                 description: description.map(read_text).transpose()?,
                 status,
             };
-            let id = store.update(|b| {
+            let (id, events) = store.update_with_events(|b| {
                 let id = b.resolve(&id)?;
                 b.edit(id, patch).map(|_| id)
             })?;
+            fire(events);
             report(out, json, store, id, "Updated")?;
         }
         Command::Move {
@@ -254,19 +275,21 @@ fn run(cli: Cli, store: &Store, out: &mut impl Write) -> Result<(), Error> {
             status,
             position,
         } => {
-            let id = store.update(|b| {
+            let (id, events) = store.update_with_events(|b| {
                 let id = b.resolve(&id)?;
                 let status = status.unwrap_or(b.get(id).expect("resolved id exists").status);
                 b.move_to(id, status, position.map(|p| p.saturating_sub(1)))
                     .map(|_| id)
             })?;
+            fire(events);
             report(out, json, store, id, "Moved")?;
         }
         Command::Close { id } => {
-            let id = store.update(|b| {
+            let (id, events) = store.update_with_events(|b| {
                 let id = b.resolve(&id)?;
                 b.move_to(id, Status::Closed, None).map(|_| id)
             })?;
+            fire(events);
             report(out, json, store, id, "Closed")?;
         }
         Command::Delete { id } => {
@@ -488,7 +511,7 @@ mod tests {
     fn tb(store: &Store, args: &[&str]) -> String {
         let cli = Cli::try_parse_from(std::iter::once("tb").chain(args.iter().copied())).unwrap();
         let mut out = Vec::new();
-        run(cli, store, &mut out).unwrap();
+        run(cli, store, &[], &mut out).unwrap();
         String::from_utf8(out).unwrap()
     }
 

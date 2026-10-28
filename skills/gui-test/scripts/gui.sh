@@ -87,7 +87,7 @@ case $cmd in
   key) # key KEY...: xdotool key names, e.g. Return Escape ctrl+a
     need_running; x xdotool key --delay 50 "$@" ;;
   tb) # tb ARGS...: run the tb CLI against the sandbox project
-    need_running; "$REPO/target/debug/tb" --project "$STATE/project" "$@" ;;
+    need_running; XDG_CONFIG_HOME=$STATE/config "$REPO/target/debug/tb" --project "$STATE/project" "$@" ;;
   env) # env: print paths
     echo "state $STATE"; echo "project $STATE/project"; echo "log $STATE/app.log"
     running && echo "display $(cat "$STATE/display")" || echo "not running"

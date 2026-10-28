@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use ulid::Ulid;
 
+use crate::hooks::{self, TaskEvent};
 use crate::model::{Attachment, Board, FileKind, SCHEMA_VERSION};
 use crate::{Error, Result};
 
@@ -56,6 +57,11 @@ impl Store {
         &self.dir
     }
 
+    /// The project directory `.tb/` lives in; hooks run here.
+    pub fn project_dir(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
+    }
+
     pub fn tasks_path(&self) -> PathBuf {
         self.dir.join(TASKS_FILE)
     }
@@ -81,6 +87,23 @@ impl Store {
     /// Locks, reloads the latest board from disk, applies `f`, and writes the
     /// result atomically. Nothing is written if `f` fails.
     pub fn update<T>(&self, f: impl FnOnce(&mut Board) -> Result<T>) -> Result<T> {
+        self.locked_update(f)
+    }
+
+    /// Like [`Store::update`], also returning the tasks `f` created or moved
+    /// to another status, for running hooks.
+    pub fn update_with_events<T>(
+        &self,
+        f: impl FnOnce(&mut Board) -> Result<T>,
+    ) -> Result<(T, Vec<TaskEvent>)> {
+        self.locked_update(|board| {
+            let before = board.clone();
+            let out = f(board)?;
+            Ok((out, hooks::events(&before, board)))
+        })
+    }
+
+    fn locked_update<T>(&self, f: impl FnOnce(&mut Board) -> Result<T>) -> Result<T> {
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)

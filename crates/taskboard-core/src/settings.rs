@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::hooks::Hook;
 use crate::model::Status;
 use crate::{Error, Result};
 
@@ -35,6 +36,8 @@ pub struct GlobalSettings {
     pub collapse_empty_columns: bool,
     /// Light or dark colors in the GUI.
     pub theme: Theme,
+    /// Commands run when tasks are created or moved, in every project.
+    pub hooks: Vec<Hook>,
 }
 
 impl Default for GlobalSettings {
@@ -43,6 +46,7 @@ impl Default for GlobalSettings {
             font_size: DEFAULT_FONT_SIZE,
             collapse_empty_columns: true,
             theme: Theme::Dark,
+            hooks: Vec::new(),
         }
     }
 }
@@ -119,6 +123,7 @@ fn save_json<T: Serialize>(value: &T, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::HookEvent;
 
     #[test]
     fn missing_file_is_default_and_round_trips() {
@@ -133,6 +138,11 @@ mod tests {
             font_size: 18,
             collapse_empty_columns: false,
             theme: Theme::Light,
+            hooks: vec![Hook {
+                event: HookEvent::Moved,
+                command: "notify-send moved".into(),
+                pass_task_id: true,
+            }],
         };
         s.save(&path).unwrap();
         assert_eq!(GlobalSettings::load(&path).unwrap(), s);
