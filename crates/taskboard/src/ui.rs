@@ -223,6 +223,9 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     // element list and panics.
     if state.was_editing && app.editing.is_none() {
         ui.clear_focus();
+        // Don't leave a new task's unadded link or file in the detail panel.
+        ui.set_text_value("link_url", "");
+        ui.set_text_value("attach_path", "");
     }
     state.was_editing = app.editing.is_some();
 
@@ -1956,7 +1959,7 @@ fn editor_panel(
                 .empty();
         });
         // An existing task's links and files are changed from its details.
-        if let Some(EditTarget::New(_)) = app.editing {
+        if matches!(app.editing, Some(EditTarget::New(_))) {
             let draft = &app.draft;
             links_editor(ui, state, actions, Owner::Draft, &draft.links);
             let files = draft.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));

@@ -1,7 +1,7 @@
 //! GUI state and the actions that change it. Kept free of rendering code so
 //! it can be tested without a window.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
 use taskboard_core::{
@@ -50,10 +50,9 @@ pub struct DraftFile {
 }
 
 impl Draft {
-    /// Adds the file at `path`, checking it exists now rather than when the
+    /// Adds the file at `source`, checking it exists now rather than when the
     /// task is saved.
-    fn attach(&mut self, path: &str) -> taskboard_core::Result<()> {
-        let source = PathBuf::from(expand_home(path.trim()));
+    fn attach(&mut self, source: &Path) -> taskboard_core::Result<()> {
         if !source.is_file() {
             return Err(Error::Invalid(format!("not a file: {}", source.display())));
         }
@@ -66,7 +65,7 @@ impl Draft {
             id: Ulid::generate(),
             kind: FileKind::from_name(&name),
             name,
-            source,
+            source: source.to_path_buf(),
         });
         Ok(())
     }
@@ -339,7 +338,10 @@ impl App {
                 }
             }
             Action::EditorReady => self.editor_needs_init = false,
-            Action::CancelEdit => self.editing = None,
+            Action::CancelEdit => {
+                self.editing = None;
+                self.draft = Draft::default();
+            }
             Action::Save { title, description } => {
                 let Some(target) = self.editing else {
                     return Ok(());
@@ -365,13 +367,21 @@ impl App {
                         let (id, events) = self.store.update_with_events(|b| b.create(new))?;
                         let draft = std::mem::take(&mut self.draft);
                         // Hooks run once the files are attached, so they see the whole task.
-                        let attached = draft
+                        let failed: Vec<String> = draft
                             .files
                             .iter()
-                            .try_for_each(|f| self.store.attach(id, &f.source).map(|_| ()));
+                            .filter_map(|f| {
+                                let e = self.store.attach(id, &f.source).err()?;
+                                Some(format!("{} ({e})", f.name))
+                            })
+                            .collect();
                         self.run_hooks(&events);
-                        if let Err(e) = attached {
-                            self.error = Some(format!("Couldn't attach a file: {e}"));
+                        if !failed.is_empty() {
+                            let msg = format!("Couldn't attach: {}", failed.join(", "));
+                            self.error = Some(match self.error.take() {
+                                Some(hooks) => format!("{hooks}; {msg}"),
+                                None => msg,
+                            });
                         }
                         // A new task closes the panel rather than selecting it.
                         self.selected = None;
@@ -420,13 +430,15 @@ impl App {
                     }
                 }
             },
-            Action::Attach { owner, path } => match owner {
-                Owner::Task(id) => {
-                    let path = PathBuf::from(expand_home(path.trim()));
-                    self.store.attach(id, &path)?;
+            Action::Attach { owner, path } => {
+                let path = PathBuf::from(expand_home(path.trim()));
+                match owner {
+                    Owner::Task(id) => {
+                        self.store.attach(id, &path)?;
+                    }
+                    Owner::Draft => self.draft.attach(&path)?,
                 }
-                Owner::Draft => self.draft.attach(&path)?,
-            },
+            }
             Action::Detach { owner, file } => match owner {
                 Owner::Task(id) => {
                     self.store.detach(id, file)?;
@@ -666,21 +678,29 @@ mod tests {
     fn new_task_saves_draft_links_and_files() {
         let (dir, mut app) = app();
         let src = dir.path().join("notes.md");
+        let gone = dir.path().join("gone.txt");
         std::fs::write(&src, "# hi").unwrap();
+        std::fs::write(&gone, "").unwrap();
         app.apply(Action::Edit(EditTarget::New(Status::Open)));
         app.apply(Action::AddLink {
             owner: Owner::Draft,
             url: "https://example.com/1".into(),
             kind: LinkKind::Source,
         });
-        for path in [src.display().to_string(), "missing.md".into()] {
+        for path in [
+            gone.display().to_string(),
+            src.display().to_string(),
+            "missing.md".into(),
+        ] {
             app.apply(Action::Attach {
                 owner: Owner::Draft,
                 path,
             });
         }
         assert!(app.error.take().unwrap().contains("missing.md"));
-        assert_eq!(app.draft.files.len(), 1);
+        assert_eq!(app.draft.files.len(), 2);
+        // A file removed before saving doesn't stop the others attaching.
+        std::fs::remove_file(&gone).unwrap();
 
         // A failed save keeps the draft to try again.
         app.apply(Action::Save {
@@ -692,10 +712,15 @@ mod tests {
             title: "alpha".into(),
             description: String::new(),
         });
-        assert_eq!(app.error, None);
+        assert!(
+            app.error
+                .unwrap()
+                .starts_with("Couldn't attach: gone.txt (")
+        );
         assert_eq!(app.draft, Draft::default());
         let task = app.board.column(Status::Open)[0];
         assert_eq!(task.links[0].url, "https://example.com/1");
+        assert_eq!(task.files.len(), 1);
         assert_eq!(task.files[0].name, "notes.md");
     }
 
