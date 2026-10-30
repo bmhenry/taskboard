@@ -309,9 +309,13 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
         }) => {
             let id = store.update(|b| {
                 let id = b.resolve(&id)?;
-                let kind = kind
-                    .or_else(|| b.get(id).map(|t| t.default_link_kind()))
-                    .unwrap_or_default();
+                let kind = match kind {
+                    Some(kind) => kind,
+                    None => b
+                        .get(id)
+                        .ok_or_else(|| Error::NotFound(id.to_string()))?
+                        .default_link_kind(),
+                };
                 b.add_link(id, Link { url, label, kind }).map(|_| id)
             })?;
             report(out, json, store, id, "Linked")?;

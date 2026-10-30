@@ -69,6 +69,7 @@ tb --json close 7F3TPKKW
 tb --json rm 7F3TPKKW                           # permanent; ask first
 
 # Links (kind is "source" = where the task came from, or "context" = supporting material)
+# Without -k, a link is "source" until the task has a source link, then "context".
 tb --json link add 7F3TPKKW https://example.com -l "Label" -k source
 tb --json link rm 7F3TPKKW 2                    # by number, as listed by `tb show`
 
