@@ -8,10 +8,13 @@ use ply_engine::layout::Sizing;
 use ply_engine::prelude::*;
 use taskboard_core::settings::{DEFAULT_FONT_SIZE, Theme};
 use taskboard_core::{
-    Attachment, DateField, FileKind, HookEvent, LinkKind, Status, Task, Ulid, hooks,
+    Attachment, DateField, FileKind, HookEvent, Link, LinkKind, Status, Task, Ulid,
+    default_link_kind, hooks,
 };
 
-use crate::app::{Action, App, DRAG_THRESHOLD, Drag, EditTarget, View, drop_index, drop_position};
+use crate::app::{
+    Action, App, DRAG_THRESHOLD, Drag, EditTarget, Owner, View, drop_index, drop_position,
+};
 use crate::markdown::{self, BlockKind};
 
 pub static FONT: FontAsset = FontAsset::Bytes {
@@ -173,9 +176,9 @@ fn hook_input_id(index: usize) -> Id {
 pub struct UiState {
     drag: Option<Drag>,
     confirm_delete: Option<Ulid>,
-    /// Link kind the user toggled to for a task; otherwise the add-link row
-    /// uses [`Task::default_link_kind`].
-    link_kind: Option<(Ulid, LinkKind)>,
+    /// Link kind the user toggled to for a task or the draft; otherwise the
+    /// add-link row uses [`default_link_kind`].
+    link_kind: Option<(Owner, LinkKind)>,
     /// Decoded images and file contents for the file viewer, by attachment id.
     textures: HashMap<Ulid, Texture2D>,
     file_text: HashMap<Ulid, String>,
@@ -220,6 +223,9 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     // element list and panics.
     if state.was_editing && app.editing.is_none() {
         ui.clear_focus();
+        // Don't leave a new task's unadded link or file in the detail panel.
+        ui.set_text_value("link_url", "");
+        ui.set_text_value("attach_path", "");
     }
     state.was_editing = app.editing.is_some();
 
@@ -234,6 +240,10 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
         };
         ui.set_text_value("edit_title", &title);
         ui.set_text_value("edit_desc", &desc);
+        // The link and file inputs are shared with the detail panel.
+        ui.set_text_value("link_url", "");
+        ui.set_text_value("attach_path", "");
+        state.link_kind = None;
         ui.set_focus("edit_title");
         actions.push(Action::EditorReady);
     }
@@ -1653,129 +1663,142 @@ fn detail_panel(
             render_markdown(ui, &task.description);
         }
 
-        section_title(ui, "Links");
-        for (i, link) in task.links.iter().enumerate() {
-            ui.element()
-                .width(grow!())
-                .height(fit!())
-                .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
-                .children(|ui| {
-                    let kind_color = if link.kind == LinkKind::Source {
-                        status_color(Status::InProgress)
-                    } else {
-                        pal().muted
-                    };
-                    ui.text(&link.kind.to_string(), |t| {
-                        t.font_size(fs(11)).color(kind_color)
-                    });
-                    ui.element().width(grow!()).height(fit!()).children(|ui| {
-                        let hovered = ui.hovered();
-                        state.pointer_cursor |= hovered;
-                        if ui.just_released() {
-                            actions.push(Action::OpenUrl(link.url.clone()));
-                        }
-                        ui.text(link.display_text(), |t| {
-                            t.font_size(fs(13)).color(if hovered {
-                                pal().text
-                            } else {
-                                pal().accent
-                            })
-                        });
-                    });
-                    if button(ui, state, "×", Style::Quiet) {
-                        actions.push(Action::RemoveLink {
-                            id: task.id,
-                            index: i,
-                        });
-                    }
-                });
-        }
-        ui.element()
-            .width(grow!())
-            .height(fit!())
-            .layout(|l| l.direction(LeftToRight).gap(6).align(Left, CenterY))
-            .children(|ui| {
-                text_input(ui, "link_url", "https://…", grow!(), false);
-                let kind = match state.link_kind {
-                    Some((id, kind)) if id == task.id => kind,
-                    _ => task.default_link_kind(),
-                };
-                if button(ui, state, &kind.to_string(), Style::Quiet) {
-                    let toggled = if kind == LinkKind::Source {
-                        LinkKind::Context
-                    } else {
-                        LinkKind::Source
-                    };
-                    state.link_kind = Some((task.id, toggled));
-                }
-                if button(ui, state, "Add", Style::Normal) {
-                    let url = ui.get_text_value("link_url").to_string();
-                    ui.set_text_value("link_url", "");
-                    state.link_kind = None;
-                    actions.push(Action::AddLink {
-                        id: task.id,
-                        url,
-                        kind,
-                    });
-                }
-            });
-
-        section_title(ui, "Files");
-        for att in &task.files {
-            ui.element()
-                .width(grow!())
-                .height(fit!())
-                .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
-                .children(|ui| {
-                    let kind = match att.kind {
-                        FileKind::Image => "image",
-                        FileKind::Markdown => "md",
-                        FileKind::Text => "text",
-                    };
-                    ui.text(kind, |t| t.font_size(fs(11)).color(pal().muted));
-                    ui.element().width(grow!()).height(fit!()).children(|ui| {
-                        let hovered = ui.hovered();
-                        state.pointer_cursor |= hovered;
-                        if ui.just_released() {
-                            actions.push(Action::ViewFile(Some((task.id, att.id))));
-                        }
-                        ui.text(&att.name, |t| {
-                            t.font_size(fs(13)).color(if hovered {
-                                pal().text
-                            } else {
-                                pal().accent
-                            })
-                        });
-                    });
-                    if button(ui, state, "×", Style::Quiet) {
-                        actions.push(Action::Detach {
-                            id: task.id,
-                            file: att.id,
-                        });
-                    }
-                });
-        }
-        ui.element()
-            .width(grow!())
-            .height(fit!())
-            .layout(|l| l.direction(LeftToRight).gap(6).align(Left, CenterY))
-            .children(|ui| {
-                text_input(
-                    ui,
-                    "attach_path",
-                    "Path to a file to attach",
-                    grow!(),
-                    false,
-                );
-                if button(ui, state, "Attach", Style::Normal) {
-                    let path = ui.get_text_value("attach_path").to_string();
-                    if !path.trim().is_empty() {
-                        ui.set_text_value("attach_path", "");
-                        actions.push(Action::Attach { id: task.id, path });
-                    }
-                }
-            });
+        let owner = Owner::Task(task.id);
+        links_editor(ui, state, actions, owner, &task.links);
+        let files = task.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
+        files_editor(ui, state, actions, owner, files);
     });
+}
+
+/// A task's or the draft's links, each removable, and a row to add one.
+fn links_editor(
+    ui: &mut Ui,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    owner: Owner,
+    links: &[Link],
+) {
+    section_title(ui, "Links");
+    for (i, link) in links.iter().enumerate() {
+        ui.element()
+            .width(grow!())
+            .height(fit!())
+            .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+            .children(|ui| {
+                let kind_color = if link.kind == LinkKind::Source {
+                    status_color(Status::InProgress)
+                } else {
+                    pal().muted
+                };
+                ui.text(&link.kind.to_string(), |t| {
+                    t.font_size(fs(11)).color(kind_color)
+                });
+                ui.element().width(grow!()).height(fit!()).children(|ui| {
+                    let hovered = ui.hovered();
+                    state.pointer_cursor |= hovered;
+                    if ui.just_released() {
+                        actions.push(Action::OpenUrl(link.url.clone()));
+                    }
+                    ui.text(link.display_text(), |t| {
+                        t.font_size(fs(13))
+                            .color(if hovered { pal().text } else { pal().accent })
+                    });
+                });
+                if button(ui, state, "×", Style::Quiet) {
+                    actions.push(Action::RemoveLink { owner, index: i });
+                }
+            });
+    }
+    ui.element()
+        .width(grow!())
+        .height(fit!())
+        .layout(|l| l.direction(LeftToRight).gap(6).align(Left, CenterY))
+        .children(|ui| {
+            text_input(ui, "link_url", "https://…", grow!(), false);
+            let kind = match state.link_kind {
+                Some((o, kind)) if o == owner => kind,
+                _ => default_link_kind(links),
+            };
+            if button(ui, state, &kind.to_string(), Style::Quiet) {
+                let toggled = if kind == LinkKind::Source {
+                    LinkKind::Context
+                } else {
+                    LinkKind::Source
+                };
+                state.link_kind = Some((owner, toggled));
+            }
+            if button(ui, state, "Add", Style::Normal) {
+                let url = ui.get_text_value("link_url").to_string();
+                ui.set_text_value("link_url", "");
+                state.link_kind = None;
+                actions.push(Action::AddLink { owner, url, kind });
+            }
+        });
+}
+
+/// A task's or the draft's files as (id, kind, name), each removable, and a
+/// row to attach one. A task's files open in the viewer when clicked; the
+/// draft's aren't copied in yet, so there's nothing to view.
+fn files_editor<'a>(
+    ui: &mut Ui,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    owner: Owner,
+    files: impl Iterator<Item = (Ulid, FileKind, &'a str)>,
+) {
+    section_title(ui, "Files");
+    for (id, kind, name) in files {
+        ui.element()
+            .width(grow!())
+            .height(fit!())
+            .layout(|l| l.direction(LeftToRight).gap(8).align(Left, CenterY))
+            .children(|ui| {
+                let kind = match kind {
+                    FileKind::Image => "image",
+                    FileKind::Markdown => "md",
+                    FileKind::Text => "text",
+                };
+                ui.text(kind, |t| t.font_size(fs(11)).color(pal().muted));
+                ui.element().width(grow!()).height(fit!()).children(|ui| {
+                    let Owner::Task(task) = owner else {
+                        ui.text(name, |t| t.font_size(fs(13)).color(pal().text));
+                        return;
+                    };
+                    let hovered = ui.hovered();
+                    state.pointer_cursor |= hovered;
+                    if ui.just_released() {
+                        actions.push(Action::ViewFile(Some((task, id))));
+                    }
+                    ui.text(name, |t| {
+                        t.font_size(fs(13))
+                            .color(if hovered { pal().text } else { pal().accent })
+                    });
+                });
+                if button(ui, state, "×", Style::Quiet) {
+                    actions.push(Action::Detach { owner, file: id });
+                }
+            });
+    }
+    ui.element()
+        .width(grow!())
+        .height(fit!())
+        .layout(|l| l.direction(LeftToRight).gap(6).align(Left, CenterY))
+        .children(|ui| {
+            text_input(
+                ui,
+                "attach_path",
+                "Path to a file to attach",
+                grow!(),
+                false,
+            );
+            if button(ui, state, "Attach", Style::Normal) {
+                let path = ui.get_text_value("attach_path").to_string();
+                if !path.trim().is_empty() {
+                    ui.set_text_value("attach_path", "");
+                    actions.push(Action::Attach { owner, path });
+                }
+            }
+        });
 }
 
 fn status_dot(ui: &mut Ui, status: Status) {
@@ -1935,6 +1958,13 @@ fn editor_panel(
                 })
                 .empty();
         });
+        // An existing task's links and files are changed from its details.
+        if matches!(app.editing, Some(EditTarget::New(_))) {
+            let draft = &app.draft;
+            links_editor(ui, state, actions, Owner::Draft, &draft.links);
+            let files = draft.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
+            files_editor(ui, state, actions, Owner::Draft, files);
+        }
         ui.element()
             .width(grow!())
             .height(fit!())

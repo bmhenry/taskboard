@@ -1,12 +1,12 @@
 //! GUI state and the actions that change it. Kept free of rendering code so
 //! it can be tested without a window.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
 use taskboard_core::{
-    Board, DateField, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind, NewTask,
-    ProjectSettings, Status, Store, Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date,
+    Board, DateField, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind,
+    NewTask, ProjectSettings, Status, Store, Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,53 @@ pub enum View {
 pub enum EditTarget {
     Existing(Ulid),
     New(Status),
+}
+
+/// Whose links and files an action changes: a saved task, or the [`Draft`]
+/// of the new task being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    Task(Ulid),
+    Draft,
+}
+
+/// Links and files added to a new task before it's saved; they're saved with it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Draft {
+    pub links: Vec<Link>,
+    pub files: Vec<DraftFile>,
+}
+
+/// A file to attach once the new task is saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftFile {
+    /// Identifies the file in the draft, like [`taskboard_core::Attachment::id`].
+    pub id: Ulid,
+    pub name: String,
+    pub kind: FileKind,
+    pub source: PathBuf,
+}
+
+impl Draft {
+    /// Adds the file at `source`, checking it exists now rather than when the
+    /// task is saved.
+    fn attach(&mut self, source: &Path) -> taskboard_core::Result<()> {
+        if !source.is_file() {
+            return Err(Error::Invalid(format!("not a file: {}", source.display())));
+        }
+        let name = source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::Invalid(format!("bad file name: {}", source.display())))?
+            .to_string();
+        self.files.push(DraftFile {
+            id: Ulid::generate(),
+            kind: FileKind::from_name(&name),
+            name,
+            source: source.to_path_buf(),
+        });
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,20 +103,20 @@ pub enum Action {
     },
     Delete(Ulid),
     AddLink {
-        id: Ulid,
+        owner: Owner,
         url: String,
         kind: LinkKind,
     },
     RemoveLink {
-        id: Ulid,
+        owner: Owner,
         index: usize,
     },
     Attach {
-        id: Ulid,
+        owner: Owner,
         path: String,
     },
     Detach {
-        id: Ulid,
+        owner: Owner,
         file: Ulid,
     },
     ViewFile(Option<(Ulid, Ulid)>),
@@ -108,6 +155,8 @@ pub struct App {
     pub editing: Option<EditTarget>,
     /// Set when the editor opens so the UI copies the task into its inputs once.
     pub editor_needs_init: bool,
+    /// Links and files for the new task being written.
+    pub draft: Draft,
     /// (task, file) shown in the file viewer.
     pub viewing_file: Option<(Ulid, Ulid)>,
     /// The raw date bound inputs, kept so invalid text can be shown and fixed.
@@ -135,6 +184,7 @@ impl App {
             selected: None,
             editing: None,
             editor_needs_init: false,
+            draft: Draft::default(),
             viewing_file: None,
             date_inputs: (String::new(), String::new()),
             error: None,
@@ -244,10 +294,22 @@ impl App {
             Action::Save { .. }
                 | Action::Move { .. }
                 | Action::Delete(_)
-                | Action::AddLink { .. }
-                | Action::RemoveLink { .. }
-                | Action::Attach { .. }
-                | Action::Detach { .. }
+                | Action::AddLink {
+                    owner: Owner::Task(_),
+                    ..
+                }
+                | Action::RemoveLink {
+                    owner: Owner::Task(_),
+                    ..
+                }
+                | Action::Attach {
+                    owner: Owner::Task(_),
+                    ..
+                }
+                | Action::Detach {
+                    owner: Owner::Task(_),
+                    ..
+                }
         );
         match action {
             Action::Select(id) => {
@@ -270,12 +332,16 @@ impl App {
             Action::Edit(target) => {
                 self.editing = Some(target);
                 self.editor_needs_init = true;
-                if let EditTarget::Existing(id) = target {
-                    self.selected = Some(id);
+                match target {
+                    EditTarget::Existing(id) => self.selected = Some(id),
+                    EditTarget::New(_) => self.draft = Draft::default(),
                 }
             }
             Action::EditorReady => self.editor_needs_init = false,
-            Action::CancelEdit => self.editing = None,
+            Action::CancelEdit => {
+                self.editing = None;
+                self.draft = Draft::default();
+            }
             Action::Save { title, description } => {
                 let Some(target) = self.editing else {
                     return Ok(());
@@ -295,10 +361,28 @@ impl App {
                             title,
                             description,
                             status: Some(status),
-                            links: Vec::new(),
+                            links: self.draft.links.clone(),
                         };
-                        let (_, events) = self.store.update_with_events(|b| b.create(new))?;
+                        // The draft is kept if creating fails, e.g. on an empty title.
+                        let (id, events) = self.store.update_with_events(|b| b.create(new))?;
+                        let draft = std::mem::take(&mut self.draft);
+                        // Hooks run once the files are attached, so they see the whole task.
+                        let failed: Vec<String> = draft
+                            .files
+                            .iter()
+                            .filter_map(|f| {
+                                let e = self.store.attach(id, &f.source).err()?;
+                                Some(format!("{} ({e})", f.name))
+                            })
+                            .collect();
                         self.run_hooks(&events);
+                        if !failed.is_empty() {
+                            let msg = format!("Couldn't attach: {}", failed.join(", "));
+                            self.error = Some(match self.error.take() {
+                                Some(hooks) => format!("{hooks}; {msg}"),
+                                None => msg,
+                            });
+                        }
                         // A new task closes the panel rather than selecting it.
                         self.selected = None;
                     }
@@ -322,34 +406,48 @@ impl App {
                     self.editing = None;
                 }
             }
-            Action::AddLink { id, url, kind } => {
+            Action::AddLink { owner, url, kind } => {
                 let url = url.trim().to_string();
                 if !url.is_empty() {
-                    self.store.update(|b| {
-                        b.add_link(
-                            id,
-                            Link {
-                                url,
-                                label: None,
-                                kind,
-                            },
-                        )
-                    })?;
+                    let link = Link {
+                        url,
+                        label: None,
+                        kind,
+                    };
+                    match owner {
+                        Owner::Task(id) => self.store.update(|b| b.add_link(id, link))?,
+                        Owner::Draft => self.draft.links.push(link),
+                    }
                 }
             }
-            Action::RemoveLink { id, index } => {
-                self.store.update(|b| b.remove_link(id, index))?;
-            }
-            Action::Attach { id, path } => {
+            Action::RemoveLink { owner, index } => match owner {
+                Owner::Task(id) => {
+                    self.store.update(|b| b.remove_link(id, index))?;
+                }
+                Owner::Draft => {
+                    if index < self.draft.links.len() {
+                        self.draft.links.remove(index);
+                    }
+                }
+            },
+            Action::Attach { owner, path } => {
                 let path = PathBuf::from(expand_home(path.trim()));
-                self.store.attach(id, &path)?;
-            }
-            Action::Detach { id, file } => {
-                self.store.detach(id, file)?;
-                if self.viewing_file == Some((id, file)) {
-                    self.viewing_file = None;
+                match owner {
+                    Owner::Task(id) => {
+                        self.store.attach(id, &path)?;
+                    }
+                    Owner::Draft => self.draft.attach(&path)?,
                 }
             }
+            Action::Detach { owner, file } => match owner {
+                Owner::Task(id) => {
+                    self.store.detach(id, file)?;
+                    if self.viewing_file == Some((id, file)) {
+                        self.viewing_file = None;
+                    }
+                }
+                Owner::Draft => self.draft.files.retain(|f| f.id != file),
+            },
             Action::ViewFile(f) => self.viewing_file = f,
             Action::SetSearch(text) => self.filter.text = text,
             Action::ToggleStatusFilter(status) => {
@@ -574,6 +672,56 @@ mod tests {
         });
         assert_eq!(app.editing, None);
         assert_eq!(app.selected_task().unwrap().title, "alpha 2");
+    }
+
+    #[test]
+    fn new_task_saves_draft_links_and_files() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        let gone = dir.path().join("gone.txt");
+        std::fs::write(&src, "# hi").unwrap();
+        std::fs::write(&gone, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::AddLink {
+            owner: Owner::Draft,
+            url: "https://example.com/1".into(),
+            kind: LinkKind::Source,
+        });
+        for path in [
+            gone.display().to_string(),
+            src.display().to_string(),
+            "missing.md".into(),
+        ] {
+            app.apply(Action::Attach {
+                owner: Owner::Draft,
+                path,
+            });
+        }
+        assert!(app.error.take().unwrap().contains("missing.md"));
+        assert_eq!(app.draft.files.len(), 2);
+        // A file removed before saving doesn't stop the others attaching.
+        std::fs::remove_file(&gone).unwrap();
+
+        // A failed save keeps the draft to try again.
+        app.apply(Action::Save {
+            title: " ".into(),
+            description: String::new(),
+        });
+        assert!(app.error.take().is_some());
+        app.apply(Action::Save {
+            title: "alpha".into(),
+            description: String::new(),
+        });
+        assert!(
+            app.error
+                .unwrap()
+                .starts_with("Couldn't attach: gone.txt (")
+        );
+        assert_eq!(app.draft, Draft::default());
+        let task = app.board.column(Status::Open)[0];
+        assert_eq!(task.links[0].url, "https://example.com/1");
+        assert_eq!(task.files.len(), 1);
+        assert_eq!(task.files[0].name, "notes.md");
     }
 
     #[test]

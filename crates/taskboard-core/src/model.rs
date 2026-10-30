@@ -53,14 +53,19 @@ impl Task {
         short_id(&self.id)
     }
 
-    /// The kind a newly added link should get unless the user picks one:
-    /// the first source link is the most likely, then context after that.
+    /// The kind a newly added link should get; see [`default_link_kind`].
     pub fn default_link_kind(&self) -> LinkKind {
-        if self.links.iter().any(|l| l.kind == LinkKind::Source) {
-            LinkKind::Context
-        } else {
-            LinkKind::Source
-        }
+        default_link_kind(&self.links)
+    }
+}
+
+/// The kind a link added after `links` should get unless the user picks one:
+/// the first source link is the most likely, then context after that.
+pub fn default_link_kind(links: &[Link]) -> LinkKind {
+    if links.iter().any(|l| l.kind == LinkKind::Source) {
+        LinkKind::Context
+    } else {
+        LinkKind::Source
     }
 }
 
@@ -250,6 +255,9 @@ mod tests {
         board.add_link(id, link(LinkKind::Context)).unwrap();
         assert_eq!(board.get(id).unwrap().default_link_kind(), LinkKind::Source);
         board.add_link(id, link(LinkKind::Source)).unwrap();
-        assert_eq!(board.get(id).unwrap().default_link_kind(), LinkKind::Context);
+        assert_eq!(
+            board.get(id).unwrap().default_link_kind(),
+            LinkKind::Context
+        );
     }
 }
