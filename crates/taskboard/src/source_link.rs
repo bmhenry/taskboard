@@ -12,13 +12,16 @@ pub enum Site {
 }
 
 /// Labels longer than this are cut short with an ellipsis.
-const MAX_LABEL_CHARS: usize = 28;
+const MAX_LABEL_CHARS: usize = 22;
 
 /// Splits a URL into its lowercased host (no `www.`, port or credentials) and
 /// its path segments, ignoring any query or fragment.
 fn split(url: &str) -> (String, Vec<&str>) {
     let rest = url.trim();
-    let rest = rest.split_once("://").map_or(rest, |(_, r)| r);
+    let rest = match rest.split_once("://") {
+        Some((scheme, r)) if !scheme.contains(['/', '?', '#']) => r,
+        _ => rest,
+    };
     let rest = rest.split(['?', '#']).next().unwrap_or_default();
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = authority.rsplit('@').next().unwrap_or_default();
@@ -34,16 +37,17 @@ fn split(url: &str) -> (String, Vec<&str>) {
 /// issue and merge request paths go through.
 pub fn site(url: &str) -> Site {
     let (host, path) = split(url);
-    if host.contains("github") {
+    let is = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    if is("github.com") {
         Site::GitHub
-    } else if host.contains("gitlab") || path.contains(&"-") {
-        Site::GitLab
-    } else if host.contains("bitbucket") {
+    } else if is("bitbucket.org") {
         Site::Bitbucket
     } else if host.contains("jira")
         || (host.ends_with(".atlassian.net") && path.first() == Some(&"browse"))
     {
         Site::Jira
+    } else if host.contains("gitlab") || path.contains(&"-") {
+        Site::GitLab
     } else {
         Site::Other
     }
@@ -69,26 +73,32 @@ pub fn short_label(url: &str) -> String {
         Site::Jira => path.last().map(|s| s.to_string()),
         _ => None,
     };
-    let label = label.unwrap_or_else(|| match path.last() {
-        Some(last) if path.len() > 1 => format!("{host}/…/{last}"),
-        Some(last) => format!("{host}/{last}"),
-        None => host,
-    });
-    truncate(&label, MAX_LABEL_CHARS)
+    label.unwrap_or_else(|| {
+        let label = match path.last() {
+            Some(last) if path.len() > 1 => format!("{host}/…/{last}"),
+            Some(last) => format!("{host}/{last}"),
+            None => host,
+        };
+        truncate(&label, MAX_LABEL_CHARS)
+    })
 }
 
 /// `owner/repo`, plus `#N` or `!N` when `rest`, the path after the repo, is
-/// an issue or a pull or merge request.
+/// an issue or a pull or merge request. A long repo is cut short rather than
+/// the number.
 fn repo_label(repo: &[&str], rest: &[&str]) -> String {
-    let repo = repo.join("/");
-    match rest {
+    let suffix = match rest {
         [kind, n, ..] if n.chars().all(|c| c.is_ascii_digit()) => match *kind {
-            "issues" | "pull" | "pull-requests" => format!("{repo}#{n}"),
-            "merge_requests" => format!("{repo}!{n}"),
-            _ => repo,
+            "issues" | "pull" | "pull-requests" => format!("#{n}"),
+            "merge_requests" => format!("!{n}"),
+            _ => String::new(),
         },
-        _ => repo,
-    }
+        _ => String::new(),
+    };
+    let max = MAX_LABEL_CHARS
+        .saturating_sub(suffix.chars().count())
+        .max(2);
+    format!("{}{suffix}", truncate(&repo.join("/"), max))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -105,45 +115,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_sites() {
-        assert_eq!(
-            site("https://github.com/rust-lang/rust/issues/1"),
-            Site::GitHub
-        );
-        assert_eq!(site("https://gitlab.com/group/proj"), Site::GitLab);
-        // Self-hosted GitLab is only recognizable by its `/-/` routes.
-        assert_eq!(
-            site("https://git.bmhenry.com/brandon/taskboard/-/issues/3"),
-            Site::GitLab
-        );
-        assert_eq!(site("https://acme.atlassian.net/browse/OPS-12"), Site::Jira);
-        assert_eq!(site("https://example.com/a/b"), Site::Other);
+    fn recognizes_sites_and_labels_links() {
+        let cases = [
+            (
+                "https://github.com/rust-lang/rust/pull/42#discussion",
+                Site::GitHub,
+                "rust-lang/rust#42",
+            ),
+            (
+                "https://gitlab.com/org/sub/proj/-/merge_requests/17?tab=diffs",
+                Site::GitLab,
+                "sub/proj!17",
+            ),
+            // Self-hosted GitLab is only recognizable by its `/-/` routes.
+            (
+                "https://git.bmhenry.com/brandon/taskboard/-/issues/3",
+                Site::GitLab,
+                "brandon/taskboard#3",
+            ),
+            (
+                "https://acme.atlassian.net/browse/OPS-12",
+                Site::Jira,
+                "OPS-12",
+            ),
+            (
+                "https://www.example.com/docs/guide/intro",
+                Site::Other,
+                "example.com/…/intro",
+            ),
+        ];
+        for (url, expected_site, label) in cases {
+            assert_eq!(
+                (site(url), short_label(url).as_str()),
+                (expected_site, label)
+            );
+        }
     }
 
     #[test]
-    fn labels_issues_and_merge_requests() {
-        assert_eq!(
-            short_label("https://github.com/rust-lang/rust/pull/42#discussion"),
-            "rust-lang/rust#42"
-        );
-        assert_eq!(
-            short_label("https://gitlab.com/org/sub/proj/-/merge_requests/17?tab=diffs"),
-            "sub/proj!17"
-        );
-        assert_eq!(
-            short_label("https://acme.atlassian.net/browse/OPS-12"),
-            "OPS-12"
-        );
-        assert_eq!(
-            short_label("https://www.example.com/docs/guide/intro"),
-            "example.com/…/intro"
-        );
-    }
-
-    #[test]
-    fn long_labels_are_truncated() {
-        let label = short_label("https://example.com/a-very-long-page-name-that-keeps-going");
+    fn long_labels_keep_the_number() {
+        let label =
+            short_label("https://github.com/some-organization/a-long-repository/issues/123");
         assert_eq!(label.chars().count(), MAX_LABEL_CHARS);
-        assert!(label.ends_with('…'));
+        assert!(label.ends_with("…#123"));
     }
 }

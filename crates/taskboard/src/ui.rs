@@ -1356,39 +1356,46 @@ fn card_body(ui: &mut Ui, task: &Task, faded: bool) -> SourcePill {
     }
 }
 
-static GITHUB_LOGO: GraphicAsset = GraphicAsset::Bytes {
-    file_name: "github.png",
-    data: include_bytes!("../assets/logos/github.png"),
-};
-static GITLAB_LOGO: GraphicAsset = GraphicAsset::Bytes {
-    file_name: "gitlab.png",
-    data: include_bytes!("../assets/logos/gitlab.png"),
-};
-static BITBUCKET_LOGO: GraphicAsset = GraphicAsset::Bytes {
-    file_name: "bitbucket.png",
-    data: include_bytes!("../assets/logos/bitbucket.png"),
-};
-static JIRA_LOGO: GraphicAsset = GraphicAsset::Bytes {
-    file_name: "jira.png",
-    data: include_bytes!("../assets/logos/jira.png"),
-};
+/// The source site's logo, white so the UI can tint it. None for sites
+/// without one.
+fn logo(site: Site) -> Option<&'static GraphicAsset> {
+    static GITHUB: GraphicAsset = GraphicAsset::Bytes {
+        file_name: "github.png",
+        data: include_bytes!("../assets/logos/github.png"),
+    };
+    static GITLAB: GraphicAsset = GraphicAsset::Bytes {
+        file_name: "gitlab.png",
+        data: include_bytes!("../assets/logos/gitlab.png"),
+    };
+    static BITBUCKET: GraphicAsset = GraphicAsset::Bytes {
+        file_name: "bitbucket.png",
+        data: include_bytes!("../assets/logos/bitbucket.png"),
+    };
+    static JIRA: GraphicAsset = GraphicAsset::Bytes {
+        file_name: "jira.png",
+        data: include_bytes!("../assets/logos/jira.png"),
+    };
+    match site {
+        Site::GitHub => Some(&GITHUB),
+        Site::GitLab => Some(&GITLAB),
+        Site::Bitbucket => Some(&BITBUCKET),
+        Site::Jira => Some(&JIRA),
+        Site::Other => None,
+    }
+}
 
 /// A round pill with the source site's logo and a short form of the link.
 fn source_pill(ui: &mut Ui, url: &str) -> SourcePill {
-    let logo = match source_link::site(url) {
-        Site::GitHub => Some(&GITHUB_LOGO),
-        Site::GitLab => Some(&GITLAB_LOGO),
-        Site::Bitbucket => Some(&BITBUCKET_LOGO),
-        Site::Jira => Some(&JIRA_LOGO),
-        Site::Other => None,
-    };
+    let logo = logo(source_link::site(url));
     let mut pill = SourcePill {
         url: url.to_string(),
         ..Default::default()
     };
+    // Clipped in case a large font pushes it past a narrow card's edge.
     ui.element()
         .width(fit!())
         .height(fixed!(px(20.0)))
+        .overflow(|o| o.clip())
         .corner_radius(px(10.0))
         .background_color(pal().panel)
         .border(|b| b.all(1).color(pal().card_edge))
