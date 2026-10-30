@@ -102,7 +102,7 @@ pub enum Action {
     },
     Attach {
         owner: Owner,
-        path: String,
+        path: PathBuf,
     },
     Detach {
         owner: Owner,
@@ -415,12 +415,17 @@ impl App {
                 }
             },
             Action::Attach { owner, path } => {
-                let path = PathBuf::from(expand_home(path.trim()));
                 match owner {
                     Owner::Task(id) => {
                         self.store.attach(id, &path)?;
                     }
-                    Owner::Draft => self.draft.attach(&path)?,
+                    // A file dialog can close after the new task was saved
+                    // or cancelled; don't slip its file into the next unsaved
+                    // draft.
+                    Owner::Draft if matches!(self.editing, Some(EditTarget::New(_))) => {
+                        self.draft.attach(&path)?
+                    }
+                    Owner::Draft => {}
                 }
             }
             Action::Detach { owner, file } => match owner {
@@ -567,13 +572,6 @@ pub fn drop_index(card_midpoints: &[f32], y: f32) -> usize {
     card_midpoints.iter().filter(|mid| **mid < y).count()
 }
 
-fn expand_home(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
-        _ => path.to_string(),
-    }
-}
-
 fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
@@ -671,11 +669,7 @@ mod tests {
             url: "https://example.com/1".into(),
             kind: LinkKind::Source,
         });
-        for path in [
-            gone.display().to_string(),
-            src.display().to_string(),
-            "missing.md".into(),
-        ] {
+        for path in [gone.clone(), src, "missing.md".into()] {
             app.apply(Action::Attach {
                 owner: Owner::Draft,
                 path,
@@ -722,6 +716,21 @@ mod tests {
         let task = app.board.get(a).unwrap();
         let urls: Vec<&str> = task.links.iter().map(|l| l.url.as_str()).collect();
         assert_eq!(urls, ["https://example.com"]);
+    }
+
+    #[test]
+    fn file_picked_after_new_task_closed_is_dropped() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::CancelEdit);
+        app.apply(Action::Attach {
+            owner: Owner::Draft,
+            path: src,
+        });
+        assert_eq!(app.error, None);
+        assert_eq!(app.draft, Draft::default());
     }
 
     #[test]

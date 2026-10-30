@@ -12,6 +12,7 @@ mod viewer;
 mod widgets;
 mod zones;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
@@ -107,6 +108,10 @@ pub enum Message {
     AttachPath(String),
     AddLink(Owner, LinkKind),
     Attach(Owner),
+    /// Opens the native file dialog to pick a file to attach.
+    Browse(Owner),
+    /// The file dialog closed; `None` if it was cancelled.
+    Picked(Owner, Option<PathBuf>),
     EditTitle(String),
     EditDesc(text_editor::Action),
     Save,
@@ -231,10 +236,15 @@ impl Gui {
             }
             Message::Attach(owner) => {
                 if !ui.attach_path.trim().is_empty() {
-                    let path = std::mem::take(&mut ui.attach_path);
+                    let path = typed_path(&std::mem::take(&mut ui.attach_path));
                     self.app.apply(Action::Attach { owner, path });
                 }
             }
+            Message::Browse(owner) => {
+                return Task::perform(pick_file(), move |path| Message::Picked(owner, path));
+            }
+            Message::Picked(owner, Some(path)) => self.app.apply(Action::Attach { owner, path }),
+            Message::Picked(_, None) => {}
             Message::EditTitle(s) => ui.edit_title = s,
             Message::EditDesc(action) => ui.edit_desc.perform(action),
             Message::Save => {
@@ -465,6 +475,27 @@ impl Gui {
         }
         layers.into()
     }
+}
+
+/// A path typed into the attach input, trimmed and with a leading `~/`
+/// expanded. Picked paths are used as they are.
+fn typed_path(text: &str) -> PathBuf {
+    let text = text.trim();
+    match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(text),
+    }
+}
+
+/// Asks for a file with the system's file dialog, without blocking the UI.
+/// rfd gives `None` both when cancelled and when there's no portal (or
+/// zenity) to show a dialog, so the latter fails silently.
+async fn pick_file() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Attach a file")
+        .pick_file()
+        .await
+        .map(|f| f.path().to_path_buf())
 }
 
 /// `dialog` centered over a scrim that covers the window. A press on the
