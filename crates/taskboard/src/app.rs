@@ -222,7 +222,9 @@ impl App {
         if tasks.is_empty() {
             return Vec::new();
         }
-        let dir = self.store.project_dir();
+        // A project opened as "." has no file name until made absolute.
+        let dir = std::fs::canonicalize(self.store.project_dir())
+            .unwrap_or_else(|_| self.store.project_dir().to_path_buf());
         let name = dir.file_name().map_or_else(
             || dir.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
@@ -256,16 +258,13 @@ impl App {
             }
             Action::SetView(view) => {
                 self.view = view;
-                // Open on a task's details rather than an empty pane.
-                if view == View::InProgress
-                    && self
-                        .selected_task()
-                        .is_none_or(|t| t.status != Status::InProgress)
-                {
-                    self.selected = self
-                        .visible_column(Status::InProgress)
-                        .first()
-                        .map(|t| t.id);
+                // Open on a listed task's details rather than an empty pane,
+                // unless that would swap out the task being edited.
+                if view == View::InProgress && self.editing.is_none() {
+                    let listed = self.visible_column(Status::InProgress);
+                    if !listed.iter().any(|t| Some(t.id) == self.selected) {
+                        self.selected = listed.first().map(|t| t.id);
+                    }
                 }
             }
             Action::Edit(target) => {
@@ -733,16 +732,25 @@ mod tests {
         app.apply(Action::Select(Some(a)));
         app.apply(Action::SetView(View::InProgress));
         assert_eq!(app.selected, Some(b));
-        // ...but an in-progress one is kept.
+        // ...but a listed one is kept...
         app.apply(Action::Select(Some(c)));
         app.apply(Action::SetView(View::Board));
         app.apply(Action::SetView(View::InProgress));
         assert_eq!(app.selected, Some(c));
+        // ...as is the task being edited.
+        app.apply(Action::SetView(View::Board));
+        app.apply(Action::Edit(EditTarget::Existing(a)));
+        app.apply(Action::SetView(View::InProgress));
+        assert_eq!(app.selected, Some(a));
+        app.apply(Action::CancelEdit);
 
-        // The search filter applies here too.
-        app.apply(Action::SetSearch("gamma".into()));
+        // The search filter applies here too, so a hidden task gives way.
+        app.apply(Action::SetSearch("beta".into()));
         let ids: Vec<Ulid> = app.in_progress_groups()[0].1.iter().map(|t| t.id).collect();
-        assert_eq!(ids, [c]);
+        assert_eq!(ids, [b]);
+        app.apply(Action::Select(Some(c)));
+        app.apply(Action::SetView(View::InProgress));
+        assert_eq!(app.selected, Some(b));
     }
 
     #[test]

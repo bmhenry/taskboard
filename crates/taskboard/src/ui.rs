@@ -1186,7 +1186,9 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         .empty();
                     let mut open_view = false;
                     ui.element().width(fit!()).height(fit!()).children(|ui| {
-                        let opens = status == Status::InProgress && dragging.is_none();
+                        // Not while a card press is pending, or releasing it here
+                        // would both select the card and switch views.
+                        let opens = status == Status::InProgress && state.drag.is_none();
                         let hovered = opens && ui.hovered();
                         open_view = opens && ui.just_released();
                         ui.text(status.label(), |t| {
