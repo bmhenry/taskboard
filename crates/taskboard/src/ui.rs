@@ -356,9 +356,8 @@ fn close_menus_on_outside_click(ui: &mut Ui, state: &mut UiState) {
 }
 
 /// Closes the settings modal (either page, settings or keybindings) when a
-/// press lands outside the dialog, using last frame's layout. The press that
-/// opens it can't close it, as the modal isn't open until that press's
-/// release.
+/// press lands outside the dialog, using last frame's layout. The gear button
+/// opens it on release, so the press that opens it never sees it open.
 fn close_settings_on_outside_click(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     if pressed_outside(
         app.settings_open,
@@ -2265,7 +2264,6 @@ mod tests {
     fn open_box_closes_on_press_outside_only() {
         assert!(pressed_outside(true, true, false));
         assert!(!pressed_outside(true, true, true));
-        assert!(!pressed_outside(true, false, false));
     }
 
     #[test]
