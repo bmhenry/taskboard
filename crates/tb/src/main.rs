@@ -127,9 +127,9 @@ enum LinkCommand {
         url: String,
         #[arg(short, long)]
         label: Option<String>,
-        /// source or context.
-        #[arg(short, long, default_value = "context")]
-        kind: LinkKind,
+        /// source or context [default: source if the task has no source link yet, else context].
+        #[arg(short, long)]
+        kind: Option<LinkKind>,
     },
     /// Remove a link by its number (as shown by `tb show`).
     Rm { id: String, number: usize },
@@ -309,6 +309,9 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
         }) => {
             let id = store.update(|b| {
                 let id = b.resolve(&id)?;
+                let kind = kind
+                    .or_else(|| b.get(id).map(|t| t.default_link_kind()))
+                    .unwrap_or_default();
                 b.add_link(id, Link { url, label, kind }).map(|_| id)
             })?;
             report(out, json, store, id, "Linked")?;
@@ -547,5 +550,22 @@ mod tests {
         tb(&store, &["close", &created.short_id()]);
         assert!(!tb(&store, &["list"]).contains("Write docs"));
         assert!(tb(&store, &["list", "--all"]).contains("Write docs"));
+    }
+
+    #[test]
+    fn link_add_defaults_kind_to_source_then_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let task: Task = serde_json::from_str(&tb(&store, &["--json", "add", "T"])).unwrap();
+        let id = task.short_id();
+        tb(&store, &["link", "add", &id, "https://a", "-k", "context"]);
+        tb(&store, &["link", "add", &id, "https://b"]);
+        tb(&store, &["link", "add", &id, "https://c"]);
+        let task: Task = serde_json::from_str(&tb(&store, &["--json", "show", &id])).unwrap();
+        let kinds: Vec<_> = task.links.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            [LinkKind::Context, LinkKind::Source, LinkKind::Context]
+        );
     }
 }
