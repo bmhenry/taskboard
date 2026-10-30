@@ -709,6 +709,22 @@ mod tests {
     }
 
     #[test]
+    fn add_link_trims_url_and_ignores_blank() {
+        let (_dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        for url in ["  https://example.com ", "   "] {
+            app.apply(Action::AddLink {
+                owner: Owner::Task(a),
+                url: url.into(),
+                kind: LinkKind::Context,
+            });
+        }
+        let task = app.board.get(a).unwrap();
+        let urls: Vec<&str> = task.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(urls, ["https://example.com"]);
+    }
+
+    #[test]
     fn selection_cleared_when_task_deleted_elsewhere() {
         let (_dir, mut app) = app();
         let a = add(&mut app, "alpha");
