@@ -191,6 +191,8 @@ pub struct UiState {
     hook_inputs: Option<usize>,
     /// When a hook command was last typed in, while that edit is unsaved.
     hook_edited_at: Option<f64>,
+    /// The editor was open last frame.
+    was_editing: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -213,6 +215,13 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     if app.editing.is_some() || app.selected != state.status_open {
         state.status_open = None;
     }
+    // Ply keeps a closed editor's input focused, and once that focus came
+    // from Tab, drawing its focus ring indexes into this frame's (shorter)
+    // element list and panics.
+    if state.was_editing && app.editing.is_none() {
+        ui.clear_focus();
+    }
+    state.was_editing = app.editing.is_some();
 
     if app.editor_needs_init {
         let (title, desc) = match app.editing {
