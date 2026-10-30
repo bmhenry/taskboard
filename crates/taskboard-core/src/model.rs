@@ -52,6 +52,16 @@ impl Task {
     pub fn short_id(&self) -> String {
         short_id(&self.id)
     }
+
+    /// The kind a newly added link should get unless the user picks one:
+    /// the first source link is the most likely, then context after that.
+    pub fn default_link_kind(&self) -> LinkKind {
+        if self.links.iter().any(|l| l.kind == LinkKind::Source) {
+            LinkKind::Context
+        } else {
+            LinkKind::Source
+        }
+    }
 }
 
 pub fn short_id(id: &Ulid) -> String {
@@ -221,5 +231,25 @@ mod tests {
             Status::NeedsReview
         );
         assert!("doing".parse::<Status>().is_err());
+    }
+
+    #[test]
+    fn default_link_kind_is_source_until_one_exists() {
+        let mut board = crate::Board::default();
+        let id = board
+            .create(crate::NewTask {
+                title: "t".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let link = |kind| Link {
+            url: "https://example.com".into(),
+            label: None,
+            kind,
+        };
+        board.add_link(id, link(LinkKind::Context)).unwrap();
+        assert_eq!(board.get(id).unwrap().default_link_kind(), LinkKind::Source);
+        board.add_link(id, link(LinkKind::Source)).unwrap();
+        assert_eq!(board.get(id).unwrap().default_link_kind(), LinkKind::Context);
     }
 }

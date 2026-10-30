@@ -99,7 +99,7 @@ tb edit 7F3TPKKW -t "New title" -d -
 tb move 7F3TPKKW in-progress -p 1   # 1 = top of the column
 tb close 7F3TPKKW
 tb rm 7F3TPKKW
-tb link add 7F3TPKKW https://docs.rs -l "API docs" -k context
+tb link add 7F3TPKKW https://docs.rs -l "API docs" -k context   # -k defaults to source until the task has one
 tb file add 7F3TPKKW screenshot.png
 tb file cat 7F3TPKKW notes.md
 ```

@@ -173,7 +173,9 @@ fn hook_input_id(index: usize) -> Id {
 pub struct UiState {
     drag: Option<Drag>,
     confirm_delete: Option<Ulid>,
-    link_kind: LinkKind,
+    /// Link kind the user toggled to for a task; otherwise the add-link row
+    /// uses [`Task::default_link_kind`].
+    link_kind: Option<(Ulid, LinkKind)>,
     /// Decoded images and file contents for the file viewer, by attachment id.
     textures: HashMap<Ulid, Texture2D>,
     file_text: HashMap<Ulid, String>,
@@ -1541,17 +1543,22 @@ fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec
             .layout(|l| l.direction(LeftToRight).gap(6).align(Left, CenterY))
             .children(|ui| {
                 text_input(ui, "link_url", "https://…", grow!(), false);
-                let kind = state.link_kind;
+                let kind = match state.link_kind {
+                    Some((id, kind)) if id == task.id => kind,
+                    _ => task.default_link_kind(),
+                };
                 if button(ui, state, &kind.to_string(), Style::Quiet) {
-                    state.link_kind = if kind == LinkKind::Source {
+                    let toggled = if kind == LinkKind::Source {
                         LinkKind::Context
                     } else {
                         LinkKind::Source
                     };
+                    state.link_kind = Some((task.id, toggled));
                 }
                 if button(ui, state, "Add", Style::Normal) {
                     let url = ui.get_text_value("link_url").to_string();
                     ui.set_text_value("link_url", "");
+                    state.link_kind = None;
                     actions.push(Action::AddLink {
                         id: task.id,
                         url,
