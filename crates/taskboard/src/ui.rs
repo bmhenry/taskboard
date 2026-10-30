@@ -232,6 +232,7 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
     read_filter_inputs(ui, app, &mut actions);
     sync_hook_inputs(ui, app, state, &mut actions);
     close_menus_on_outside_click(ui, state);
+    close_settings_on_outside_click(ui, app, &mut actions);
     handle_keys(ui, app, state, &mut actions);
     handle_drag(ui, app, state, &mut actions);
 
@@ -354,6 +355,25 @@ fn close_menus_on_outside_click(ui: &mut Ui, state: &mut UiState) {
     {
         state.status_open = None;
     }
+}
+
+/// Closes the settings modal (either page, settings or keybindings) when a
+/// press lands outside the dialog, using last frame's layout. The gear button
+/// opens it on release, so the press that opens it never sees it open.
+fn close_settings_on_outside_click(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
+    if pressed_outside(
+        app.settings_open,
+        is_mouse_button_pressed(MouseButton::Left),
+        ui.pointer_over("settings_dialog"),
+    ) {
+        actions.push(Action::ShowSettings(false));
+    }
+}
+
+/// Whether an open box should close: the mouse was pressed this frame and
+/// wasn't over the box.
+fn pressed_outside(open: bool, pressed: bool, over_box: bool) -> bool {
+    open && pressed && !over_box
 }
 
 /// Hides the filter dropdown, dropping focus from its inputs so typing
@@ -1988,6 +2008,7 @@ fn settings_modal(
         .layout(|l| l.align(CenterX, CenterY))
         .children(|ui| {
             ui.element()
+                .id("settings_dialog")
                 .width(fixed!(dialog_w))
                 .height(fit!(0.0, h * 0.85))
                 .background_color(pal().panel)
@@ -2244,5 +2265,16 @@ mod tests {
             shorten_path(r"C:\Users\someone\projects\clients\taskboard", 22),
             r"…\clients\taskboard"
         );
+    }
+
+    #[test]
+    fn open_box_closes_on_press_outside_only() {
+        assert!(pressed_outside(true, true, false));
+        assert!(!pressed_outside(true, true, true));
+    }
+
+    #[test]
+    fn closed_box_ignores_the_press_that_opens_it() {
+        assert!(!pressed_outside(false, true, false));
     }
 }
