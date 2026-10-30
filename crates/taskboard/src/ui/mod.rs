@@ -12,6 +12,7 @@ mod viewer;
 mod widgets;
 mod zones;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
@@ -107,6 +108,10 @@ pub enum Message {
     AttachPath(String),
     AddLink(Owner, LinkKind),
     Attach(Owner),
+    /// Opens the native file dialog to pick a file to attach.
+    Browse(Owner),
+    /// The file dialog closed; `None` if it was cancelled.
+    Picked(Owner, Option<PathBuf>),
     EditTitle(String),
     EditDesc(text_editor::Action),
     Save,
@@ -235,6 +240,14 @@ impl Gui {
                     self.app.apply(Action::Attach { owner, path });
                 }
             }
+            Message::Browse(owner) => {
+                return Task::perform(pick_file(), move |path| Message::Picked(owner, path));
+            }
+            Message::Picked(owner, Some(path)) => self.app.apply(Action::Attach {
+                owner,
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Message::Picked(_, None) => {}
             Message::EditTitle(s) => ui.edit_title = s,
             Message::EditDesc(action) => ui.edit_desc.perform(action),
             Message::Save => {
@@ -465,6 +478,15 @@ impl Gui {
         }
         layers.into()
     }
+}
+
+/// Asks for a file with the system's file dialog, without blocking the UI.
+async fn pick_file() -> Option<PathBuf> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Attach a file")
+        .pick_file()
+        .await?;
+    Some(file.path().to_path_buf())
 }
 
 /// `dialog` centered over a scrim that covers the window. A press on the

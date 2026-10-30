@@ -221,6 +221,7 @@ fn files_editor<'a>(
             .on_submit(Message::Attach(owner))
             .width(Length::Fill),
             btn(p, "Attach", Style::Normal, Message::Attach(owner)),
+            btn(p, "Browse…", Style::Normal, Message::Browse(owner)),
         ]
         .spacing(6)
         .align_y(Alignment::Center),

@@ -13,6 +13,7 @@ iced_drop = "=0.2.54"
 image = { version = "0.25", default-features = false, features = ["png"] }
 notify = "8"
 pulldown-cmark = { version = "0.13", default-features = false }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
 tempfile.workspace = true

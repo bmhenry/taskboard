@@ -420,7 +420,12 @@ impl App {
                     Owner::Task(id) => {
                         self.store.attach(id, &path)?;
                     }
-                    Owner::Draft => self.draft.attach(&path)?,
+                    // A file dialog can close after the new task was saved
+                    // or cancelled; don't slip its file into the next one.
+                    Owner::Draft if matches!(self.editing, Some(EditTarget::New(_))) => {
+                        self.draft.attach(&path)?
+                    }
+                    Owner::Draft => {}
                 }
             }
             Action::Detach { owner, file } => match owner {
@@ -722,6 +727,21 @@ mod tests {
         let task = app.board.get(a).unwrap();
         let urls: Vec<&str> = task.links.iter().map(|l| l.url.as_str()).collect();
         assert_eq!(urls, ["https://example.com"]);
+    }
+
+    #[test]
+    fn file_picked_after_new_task_closed_is_dropped() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::CancelEdit);
+        app.apply(Action::Attach {
+            owner: Owner::Draft,
+            path: src.display().to_string(),
+        });
+        assert_eq!(app.error, None);
+        assert_eq!(app.draft, Draft::default());
     }
 
     #[test]
