@@ -71,15 +71,6 @@ impl Draft {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Drag {
-    pub id: Ulid,
-    pub start: (f32, f32),
-    /// Becomes true once the pointer has moved far enough to count as a drag
-    /// rather than a click.
-    pub active: bool,
-}
-
 /// Distance in pixels the pointer must travel before a press becomes a drag.
 pub const DRAG_THRESHOLD: f32 = 6.0;
 
@@ -87,10 +78,8 @@ pub const DRAG_THRESHOLD: f32 = 6.0;
 pub enum Action {
     Select(Option<Ulid>),
     SetView(View),
-    /// Open the editor; the UI fills its inputs on the next frame.
+    /// Open the editor; the UI fills its inputs from the target.
     Edit(EditTarget),
-    /// The UI has copied the edit target into its inputs.
-    EditorReady,
     CancelEdit,
     Save {
         title: String,
@@ -153,8 +142,6 @@ pub struct App {
     pub filter: Filter,
     pub selected: Option<Ulid>,
     pub editing: Option<EditTarget>,
-    /// Set when the editor opens so the UI copies the task into its inputs once.
-    pub editor_needs_init: bool,
     /// Links and files for the new task being written.
     pub draft: Draft,
     /// (task, file) shown in the file viewer.
@@ -183,7 +170,6 @@ impl App {
             filter: Filter::default(),
             selected: None,
             editing: None,
-            editor_needs_init: false,
             draft: Draft::default(),
             viewing_file: None,
             date_inputs: (String::new(), String::new()),
@@ -331,13 +317,11 @@ impl App {
             }
             Action::Edit(target) => {
                 self.editing = Some(target);
-                self.editor_needs_init = true;
                 match target {
                     EditTarget::Existing(id) => self.selected = Some(id),
                     EditTarget::New(_) => self.draft = Draft::default(),
                 }
             }
-            Action::EditorReady => self.editor_needs_init = false,
             Action::CancelEdit => {
                 self.editing = None;
                 self.draft = Draft::default();

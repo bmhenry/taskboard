@@ -7,7 +7,10 @@ description = "Local Kanban GUI for Taskboard"
 [dependencies]
 taskboard-core.workspace = true
 chrono.workspace = true
-ply-engine = "1.1"
+iced = { version = "0.14", features = ["image", "canvas", "advanced", "tokio"] }
+# Pinned exactly: published by a fork with frequent releases; review diffs before bumping.
+iced_drop = "=0.2.54"
+image = { version = "0.25", default-features = false, features = ["png"] }
 notify = "8"
 pulldown-cmark = { version = "0.13", default-features = false }
 

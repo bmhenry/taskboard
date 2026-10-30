@@ -2,7 +2,7 @@
 //! for it, for the pill on its card.
 
 /// A site the card shows a logo for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Site {
     GitHub,
     GitLab,

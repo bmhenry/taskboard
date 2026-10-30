@@ -5,10 +5,12 @@ description: Drive the taskboard GUI headlessly to check a UI change works — l
 
 # Headless GUI testing
 
-The app is macroquad/miniquad over X11, so it runs unchanged in an Xvfb display.
+The app is Iced over winit, which runs in an Xvfb display once `gui.sh` unsets
+`WAYLAND_DISPLAY` (otherwise the window opens on the user's Wayland desktop).
 That keeps testing off the user's desktop: their cursor and focus are untouched and
-the window is the same size every run. Rendering is Mesa's software OpenGL, which
-is fine for this 2D UI.
+the window is the same size every run. Rendering is Iced's software renderer
+(`ICED_BACKEND=tiny-skia`), so no GPU is needed; in a debug build it can take a
+second or two to catch up after input, so wait before screenshotting.
 
 Everything goes through `skills/gui-test/scripts/gui.sh` (run `gui.sh help`):
 
@@ -52,9 +54,10 @@ stdout/stderr goes to `$STATE/app.log`.
   closing the side panel resizes the columns, collapsed columns are narrow strips,
   and font size changes everything. Coordinates from an earlier shot go stale.
 - **Typing speed.** `type` sends one key per 120ms (override with
-  `TB_GUI_TYPE_DELAY`, in ms). Faster than that, keys that arrive in the same
-  frame get applied out of order ("Typed via" → "Typed vai"). If you're testing
-  text input itself, that's worth reporting as a possible app bug, not hiding.
+  `TB_GUI_TYPE_DELAY`, in ms).
+- **Click before typing.** Iced only knows where the pointer is after it moves,
+  and a click right after launch can be missed; `click` moves first, so use it
+  rather than raw `xdotool click`.
 - Crop with `shot FILE WxH+X+Y` to read small text (IDs, counts, hints) up close.
 - Don't use `key` for text; use `type`. Don't use `type` for shortcuts; use `key`.
 - If `start` says "already running", a previous session was left up: `gui.sh stop`.

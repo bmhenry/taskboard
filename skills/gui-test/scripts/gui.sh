@@ -25,11 +25,16 @@ wait_for_window() {
 
 launch_app() {
   # Project and global settings both live in the sandbox, so test runs never
-  # touch the real board or ~/.config/tb.
-  DISPLAY=$(cat "$STATE/display") XDG_CONFIG_HOME=$STATE/config \
-    nohup "$BIN" "$STATE/project" >"$STATE/app.log" 2>&1 &
+  # touch the real board or ~/.config/tb. Without WAYLAND_DISPLAY, winit
+  # can't open the window on the user's desktop instead of Xvfb; Iced's
+  # software renderer needs no GPU.
+  DISPLAY=$(cat "$STATE/display") XDG_CONFIG_HOME=$STATE/config ICED_BACKEND=tiny-skia \
+    nohup env -u WAYLAND_DISPLAY "$BIN" "$STATE/project" >"$STATE/app.log" 2>&1 &
   echo $! >"$STATE/app.pid"
   wait_for_window
+  # With no window manager nothing focuses the window, and winit ignores
+  # keys until it has focus.
+  x xdotool search --name '^Taskboard$' windowfocus --sync
 }
 
 cmd=${1:-help}; shift || true
