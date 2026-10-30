@@ -5,6 +5,7 @@
 
 mod app;
 mod markdown;
+mod source_link;
 mod ui;
 mod watch;
 

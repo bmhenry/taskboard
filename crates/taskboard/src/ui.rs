@@ -16,6 +16,7 @@ use crate::app::{
     Action, App, DRAG_THRESHOLD, Drag, EditTarget, Owner, View, drop_index, drop_position,
 };
 use crate::markdown::{self, BlockKind};
+use crate::source_link::{self, Site};
 
 pub static FONT: FontAsset = FontAsset::Bytes {
     file_name: "DejaVuSans.ttf",
@@ -1232,7 +1233,7 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                 .layout(|l| l.direction(TopToBottom).gap(8))
                 .children(|ui| {
                     for task in &tasks {
-                        card(ui, app, state, task);
+                        card(ui, app, state, actions, task);
                     }
                 });
         });
@@ -1255,7 +1256,7 @@ fn count_badge(ui: &mut Ui, count: usize) {
         });
 }
 
-fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
+fn card(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>, task: &Task) {
     let selected = app.selected == Some(task.id);
     let dragged = state.drag.is_some_and(|d| d.active && d.id == task.id);
     ui.element()
@@ -1268,16 +1269,10 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
             // the side panel. Check the board too, or hidden cards there
             // would light up and take clicks meant for the panel.
             let hovered = ui.hovered() && ui.pointer_over("board");
-            if hovered && ui.just_pressed() {
-                state.drag = Some(Drag {
-                    id: task.id,
-                    start: mouse_position(),
-                    active: false,
-                });
-            }
             if hovered {
                 state.pointer_cursor = true;
             }
+            let mut pill = SourcePill::default();
             ui.element()
                 .width(grow!())
                 .height(fit!())
@@ -1299,11 +1294,32 @@ fn card(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) {
                     })
                 })
                 .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
-                .children(|ui| card_body(ui, task, dragged));
+                .children(|ui| pill = card_body(ui, task, dragged));
+            // A press on the source link pill also lands on the card, so it
+            // opts out of starting a drag (and so a selection) here.
+            if hovered && pill.clicked {
+                actions.push(Action::OpenUrl(pill.url));
+            } else if hovered && ui.just_pressed() && !pill.pressed {
+                state.drag = Some(Drag {
+                    id: task.id,
+                    start: mouse_position(),
+                    active: false,
+                });
+            }
         });
 }
 
-fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
+/// The pointer on a card's source link pill, for the card to act on.
+#[derive(Default)]
+struct SourcePill {
+    url: String,
+    pressed: bool,
+    /// Released over the pill after being pressed on it.
+    clicked: bool,
+}
+
+/// Draws a card's contents. Returns the pointer state of its source link pill.
+fn card_body(ui: &mut Ui, task: &Task, faded: bool) -> SourcePill {
     ui.text(&task.title, |t| {
         t.font_size(fs(14))
             .color(if faded { pal().muted } else { pal().text })
@@ -1334,6 +1350,78 @@ fn card_body(ui: &mut Ui, task: &Task, faded: bool) {
                 });
             }
         });
+    match task.links.iter().find(|l| l.kind == LinkKind::Source) {
+        Some(link) => source_pill(ui, &link.url),
+        None => SourcePill::default(),
+    }
+}
+
+static GITHUB_LOGO: GraphicAsset = GraphicAsset::Bytes {
+    file_name: "github.png",
+    data: include_bytes!("../assets/logos/github.png"),
+};
+static GITLAB_LOGO: GraphicAsset = GraphicAsset::Bytes {
+    file_name: "gitlab.png",
+    data: include_bytes!("../assets/logos/gitlab.png"),
+};
+static BITBUCKET_LOGO: GraphicAsset = GraphicAsset::Bytes {
+    file_name: "bitbucket.png",
+    data: include_bytes!("../assets/logos/bitbucket.png"),
+};
+static JIRA_LOGO: GraphicAsset = GraphicAsset::Bytes {
+    file_name: "jira.png",
+    data: include_bytes!("../assets/logos/jira.png"),
+};
+
+/// A round pill with the source site's logo and a short form of the link.
+fn source_pill(ui: &mut Ui, url: &str) -> SourcePill {
+    let logo = match source_link::site(url) {
+        Site::GitHub => Some(&GITHUB_LOGO),
+        Site::GitLab => Some(&GITLAB_LOGO),
+        Site::Bitbucket => Some(&BITBUCKET_LOGO),
+        Site::Jira => Some(&JIRA_LOGO),
+        Site::Other => None,
+    };
+    let mut pill = SourcePill {
+        url: url.to_string(),
+        ..Default::default()
+    };
+    ui.element()
+        .width(fit!())
+        .height(fixed!(px(20.0)))
+        .corner_radius(px(10.0))
+        .background_color(pal().panel)
+        .border(|b| b.all(1).color(pal().card_edge))
+        .layout(|l| {
+            l.direction(LeftToRight)
+                .gap(fs(5))
+                .align(Left, CenterY)
+                .padding((0, fs(8), 0, fs(7)))
+        })
+        .children(|ui| {
+            let hovered = ui.hovered();
+            pill.pressed = ui.just_pressed();
+            pill.clicked = hovered && ui.just_released();
+            let color = if hovered { pal().text } else { pal().muted };
+            match logo {
+                // White logos, tinted by the background color.
+                Some(logo) => {
+                    ui.element()
+                        .width(fixed!(px(12.0)))
+                        .height(fixed!(px(12.0)))
+                        .image(logo)
+                        .background_color(color)
+                        .empty();
+                }
+                None => ui.text("↗", |t| t.font_size(fs(12)).color(color)),
+            }
+            ui.text(&source_link::short_label(url), |t| {
+                t.font_size(fs(11))
+                    .color(if hovered { pal().text } else { pal().accent })
+                    .wrap_mode(WrapMode::None)
+            });
+        });
+    pill
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -1359,7 +1447,9 @@ fn drag_ghost(ui: &mut Ui, task: &Task) {
         .corner_radius(6.0)
         .border(|b| b.all(1).color(pal().accent))
         .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
-        .children(|ui| card_body(ui, task, false));
+        .children(|ui| {
+            card_body(ui, task, false);
+        });
 }
 
 fn list_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
@@ -1538,9 +1628,7 @@ fn in_progress_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut V
                     .layout(|l| l.direction(TopToBottom).gap(6).padding((0, 0, 0, fs(12))))
                     .children(|ui| {
                         for task in tasks {
-                            if in_progress_item(ui, app, state, task) {
-                                actions.push(Action::Select(Some(task.id)));
-                            }
+                            in_progress_item(ui, app, state, actions, task);
                         }
                     });
             }
@@ -1556,14 +1644,19 @@ fn in_progress_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut V
     }
 }
 
-/// A task in the In Progress sidebar. Returns true when clicked.
-fn in_progress_item(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) -> bool {
+/// A task in the In Progress sidebar; clicking it selects the task.
+fn in_progress_item(
+    ui: &mut Ui,
+    app: &App,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    task: &Task,
+) {
     let selected = app.selected == Some(task.id);
-    let mut clicked = false;
     ui.element().width(grow!()).height(fit!()).children(|ui| {
         let hovered = ui.hovered();
         state.pointer_cursor |= hovered;
-        clicked = ui.just_released();
+        let mut pill = SourcePill::default();
         ui.element()
             .width(grow!())
             .height(fit!())
@@ -1581,9 +1674,14 @@ fn in_progress_item(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) ->
                 })
             })
             .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
-            .children(|ui| card_body(ui, task, false));
+            .children(|ui| pill = card_body(ui, task, false));
+        // A click on the source link pill also lands on the item.
+        if pill.clicked {
+            actions.push(Action::OpenUrl(pill.url));
+        } else if ui.just_released() {
+            actions.push(Action::Select(Some(task.id)));
+        }
     });
-    clicked
 }
 
 fn side_panel(ui: &mut Ui, id: &'static str, width: Sizing, body: impl FnOnce(&mut Ui)) {
