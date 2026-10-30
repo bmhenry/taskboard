@@ -268,11 +268,16 @@ pub fn frame(ui: &mut Ui, app: &App, state: &mut UiState) -> Vec<Action> {
                     match app.view {
                         View::Board => board_view(ui, app, state, &mut actions),
                         View::List => list_view(ui, app, state, &mut actions),
+                        // Shows the editor and details itself, in its main pane.
+                        View::InProgress => {
+                            in_progress_view(ui, app, state, &mut actions);
+                            return;
+                        }
                     }
                     if app.editing.is_some() {
-                        editor_panel(ui, app, state, &mut actions);
+                        editor_panel(ui, app, state, &mut actions, side_width());
                     } else if let Some(task) = app.selected_task() {
-                        detail_panel(ui, task, state, &mut actions);
+                        detail_panel(ui, task, state, &mut actions, side_width());
                     }
                 });
             if let Some((task_id, file_id)) = app.viewing_file
@@ -774,7 +779,11 @@ fn toolbar(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action
                             .wrap_mode(WrapMode::None)
                     });
                 });
-            for (view, name) in [(View::Board, "Board"), (View::List, "List")] {
+            for (view, name) in [
+                (View::Board, "Board"),
+                (View::List, "List"),
+                (View::InProgress, "In Progress"),
+            ] {
                 let style = if app.view == view {
                     Style::Primary
                 } else {
@@ -1153,7 +1162,8 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
         .children(|ui| {
             // The whole header collapses the column, like clicking its strip
             // expands it; « just makes that visible. A click on a button also
-            // counts as a click on the header, so + has to opt out.
+            // counts as a click on the header, so + has to opt out, as does
+            // In Progress's title, which opens the In Progress view.
             ui.element()
                 .width(grow!())
                 .height(fixed!(px(28.0)))
@@ -1174,11 +1184,19 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                         .corner_radius(4.0)
                         .background_color(status_color(status))
                         .empty();
-                    ui.text(status.label(), |t| {
-                        t.font_size(fs(14))
-                            .font(&BOLD)
-                            .color(pal().text)
-                            .wrap_mode(WrapMode::None)
+                    let mut open_view = false;
+                    ui.element().width(fit!()).height(fit!()).children(|ui| {
+                        // Not while a card press is pending, or releasing it here
+                        // would both select the card and switch views.
+                        let opens = status == Status::InProgress && state.drag.is_none();
+                        let hovered = opens && ui.hovered();
+                        open_view = opens && ui.just_released();
+                        ui.text(status.label(), |t| {
+                            t.font_size(fs(14))
+                                .font(&BOLD)
+                                .color(if hovered { pal().accent } else { pal().text })
+                                .wrap_mode(WrapMode::None)
+                        });
                     });
                     count_badge(ui, tasks.len());
                     ui.element().width(grow!()).height(fixed!(1.0)).empty();
@@ -1186,6 +1204,8 @@ fn column(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>
                     let add = button(ui, state, "+", Style::Quiet);
                     if add {
                         actions.push(Action::Edit(EditTarget::New(status)));
+                    } else if open_view {
+                        actions.push(Action::SetView(View::InProgress));
                     } else if collapse || header_clicked {
                         actions.push(Action::ToggleColumn(status));
                     }
@@ -1454,14 +1474,112 @@ fn list_row(
     clicked
 }
 
-fn side_panel(ui: &mut Ui, id: &'static str, body: impl FnOnce(&mut Ui)) {
+/// The width of the panel beside the board or list.
+fn side_width() -> Sizing {
+    fixed!(
+        (screen_width() * 0.42)
+            .clamp(px(340.0), px(480.0))
+            .min(screen_width() * 0.6)
+    )
+}
+
+/// In-progress tasks grouped by project in a sidebar, with the selected
+/// task's details (or the editor) filling the rest.
+fn in_progress_view(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+    let groups = app.in_progress_groups();
+    ui.element()
+        .id("in_progress_list")
+        .width(fixed!(px(300.0)))
+        .height(grow!())
+        .background_color(pal().panel)
+        .corner_radius(8.0)
+        .overflow(|o| {
+            o.scroll_y()
+                .scrollbar(|s| s.width(4.0).thumb_color(pal().border).hide_after_frames(90))
+        })
+        .layout(|l| l.direction(TopToBottom).padding(10).gap(8))
+        .children(|ui| {
+            if groups.is_empty() {
+                ui.element()
+                    .width(grow!())
+                    .height(fit!())
+                    .layout(|l| l.padding(6))
+                    .children(|ui| label(ui, "No tasks in progress."));
+            }
+            for (project, tasks) in &groups {
+                ui.element()
+                    .width(grow!())
+                    .height(fit!())
+                    .layout(|l| {
+                        l.direction(LeftToRight)
+                            .gap(8)
+                            .padding((4, 4, 0, 4))
+                            .align(Left, CenterY)
+                    })
+                    .children(|ui| {
+                        ui.text(project, |t| {
+                            t.font_size(fs(13)).font(&BOLD).color(pal().muted)
+                        });
+                        count_badge(ui, tasks.len());
+                    });
+                ui.element()
+                    .width(grow!())
+                    .height(fit!())
+                    .layout(|l| l.direction(TopToBottom).gap(6).padding((0, 0, 0, fs(12))))
+                    .children(|ui| {
+                        for task in tasks {
+                            if in_progress_item(ui, app, state, task) {
+                                actions.push(Action::Select(Some(task.id)));
+                            }
+                        }
+                    });
+            }
+        });
+    if app.editing.is_some() {
+        editor_panel(ui, app, state, actions, grow!());
+    } else if let Some(task) = app.selected_task() {
+        detail_panel(ui, task, state, actions, grow!());
+    } else {
+        side_panel(ui, "detail", grow!(), |ui| {
+            label(ui, "Select a task to see its details.");
+        });
+    }
+}
+
+/// A task in the In Progress sidebar. Returns true when clicked.
+fn in_progress_item(ui: &mut Ui, app: &App, state: &mut UiState, task: &Task) -> bool {
+    let selected = app.selected == Some(task.id);
+    let mut clicked = false;
+    ui.element().width(grow!()).height(fit!()).children(|ui| {
+        let hovered = ui.hovered();
+        state.pointer_cursor |= hovered;
+        clicked = ui.just_released();
+        ui.element()
+            .width(grow!())
+            .height(fit!())
+            .background_color(if hovered {
+                pal().card_hover
+            } else {
+                pal().card
+            })
+            .corner_radius(6.0)
+            .border(|b| {
+                b.all(1).color(if selected {
+                    pal().accent
+                } else {
+                    pal().card_edge
+                })
+            })
+            .layout(|l| l.direction(TopToBottom).padding(10).gap(6))
+            .children(|ui| card_body(ui, task, false));
+    });
+    clicked
+}
+
+fn side_panel(ui: &mut Ui, id: &'static str, width: Sizing, body: impl FnOnce(&mut Ui)) {
     ui.element()
         .id(id)
-        .width(fixed!(
-            (screen_width() * 0.42)
-                .clamp(px(340.0), px(480.0))
-                .min(screen_width() * 0.6)
-        ))
+        .width(width)
         .height(grow!())
         .background_color(pal().panel)
         .corner_radius(8.0)
@@ -1473,8 +1591,14 @@ fn side_panel(ui: &mut Ui, id: &'static str, body: impl FnOnce(&mut Ui)) {
         .children(body);
 }
 
-fn detail_panel(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<Action>) {
-    side_panel(ui, "detail", |ui| {
+fn detail_panel(
+    ui: &mut Ui,
+    task: &Task,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    width: Sizing,
+) {
+    side_panel(ui, "detail", width, |ui| {
         ui.element()
             .width(grow!())
             .height(fit!())
@@ -1776,12 +1900,18 @@ fn status_menu(ui: &mut Ui, task: &Task, state: &mut UiState, actions: &mut Vec<
         });
 }
 
-fn editor_panel(ui: &mut Ui, app: &App, state: &mut UiState, actions: &mut Vec<Action>) {
+fn editor_panel(
+    ui: &mut Ui,
+    app: &App,
+    state: &mut UiState,
+    actions: &mut Vec<Action>,
+    width: Sizing,
+) {
     let heading = match app.editing {
         Some(EditTarget::New(status)) => format!("New task in {status}"),
         _ => "Edit task".to_string(),
     };
-    side_panel(ui, "editor", |ui| {
+    side_panel(ui, "editor", width, |ui| {
         ui.text(&heading, |t| {
             t.font_size(fs(18)).font(&BOLD).color(pal().text)
         });
