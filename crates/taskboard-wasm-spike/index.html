@@ -4,10 +4,68 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Taskboard (wasm spike)</title>
+    <script>
+      // Phone debugging: mirror console output and errors into an on-page log,
+      // since a phone's browser console isn't visible. Tap the log to hide it.
+      (function () {
+        var lines = [];
+        var box;
+        function show(kind, args) {
+          var text = Array.prototype.map.call(args, function (a) {
+            if (a instanceof Error) return a.stack || String(a);
+            return typeof a === "string" ? a : (function () { try { return JSON.stringify(a); } catch (e) { return String(a); } })();
+          }).join(" ");
+          // Keep errors whole (driver and panic messages are long); cap the rest.
+          var cap = kind === "error" || kind === "onerror" || kind === "rejection" ? Infinity : 2000;
+          if (text.length > cap) text = text.slice(0, cap) + "…";
+          lines.push(((performance.now() / 1000).toFixed(1)) + "s [" + kind + "] " + text);
+          if (lines.length > 60) lines.shift();
+          if (box) box.textContent = lines.join("\n");
+        }
+        ["log", "info", "warn", "error", "debug"].forEach(function (k) {
+          var orig = console[k];
+          console[k] = function () { show(k, arguments); return orig.apply(console, arguments); };
+        });
+        window.addEventListener("error", function (e) { show("onerror", [e.message + " @ " + e.filename + ":" + e.lineno]); });
+        window.addEventListener("unhandledrejection", function (e) { show("rejection", [e.reason]); });
+        window.addEventListener("TrunkApplicationStarted", function () { show("trunk", ["application started"]); });
+        document.addEventListener("DOMContentLoaded", function () {
+          box = document.createElement("pre");
+          box.id = "debug-log";
+          var tick;
+          box.addEventListener("click", function () { box.style.display = "none"; clearInterval(tick); });
+          document.body.appendChild(box);
+          // Throwaway probe context: release it so it doesn't hold a GL context slot.
+          var probe = document.createElement("canvas").getContext("webgl2");
+          show("env", [navigator.userAgent]);
+          show("env", ["secure=" + window.isSecureContext + " webgpu=" + !!navigator.gpu +
+            " webgl2=" + !!probe + " viewport=" + innerWidth + "x" + innerHeight +
+            " dpr=" + devicePixelRatio]);
+          if (probe) {
+            var lose = probe.getExtension("WEBGL_lose_context");
+            if (lose) lose.loseContext();
+          }
+          // Report canvas sizes every 5 s until a non-zero canvas has been seen twice.
+          var sized = 0;
+          tick = setInterval(function () {
+            var cs = document.querySelectorAll("canvas");
+            show("tick", [cs.length + " canvas: " + Array.prototype.map.call(cs, function (x) { return x.width + "x" + x.height; }).join(", ")]);
+            if (Array.prototype.some.call(cs, function (x) { return x.width > 0 && x.height > 0; }) && ++sized >= 2) {
+              clearInterval(tick);
+            }
+          }, 5000);
+        });
+      })();
+    </script>
     <link data-trunk rel="rust" data-bin="taskboard-wasm-spike" />
     <style>
       html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
       canvas { display: block; }
+      #debug-log {
+        position: fixed; left: 0; right: 0; bottom: 0; max-height: 45%; overflow: auto; margin: 0;
+        padding: 6px; font: 11px/1.3 monospace; white-space: pre-wrap; word-break: break-all;
+        background: rgba(255, 255, 220, 0.92); color: #111; z-index: 10;
+      }
     </style>
   </head>
   <body></body>
