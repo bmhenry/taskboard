@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/taskboard-core", "crates/tb", "crates/taskboard"]
+members = ["crates/taskboard-core", "crates/tb", "crates/taskboard", "crates/taskboard-wasm-spike"]
 
 [workspace.package]
 version = "0.1.0"

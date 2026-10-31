@@ -273,7 +273,8 @@ impl App {
             .board
             .projects
             .iter()
-            .filter(|p| !p.path.is_dir())
+            // wasm spike: no filesystem to check, so none count as missing.
+            .filter(|p| cfg!(not(target_arch = "wasm32")) && !p.path.is_dir())
             .map(|p| p.path.clone())
             .collect();
     }

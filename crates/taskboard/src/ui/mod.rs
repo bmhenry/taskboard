@@ -14,7 +14,9 @@ mod widgets;
 mod zones;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use iced::time::Instant;
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{column, container, mouse_area, opaque, row, stack, text_editor};
@@ -803,6 +805,10 @@ fn typed_path(text: &str) -> PathBuf {
 /// rfd gives `None` both when cancelled and when there's no portal (or
 /// zenity) to show a dialog, so the latter fails silently.
 async fn pick_file() -> Option<PathBuf> {
+    // wasm spike: no paths in a browser; Phase 1 uploads bytes instead.
+    #[cfg(target_arch = "wasm32")]
+    return None;
+    #[cfg(not(target_arch = "wasm32"))]
     rfd::AsyncFileDialog::new()
         .set_title("Attach a file")
         .pick_file()
@@ -812,6 +818,12 @@ async fn pick_file() -> Option<PathBuf> {
 
 /// Asks for a directory with the system's folder dialog; see [`pick_file`].
 async fn pick_folder(title: &'static str) -> Option<PathBuf> {
+    #[cfg(target_arch = "wasm32")]
+    return {
+        let _ = title;
+        None
+    };
+    #[cfg(not(target_arch = "wasm32"))]
     rfd::AsyncFileDialog::new()
         .set_title(title)
         .pick_folder()

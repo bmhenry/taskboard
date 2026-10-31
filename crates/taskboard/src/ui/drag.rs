@@ -2,7 +2,9 @@
 //! would land.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use iced::time::Instant;
 
 use iced::widget::Id;
 use iced::{Point, Rectangle};
