@@ -5,7 +5,7 @@ use iced::widget::{Column, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Length, Size};
 use taskboard_core::HookEvent;
 use taskboard_core::hooks;
-use taskboard_core::settings::{DEFAULT_FONT_SIZE, Theme};
+use taskboard_core::settings::{DEFAULT_FONT_SIZE, NewTaskPosition, Theme};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::widgets::{
@@ -102,6 +102,25 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
                 Message::App(Action::SetFontSize(DEFAULT_FONT_SIZE)),
             ));
         }
+        let mut position_row = row![setting_name("New tasks")]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        for (position, name) in [
+            (NewTaskPosition::Top, "Top"),
+            (NewTaskPosition::Bottom, "Bottom"),
+        ] {
+            let style = if app.settings.new_task_position == position {
+                Style::Primary
+            } else {
+                Style::Normal
+            };
+            position_row = position_row.push(btn(
+                p,
+                name,
+                style,
+                Message::App(Action::SetNewTaskPosition(position)),
+            ));
+        }
         let collapse = app.settings.collapse_empty_columns;
         let (on_off, style) = if collapse {
             ("On", Style::Primary)
@@ -130,6 +149,11 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
             .push(label(
                 p,
                 "Empty columns start as strips. Click a column's header or « to collapse it; click a strip to expand it.",
+            ))
+            .push(position_row)
+            .push(label(
+                p,
+                "Where a new task lands in its column, whether made here or with tb add.",
             ));
         body = hooks_settings(gui, body);
         body = body.push(match &app.settings_path {

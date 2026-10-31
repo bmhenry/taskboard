@@ -20,7 +20,7 @@ Taskboard tasks are powerful:
     - arbitrary URLs: clickable links which can be tagged as a "source" or as "context"
     - arbitrary files, which may be images, markdown, or plain text which is useful for the task
 
-Tasks for every project are stored together in `$XDG_DATA_HOME/tb/` (`~/.local/share/tb/` by default) in a single JSON file, `tasks.json`, which also lists the known projects. Each task names its project by absolute directory; a project's name is its directory's name, with parent directories added in front (`work/app`, `src/app`) when it's needed to tell same-named projects apart. Tasks can reference other files, which are copied into `$XDG_DATA_HOME/tb/files/` under ULIDs; the task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema version so it can be migrated later if necessary. Settings (font size, theme, hooks, which board columns are collapsed) are kept in `$XDG_CONFIG_HOME/tb/settings.json` (`~/.config/tb/` by default).
+Tasks for every project are stored together in `$XDG_DATA_HOME/tb/` (`~/.local/share/tb/` by default) in a single JSON file, `tasks.json`, which also lists the known projects. Each task names its project by absolute directory; a project's name is its directory's name, with parent directories added in front (`work/app`, `src/app`) when it's needed to tell same-named projects apart. Tasks can reference other files, which are copied into `$XDG_DATA_HOME/tb/files/` under ULIDs; the task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema version so it can be migrated later if necessary. Settings (font size, theme, where new tasks go, hooks, which board columns are collapsed) are kept in `$XDG_CONFIG_HOME/tb/settings.json` (`~/.config/tb/` by default).
 
 The current project is the root of the git repo Taskboard was started inside, otherwise the directory it was started from.
 
@@ -89,7 +89,7 @@ taskboard ~/src/app  # ...or to another one
 - The In Progress view groups tasks under their project's name
 - The Filter menu narrows the board to one project
 - If a project's folder disappears (moved or deleted), its tasks get a yellow ⚠; hover it for details. Open one of the tasks to point Taskboard at the project's new folder, or to delete the project and its tasks
-- `+` on a column (or `Ctrl+N`) creates a task; `Ctrl+S` saves, `Esc` cancels or closes
+- `+` on a column (or `Ctrl+N`) creates a task, at the top of the column (Settings → New tasks can make it the bottom, for `tb add` too); `Ctrl+S` saves, `Esc` cancels or closes
 - `Ctrl+F` focuses search; status and project chips and the date range filter what's shown
 - Add links and attach files (by path) from the task panel; click a file to view it
 

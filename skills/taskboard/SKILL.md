@@ -42,7 +42,10 @@ Status arguments are case-insensitive and accept `-`, `_`, or spaces between wor
 (`in-progress`, `in_progress`, `"In Progress"`). JSON output uses the snake_case key.
 
 Each status is a column with its own order: position 1 (`order: 0` in JSON) is the
-top of the column, i.e. highest priority.
+top of the column, i.e. highest priority. New tasks go at the top of their column
+unless the user's settings say bottom (`"new_task_position": "bottom"` in
+`~/.config/tb/settings.json`, or the GUI's settings); follow `add` with
+`move -p N` to place one elsewhere.
 
 ## Commands
 
@@ -66,7 +69,7 @@ MD
 tb --json edit 7F3TPKKW -t "New title"          # -t title, -d description, -s status
 tb --json edit 7F3TPKKW -d - < description.md   # "-" reads the description from stdin
 tb --json edit 7F3TPKKW --to-project ~/src/app  # move to another project
-tb --json move 7F3TPKKW in-progress             # change status (goes to the bottom)
+tb --json move 7F3TPKKW in-progress             # change status (goes to the bottom of the new column)
 tb --json move 7F3TPKKW in-progress -p 1        # ...and put it at the top
 tb --json move 7F3TPKKW -p 1                    # reprioritize within its column
 tb --json close 7F3TPKKW

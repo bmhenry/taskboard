@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
+use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, NewTaskPosition, Theme};
 use taskboard_core::{
     Board, DateField, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind,
     NewTask, Status, Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks,
@@ -148,6 +148,7 @@ pub enum Action {
     SetFontSize(u16),
     SetCollapseEmptyColumns(bool),
     SetTheme(Theme),
+    SetNewTaskPosition(NewTaskPosition),
     ToggleColumn(Status),
     AddHook,
     RemoveHook(usize),
@@ -461,6 +462,7 @@ impl App {
                             description,
                             status: Some(status),
                             links: self.draft.links.clone(),
+                            position: self.settings.new_task_position,
                         };
                         // The draft is kept if creating fails, e.g. on an empty title.
                         let (id, events) = self.store.update_with_events(|b| b.create(new))?;
@@ -623,6 +625,10 @@ impl App {
                 self.settings.theme = theme;
                 self.save_settings()?;
             }
+            Action::SetNewTaskPosition(position) => {
+                self.settings.new_task_position = position;
+                self.save_settings()?;
+            }
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
                 self.settings.collapsed_columns.insert(status, !collapsed);
@@ -733,11 +739,13 @@ fn open_url(url: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// An app whose store and default project, `app`, are in a temporary directory.
+    /// An app whose store and default project, `app`, are in a temporary
+    /// directory. New tasks go at the bottom, so columns read in creation order.
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(Store::open(&dir.path().join("data")).unwrap(), None);
         app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
+        app.settings.new_task_position = NewTaskPosition::Bottom;
         (dir, app)
     }
 
@@ -987,6 +995,36 @@ mod tests {
 
         let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
         assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn new_tasks_go_to_the_top_unless_set_to_bottom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/tb/settings.json");
+        let mut app = App::new(
+            Store::open(&dir.path().join("data")).unwrap(),
+            Some(path.clone()),
+        );
+        app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
+        assert_eq!(app.settings.new_task_position, NewTaskPosition::Top);
+        for title in ["a", "b"] {
+            app.apply(Action::Edit(EditTarget::New(Status::Backlog)));
+            save(&mut app, title);
+        }
+        app.apply(Action::SetNewTaskPosition(NewTaskPosition::Bottom));
+        app.apply(Action::Edit(EditTarget::New(Status::Backlog)));
+        save(&mut app, "c");
+        assert_eq!(app.error, None);
+        let order: Vec<&str> = app
+            .board
+            .column(Status::Backlog)
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(order, ["b", "a", "c"]);
+
+        let reopened = App::new(Store::open(&dir.path().join("data")).unwrap(), Some(path));
+        assert_eq!(reopened.settings.new_task_position, NewTaskPosition::Bottom);
     }
 
     #[test]
