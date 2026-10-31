@@ -152,6 +152,22 @@ pub fn boxed_edge(bg: u32, edge: u32, width: f32, radius: f32) -> container::Sty
     }
 }
 
+/// Where a dragged card will land: a faint wash of the accent in its edge.
+pub fn placeholder(p: Pal) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            a: 0.12,
+            ..rgb(p.accent)
+        })),
+        border: Border {
+            color: rgb(p.accent),
+            width: 2.0,
+            radius: 6.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn fill(bg: u32, radius: f32) -> container::Style {
     container::Style {
         background: Some(Background::Color(rgb(bg))),

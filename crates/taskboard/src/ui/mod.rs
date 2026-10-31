@@ -2,6 +2,7 @@
 //! into [`Action`]s. All changes to the board go through those actions.
 
 mod board;
+mod drag;
 mod list;
 mod panels;
 mod popup;
@@ -22,6 +23,7 @@ use taskboard_core::{FileKind, LinkKind, Status, Ulid};
 
 use crate::app::{Action, App, EditTarget, Owner, View, drop_index, drop_position};
 use crate::watch::{self, WatchEvent};
+use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
 use widgets::El;
 
@@ -103,17 +105,6 @@ struct UiState {
     drag: Option<Drag>,
 }
 
-/// A card being dragged.
-struct Drag {
-    id: Ulid,
-    /// Where the columns were when the drag started, to highlight the one
-    /// under the pointer.
-    columns: Vec<(Status, Rectangle)>,
-    over: Option<Status>,
-    /// Esc was pressed; the drop does nothing.
-    cancelled: bool,
-}
-
 #[derive(Debug, Clone)]
 pub enum Message {
     App(Action),
@@ -176,8 +167,13 @@ pub enum Message {
     Watch(WatchEvent),
     Tick,
     HoverCard(Ulid, bool),
-    DragMoved(Ulid, Point),
-    DragColumns(Vec<(iced::widget::Id, Rectangle)>),
+    /// A card was dragged to a point; it's as big as the rectangle.
+    DragMoved(Ulid, Point, Rectangle),
+    DragZones(Vec<(iced::widget::Id, Rectangle)>),
+    /// A column or the board scrolled, maybe mid-drag.
+    DragScrolled,
+    /// A frame of the gap under a dragged card opening or closing.
+    Frame(Instant),
     Dropped(Ulid, Point),
     DropColumns(Ulid, Point, Vec<(iced::widget::Id, Rectangle)>),
     DropCards(Ulid, Status, f32, Vec<(iced::widget::Id, Rectangle)>),
@@ -222,6 +218,9 @@ impl Gui {
         ];
         if self.ui.hook_edited_at.is_some() {
             subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick));
+        }
+        if self.ui.drag.as_ref().is_some_and(Drag::animating) {
+            subs.push(iced::window::frames().map(Message::Frame));
         }
         Subscription::batch(subs)
     }
@@ -479,32 +478,96 @@ impl Gui {
                     ui.hovered_card = None;
                 }
             }
-            Message::DragMoved(id, point) => {
+            Message::DragMoved(id, point, bounds) => {
                 if ui.drag.as_ref().is_none_or(|d| d.id != id) {
-                    ui.drag = Some(Drag {
-                        id,
-                        columns: Vec::new(),
-                        over: None,
-                        cancelled: false,
-                    });
-                    return zones::find(board::column_ids()).map(Message::DragColumns);
+                    let Some(status) = self.app.board.get(id).map(|t| t.status) else {
+                        return Task::none();
+                    };
+                    let visible: Vec<Ulid> = self
+                        .app
+                        .visible_column(status)
+                        .iter()
+                        .map(|t| t.id)
+                        .collect();
+                    let next = visible.iter().skip_while(|t| **t != id).nth(1).copied();
+                    let mut ids = board::column_ids();
+                    for status in Status::ALL {
+                        ids.push(board::cards_id(status));
+                        ids.extend(
+                            self.app
+                                .visible_column(status)
+                                .iter()
+                                .map(|t| board::card_id(t.id)),
+                        );
+                    }
+                    let mut drag = Drag::new(id, bounds.height, (status, next), ids.clone());
+                    drag.pointer = point;
+                    ui.drag = Some(drag);
+                    // Measure the board as it was before the card left it.
+                    return zones::find(ids).map(Message::DragZones);
                 }
-                if let Some(drag) = &mut ui.drag
-                    && !drag.cancelled
-                {
-                    drag.over = column_at(&drag.columns, point);
+                if let Some(drag) = &mut ui.drag {
+                    drag.hover(point);
                 }
             }
-            Message::DragColumns(zones) => {
+            Message::DragZones(zones) => {
                 if let Some(drag) = &mut ui.drag {
                     drag.columns = board::columns_from(&zones);
+                    let bounds = |id: iced::widget::Id| {
+                        zones.iter().find(|(z, _)| *z == id).map(|(_, b)| *b)
+                    };
+                    for status in Status::ALL {
+                        if self.app.column_collapsed(status) {
+                            continue;
+                        }
+                        let Some(list) = bounds(board::cards_id(status)) else {
+                            continue;
+                        };
+                        let cards: Vec<(Ulid, f32)> = self
+                            .app
+                            .visible_column(status)
+                            .iter()
+                            .filter(|t| t.id != drag.id)
+                            .filter_map(|t| Some((t.id, bounds(board::card_id(t.id))?.height)))
+                            .collect();
+                        let heights: Vec<f32> = cards.iter().map(|(_, h)| *h).collect();
+                        let mids = stacked_mids(list.y, &heights);
+                        let cards = cards.iter().map(|(id, _)| *id).zip(mids).collect();
+                        drag.cards.insert(status, cards);
+                    }
+                    // Place the gap now rather than on the next move.
+                    drag.hover(drag.pointer);
+                }
+            }
+            Message::DragScrolled => {
+                if let Some(drag) = &ui.drag {
+                    return zones::find(drag.zones.clone()).map(Message::DragZones);
+                }
+            }
+            Message::Frame(now) => {
+                if let Some(drag) = &mut ui.drag {
+                    drag.frame(now);
                 }
             }
             Message::Dropped(id, point) => {
-                let cancelled = ui.drag.take().is_none_or(|d| d.cancelled);
-                if !cancelled {
+                let Some(drag) = ui.drag.take() else {
+                    return Task::none();
+                };
+                if drag.cancelled {
+                    return Task::none();
+                }
+                // Land where the gap showed, unless the board wasn't measured
+                // in time to show one.
+                if drag.columns.is_empty() {
                     return zones::find(board::column_ids())
                         .map(move |zones| Message::DropColumns(id, point, zones));
+                }
+                if let Some((status, before)) = drag.target {
+                    let visible = self.visible_except(status, id);
+                    let index = before
+                        .and_then(|b| visible.iter().position(|t| *t == b))
+                        .unwrap_or(visible.len());
+                    self.drop_at(id, status, &visible, index);
                 }
             }
             Message::DropColumns(id, point, zones) => {
@@ -601,8 +664,7 @@ impl Gui {
         match key.as_ref() {
             Key::Named(Named::Escape) => {
                 if let Some(drag) = &mut ui.drag {
-                    drag.cancelled = true;
-                    drag.over = None;
+                    drag.cancel();
                 }
                 if app.settings_open {
                     return self.apply(Action::ShowSettings(false));
@@ -748,11 +810,4 @@ fn side_width(window_width: f32) -> f32 {
     (window_width * 0.42)
         .clamp(340.0, 480.0)
         .min(window_width * 0.6)
-}
-
-fn column_at(columns: &[(Status, Rectangle)], point: Point) -> Option<Status> {
-    columns
-        .iter()
-        .find(|(_, bounds)| bounds.contains(point))
-        .map(|(status, _)| *status)
 }

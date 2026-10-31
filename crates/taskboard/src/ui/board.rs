@@ -10,11 +10,12 @@ use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::widget::{
-    Id, button, column, container, hover, image, mouse_area, row, scrollable, text,
+    Id, Space, button, column, container, hover, image, mouse_area, row, scrollable, text,
 };
 use iced::{Alignment, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 use taskboard_core::{LinkKind, Status, Task, Ulid};
 
+use super::drag::{CARD_GAP, Slot};
 use super::theme::{self, BOLD, Pal, Style, rgb, status_index};
 use super::widgets::{El, btn, count_badge, dot, grow, missing_project_badge, plural};
 use super::{EDGE, Gui, Message, side_width};
@@ -42,6 +43,11 @@ pub fn columns_from(zones: &[(Id, Rectangle)]) -> Vec<(Status, Rectangle)> {
             Some((status, *bounds))
         })
         .collect()
+}
+
+/// The list of cards in an expanded column.
+pub fn cards_id(status: Status) -> Id {
+    Id::from(format!("cards-{}", status_index(status)))
 }
 
 pub fn card_id(id: Ulid) -> Id {
@@ -73,6 +79,7 @@ pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
     });
     scrollable(row(columns).spacing(COLUMN_GAP).height(Length::Fill))
         .id("board")
+        .on_scroll(|_| Message::DragScrolled)
         .direction(Direction::Horizontal(
             Scrollbar::new().width(6).scroller_width(6),
         ))
@@ -82,12 +89,12 @@ pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
         .into()
 }
 
-/// The column the dragged card is over, if any.
+/// The dragged card would land in this column.
 fn drop_target(gui: &Gui, status: Status) -> bool {
     gui.ui
         .drag
         .as_ref()
-        .is_some_and(|d| !d.cancelled && d.over == Some(status))
+        .is_some_and(|d| !d.cancelled && d.target.is_some_and(|(s, _)| s == status))
 }
 
 fn column_style(p: Pal, target: bool) -> container::Style {
@@ -185,7 +192,27 @@ fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
     .on_press(Message::App(Action::ToggleColumn(status)))
     .interaction(mouse::Interaction::Pointer);
 
-    let cards = scrollable(column(tasks.iter().map(|t| card(gui, t))).spacing(8))
+    // Each card sits below the gap that opens while a card is dragged in
+    // above it, and the last gap opens below them all. The cards keep the
+    // same widgets throughout, so the dragged one stays dragged.
+    let dragged = |t: &Task| gui.ui.drag.as_ref().is_some_and(|d| d.id == t.id);
+    let last = tasks.iter().rev().find(|t| !dragged(t)).map(|t| t.id);
+    let list = column(tasks.iter().map(|t| {
+        // The dragged card shrinks to nothing, as it's drawn under the
+        // pointer instead, and its gap takes its place.
+        let below = if dragged(t) || Some(t.id) == last {
+            0.0
+        } else {
+            CARD_GAP
+        };
+        column![gap(gui, (status, Some(t.id)), false), card(gui, t)]
+            .padding(iced::Padding::ZERO.bottom(below))
+            .into()
+    }))
+    .push(gap(gui, (status, None), last.is_some()));
+    let cards = scrollable(container(list).id(cards_id(status)))
+        // Scrolling moves the cards the gap is placed between.
+        .on_scroll(|_| Message::DragScrolled)
         .direction(Direction::Vertical(
             Scrollbar::new().width(4).scroller_width(4),
         ))
@@ -201,10 +228,38 @@ fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
         .into()
 }
 
+/// The gap at `slot`, which opens to a box the size of the dragged card
+/// while it would land there. It's spaced from the card above it if
+/// `after_card`, or else from the card below it.
+fn gap(gui: &Gui, slot: Slot, after_card: bool) -> El<'_> {
+    let Some(drag) = &gui.ui.drag else {
+        return Space::new().into();
+    };
+    let open = drag.gap(slot);
+    if open == 0.0 {
+        return Space::new().into();
+    }
+    let p = gui.pal();
+    container(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(open * drag.height)
+            .style(move |_| theme::placeholder(p)),
+    )
+    .padding(if after_card {
+        iced::Padding::ZERO.top(open * CARD_GAP)
+    } else {
+        iced::Padding::ZERO.bottom(open * CARD_GAP)
+    })
+    .into()
+}
+
 fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     let (p, id) = (gui.pal(), task.id);
     let selected = gui.app.selected == Some(id);
-    let hovered = gui.ui.hovered_card == Some(id);
+    // The pointer passes over cards while dragging; they don't light up, as
+    // the gap shows where the card will land.
+    let hovered = gui.ui.drag.is_none() && gui.ui.hovered_card == Some(id);
     // Only the copy under the pointer is drawn while dragging, so style it
     // as the card being carried.
     let dragged = gui
@@ -235,8 +290,11 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     let droppable = iced_drop::droppable(hoverable)
         .drag_threshold(DRAG_THRESHOLD)
         .drag_hide(true)
+        // Shrunk by the droppable itself: squeezing it in a zero-height
+        // container stops its drag events.
+        .drag_size(Size::ZERO)
         .on_press(Message::App(Action::Select(Some(id))))
-        .on_drag(move |point, _| Message::DragMoved(id, point))
+        .on_drag(move |point, bounds| Message::DragMoved(id, point, bounds))
         .on_drop(move |point, _| Message::Dropped(id, point));
     container(droppable).id(card_id(id)).into()
 }
