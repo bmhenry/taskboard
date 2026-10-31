@@ -42,7 +42,10 @@ Status arguments are case-insensitive and accept `-`, `_`, or spaces between wor
 (`in-progress`, `in_progress`, `"In Progress"`). JSON output uses the snake_case key.
 
 Each status is a column with its own order: position 1 (`order: 0` in JSON) is the
-top of the column, i.e. highest priority.
+top of the column, i.e. highest priority. New tasks go at the top of their column
+unless the user's settings say bottom (`"new_task_position": "bottom"` in
+`~/.config/tb/settings.json`, or the GUI's settings); follow `add` with
+`move -p N` to place one elsewhere.
 
 ## Commands
 
