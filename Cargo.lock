@@ -3901,6 +3901,7 @@ name = "taskboard-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -3915,7 +3916,6 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "console_log",
- "getrandom 0.4.3",
  "iced",
  "iced_drop",
  "image",

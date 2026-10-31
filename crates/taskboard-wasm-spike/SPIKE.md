@@ -37,8 +37,10 @@ turns on. tiny-skia is also compiled in as the last fallback.
 
 ## What was gated or stubbed
 
-All gates use `cfg(target_arch = "wasm32")`, so native builds compile exactly
-the same code as before.
+Every gate uses `cfg(target_arch = "wasm32")`, so native builds keep the
+desktop code paths. The one exception is the `Instant` swap, which applies on
+every target but changes nothing on native, where `iced::time::Instant` is
+`std::time::Instant`.
 
 | Where | What | On wasm |
 |---|---|---|
@@ -47,7 +49,8 @@ the same code as before.
 | `taskboard/src/ui/mod.rs` `pick_file`/`pick_folder` | `rfd` | Returns `None`. rfd isn't a dependency of the spike. Its wasm build has no `FileHandle::path()`, so Phase 1 needs bytes-based upload. |
 | `taskboard/src/ui/{mod,drag}.rs` | `std::time::Instant` | Changed to `iced::time::Instant` on every target (see above). |
 | `taskboard-wasm-spike/src/watch.rs` | `notify` watcher | A stub module with the same API whose `subscription()` is `Subscription::none()`. Phase 2 replaces it with SSE. |
-| Spike `Cargo.toml` | dependencies | iced without `tokio`, plus `webgl`. Also `getrandom` with `wasm_js` (needed by ulid/rand) and chrono with `wasmbind` (otherwise `Utc::now()` panics). |
+| Spike `Cargo.toml` | dependencies | iced without `tokio`, plus `webgl`. Also chrono with `wasmbind` (otherwise `Utc::now()` panics). |
+| `taskboard-core/Cargo.toml` | wasm32-only `getrandom` dependency with `wasm_js` | ulid/rand use getrandom 0.4, which needs its JS backend in the browser. With this, `cargo check -p taskboard-core --target wasm32-unknown-unknown` works on its own. |
 
 Not gated, because they compile and only fail at runtime:
 

@@ -273,8 +273,7 @@ impl App {
             .board
             .projects
             .iter()
-            // wasm spike: no filesystem to check, so none count as missing.
-            .filter(|p| cfg!(not(target_arch = "wasm32")) && !p.path.is_dir())
+            .filter(|p| dir_missing(&p.path))
             .map(|p| p.path.clone())
             .collect();
     }
@@ -774,6 +773,18 @@ fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(url).spawn().map(|_| ())
+}
+
+/// Whether a project's directory is gone.
+#[cfg(not(target_arch = "wasm32"))]
+fn dir_missing(path: &Path) -> bool {
+    !path.is_dir()
+}
+
+/// wasm spike: there's no filesystem to check, so none count as missing.
+#[cfg(target_arch = "wasm32")]
+fn dir_missing(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(test)]

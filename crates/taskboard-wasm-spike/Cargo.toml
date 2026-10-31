@@ -16,8 +16,6 @@ iced = { version = "0.14", features = ["image", "canvas", "advanced", "webgl"] }
 iced_drop = "=0.2.54"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = { version = "0.13", default-features = false }
-# ulid/rand pull in getrandom 0.4, which needs a JS backend in the browser.
-getrandom = { version = "0.4", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 log = "0.4"
