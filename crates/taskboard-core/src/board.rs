@@ -7,6 +7,7 @@ use chrono::Utc;
 use ulid::Ulid;
 
 use crate::model::{Board, Link, Project, Status, Task};
+use crate::settings::NewTaskPosition;
 use crate::{Error, Result};
 
 /// Fields for a new task. Anything left unset gets a sensible default.
@@ -18,6 +19,8 @@ pub struct NewTask {
     pub description: String,
     pub status: Option<Status>,
     pub links: Vec<Link>,
+    /// Top or bottom of its status column.
+    pub position: NewTaskPosition,
 }
 
 /// Changes to apply to an existing task; `None` leaves a field alone.
@@ -160,7 +163,7 @@ impl Board {
         col
     }
 
-    /// Adds a task at the bottom of its status column.
+    /// Adds a task at the top or bottom of its status column.
     pub fn create(&mut self, new: NewTask) -> Result<Ulid> {
         let title = new.title.trim().to_string();
         if title.is_empty() {
@@ -175,7 +178,7 @@ impl Board {
             project: new.project,
             description: new.description,
             status,
-            order: self.column(status).len() as u32,
+            order: 0, // set by renumbering below
             created: now,
             updated: now,
             closed: (status == Status::Closed).then_some(now),
@@ -183,7 +186,13 @@ impl Board {
             files: Vec::new(),
         };
         let id = task.id;
+        let mut ids: Vec<Ulid> = self.column(status).iter().map(|t| t.id).collect();
+        match new.position {
+            NewTaskPosition::Top => ids.insert(0, id),
+            NewTaskPosition::Bottom => ids.push(id),
+        }
         self.tasks.push(task);
+        self.renumber(&ids);
         Ok(id)
     }
 
@@ -290,6 +299,7 @@ mod tests {
                 title: title.into(),
                 project: "/p".into(),
                 status: Some(status),
+                position: NewTaskPosition::Bottom,
                 ..Default::default()
             })
             .unwrap()
@@ -301,6 +311,24 @@ mod tests {
             .iter()
             .map(|t| t.title.clone())
             .collect()
+    }
+
+    #[test]
+    fn new_tasks_go_to_the_top_or_bottom() {
+        let mut b = Board::default();
+        let new = |title: &str, position| NewTask {
+            title: title.into(),
+            project: "/p".into(),
+            position,
+            ..Default::default()
+        };
+        b.create(new("a", NewTaskPosition::Top)).unwrap();
+        b.create(new("b", NewTaskPosition::Top)).unwrap();
+        b.create(new("c", NewTaskPosition::Bottom)).unwrap();
+        b.create(new("d", NewTaskPosition::default())).unwrap();
+        assert_eq!(titles(&b, Status::Open), ["d", "b", "a", "c"]);
+        let orders: Vec<u32> = b.column(Status::Open).iter().map(|t| t.order).collect();
+        assert_eq!(orders, [0, 1, 2, 3]);
     }
 
     #[test]

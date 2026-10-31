@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use taskboard_core::{
-    Board, DateField, Error, Filter, GlobalSettings, Hook, Link, LinkKind, NewTask, Status, Store,
-    Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path,
-    project_root, short_id,
+    Board, DateField, Error, Filter, GlobalSettings, Link, LinkKind, NewTask, Status, Store, Task,
+    TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path, project_root,
+    short_id,
 };
 
 #[derive(Parser, Debug)]
@@ -182,27 +182,21 @@ fn main() -> ExitCode {
         )),
     };
     let json = cli.json;
-    // Only commands that create or move tasks can fire hooks.
-    let fires_hooks = matches!(
+    // Settings only matter to commands that create or move tasks: they hold
+    // the hooks, and where new tasks go.
+    let uses_settings = matches!(
         cli.command,
         Command::Add { .. } | Command::Edit { .. } | Command::Move { .. } | Command::Close { .. }
     );
-    let settings = match GlobalSettings::default_path().filter(|_| fires_hooks) {
+    let settings = match GlobalSettings::default_path().filter(|_| uses_settings) {
         Some(path) => GlobalSettings::load(&path).unwrap_or_else(|e| {
-            eprintln!("tb: warning: hooks are off: {e}");
+            eprintln!("tb: warning: using default settings (hooks off, new tasks at top): {e}");
             GlobalSettings::default()
         }),
         None => GlobalSettings::default(),
     };
-    let result = Store::open_default().and_then(|store| {
-        run(
-            cli,
-            &store,
-            &project,
-            &settings.hooks,
-            &mut io::stdout().lock(),
-        )
-    });
+    let result = Store::open_default()
+        .and_then(|store| run(cli, &store, &project, &settings, &mut io::stdout().lock()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -221,12 +215,12 @@ fn run(
     cli: Cli,
     store: &Store,
     project: &Path,
-    hooks: &[Hook],
+    settings: &GlobalSettings,
     out: &mut impl Write,
 ) -> Result<(), Error> {
     let json = cli.json;
     let fire = |events: Vec<TaskEvent>| {
-        for failure in hooks::run(hooks, &events) {
+        for failure in hooks::run(&settings.hooks, &events) {
             eprintln!("tb: warning: {failure}");
         }
     };
@@ -258,6 +252,7 @@ fn run(
                 description: description.map(read_text).transpose()?.unwrap_or_default(),
                 status,
                 links,
+                position: settings.new_task_position,
             };
             let (id, events) = store.update_with_events(|b| b.create(new))?;
             // Hooks run once the files are attached, so they see the whole task.
@@ -643,18 +638,46 @@ fn plural(n: usize, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taskboard_core::settings::NewTaskPosition;
 
     /// Runs `tb` with the project `project` under the store's directory.
     fn tb_in(store: &Store, project: &str, args: &[&str]) -> String {
+        tb_with(store, project, &GlobalSettings::default(), args)
+    }
+
+    /// Runs `tb` in `project` with the given user settings.
+    fn tb_with(store: &Store, project: &str, settings: &GlobalSettings, args: &[&str]) -> String {
         let cli = Cli::try_parse_from(std::iter::once("tb").chain(args.iter().copied())).unwrap();
         let mut out = Vec::new();
         let project = store.dir().join(project);
-        run(cli, store, &project, &[], &mut out).unwrap();
+        run(cli, store, &project, settings, &mut out).unwrap();
         String::from_utf8(out).unwrap()
     }
 
     fn tb(store: &Store, args: &[&str]) -> String {
         tb_in(store, "app", args)
+    }
+
+    #[test]
+    fn add_puts_new_tasks_where_the_settings_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let bottom = GlobalSettings {
+            new_task_position: NewTaskPosition::Bottom,
+            ..GlobalSettings::default()
+        };
+        tb(&store, &["add", "a"]);
+        tb(&store, &["add", "b"]);
+        tb_with(&store, "app", &bottom, &["add", "c"]);
+        tb(&store, &["add", "d"]);
+
+        let board = store.load().unwrap();
+        let order: Vec<&str> = board
+            .column(Status::Open)
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(order, ["d", "b", "a", "c"]);
     }
 
     #[test]
