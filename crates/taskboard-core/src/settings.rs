@@ -26,6 +26,15 @@ pub enum Theme {
     Light,
 }
 
+/// Where a new task goes in its status column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewTaskPosition {
+    #[default]
+    Top,
+    Bottom,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalSettings {
@@ -35,6 +44,9 @@ pub struct GlobalSettings {
     pub collapse_empty_columns: bool,
     /// Light or dark colors in the GUI.
     pub theme: Theme,
+    /// Whether tasks created here or with tb go at the top or bottom of
+    /// their column.
+    pub new_task_position: NewTaskPosition,
     /// Commands run when tasks are created or moved, in every project.
     pub hooks: Vec<Hook>,
     /// Board columns the user collapsed (`true`) or expanded (`false`) by
@@ -48,6 +60,7 @@ impl Default for GlobalSettings {
             font_size: DEFAULT_FONT_SIZE,
             collapse_empty_columns: true,
             theme: Theme::Dark,
+            new_task_position: NewTaskPosition::Top,
             hooks: Vec::new(),
             collapsed_columns: BTreeMap::new(),
         }
@@ -116,6 +129,7 @@ mod tests {
             font_size: 18,
             collapse_empty_columns: false,
             theme: Theme::Light,
+            new_task_position: NewTaskPosition::Bottom,
             hooks: vec![Hook {
                 event: HookEvent::Moved,
                 command: "notify-send moved".into(),
@@ -148,6 +162,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(GlobalSettings::load(&path).unwrap().theme, Theme::Dark);
+        // ...and those from before the new task position setting, as top.
+        assert_eq!(
+            GlobalSettings::load(&path).unwrap().new_task_position,
+            NewTaskPosition::Top
+        );
+        fs::write(&path, r#"{"new_task_position": "bottom"}"#).unwrap();
+        assert_eq!(
+            GlobalSettings::load(&path).unwrap().new_task_position,
+            NewTaskPosition::Bottom
+        );
         fs::write(&path, r#"{"font_size": 300}"#).unwrap();
         assert_eq!(
             GlobalSettings::load(&path).unwrap().font_size,
