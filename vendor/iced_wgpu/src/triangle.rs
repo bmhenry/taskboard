@@ -803,6 +803,23 @@ mod gradient {
     use crate::graphics::mesh;
     use crate::triangle;
 
+    // taskboard patch: on wasm32 (WebGL2), use an array-free copy of the
+    // gradient shader, because Mali GPUs reject the GLSL ES that the arrays in
+    // gradient.wgsl turn into. Native builds use the upstream shader. See
+    // shader/triangle/gradient_webgl.wgsl.
+    #[cfg(not(target_arch = "wasm32"))]
+    macro_rules! gradient_wgsl {
+        () => {
+            include_str!("shader/triangle/gradient.wgsl")
+        };
+    }
+    #[cfg(target_arch = "wasm32")]
+    macro_rules! gradient_wgsl {
+        () => {
+            include_str!("shader/triangle/gradient_webgl.wgsl")
+        };
+    }
+
     #[derive(Debug, Clone)]
     pub struct Pipeline {
         pub pipeline: wgpu::RenderPipeline,
@@ -897,7 +914,7 @@ mod gradient {
                         std::borrow::Cow::Borrowed(concat!(
                             include_str!("shader/triangle.wgsl"),
                             "\n",
-                            include_str!("shader/triangle/gradient.wgsl"),
+                            gradient_wgsl!(),
                             "\n",
                             include_str!("shader/color.wgsl"),
                             "\n",

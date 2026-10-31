@@ -35,6 +35,75 @@ the fonts in the wasm binary. The screenshots show DejaVu Sans, Bold
 wgpu falls back to WebGL2 through iced's `webgl` feature, which this crate
 turns on. tiny-skia is also compiled in as the last fallback.
 
+**Requirement: plain HTTP on the LAN.** The web UI has to work when served
+over plain `http://` from a machine on the local network. That isn't a secure
+context, so browsers expose no WebGPU (`navigator.gpu` is undefined) and the
+WebGL2 path is the one that matters, on phones too. Firefox for Android has
+no WebGPU at all, so it always takes this path.
+
+## Mali GPUs and WebGL2 (task 8DS45NWN)
+
+On a real Android phone over plain HTTP (Chrome 156, "ANGLE (ARM, Mali-G715,
+OpenGL ES 3.2)", WebGL 2.0) the app panicked at startup:
+
+```
+Shader compilation failed: 0:165: S0032: no default precision defined for variable 'vec4[8]'
+wgpu error: Validation Error
+  In Device::create_render_pipeline, label = 'iced_wgpu.triangle.gradient.pipeline'
+```
+
+Over HTTPS (WebGPU) the same phone rendered fine, and desktop Chrome accepts
+the shader, so this only shows up on Mali's GLES driver.
+
+**Root cause.** iced's mesh gradient shader (`iced_wgpu`
+`shader/triangle/gradient.wgsl`) builds `array<vec4<f32>, 8>` and
+`array<f32, 8>` locals in its fragment stage and passes them to a function.
+naga turns these into GLSL ES `vec4 colors_1[8] = vec4[8](...)` and so on, under
+a default `precision highp float;`. That GLSL is fine. But Chrome hands it to
+ANGLE, which re-emits it for the driver with an explicit precision on every
+declaration and no default precision statement, and writes the arrays as
+`vec4[8](...)` constructors (it also zero-fills every local array that way, so
+even an uninitialised `vec4 a[8];` produces one). A constructor has no
+precision qualifier of its own. Mali's compiler wants a default float
+precision for that `vec4[8]` value, finds none in ANGLE's output, and rejects
+the shader. Line 165 is in ANGLE's translated source, not naga's. ANGLE's
+translation was captured locally by running Chrome with
+`--use-angle=gles-egl` on Mesa (the same ANGLE-over-GLES path the phone uses)
+and reading `WEBGL_debug_shaders`: it has no `precision` statement, and it has
+`vec4[8](...)` and `float[8](...)` constructors in both `gradient()` and
+`main()`. Mesa accepts it; Mali doesn't.
+
+All 12 shaders iced compiles on WebGL2 were captured (by wrapping
+`WebGL2RenderingContext.prototype.shaderSource`) and scanned. That fragment
+shader is the only one with arrays. `quad/gradient.wgsl` has the same code,
+but iced already skips that pipeline on wasm32. The other arrays (`blit.wgsl`,
+`image.wgsl`) are in vertex shaders, where GLSL ES predeclares `highp float`,
+and the blit pipeline is created before the failing one on the phone, so it
+compiled there.
+
+**Fix.** `vendor/iced_wgpu` is iced_wgpu 0.14.0 with a wasm32-only,
+array-free copy of the gradient shader (`gradient_webgl.wgsl`), applied with
+`[patch.crates-io]`. It reads stop `i` straight from the packed vertex outputs
+(a `switch` for the colour, a vector index for the offset) and keeps the
+gradient maths the same. Native builds still compile the upstream shader, so
+the desktop app doesn't change. `vendor/README.md` describes the patch and
+when to drop it. The generated GLSL and ANGLE's translation of it now contain
+no arrays at all.
+
+Alternatives considered:
+
+- *Upgrade.* iced_wgpu 0.14.0 is the latest release and pins wgpu/naga 27
+  (27.0.3 is the newest naga 27). iced master still has the arrays, and there
+  was no upstream issue for this.
+- *A naga/wgpu option.* naga's GLSL backend has no option that changes how
+  arrays are written, and an explicit precision in naga's output wouldn't
+  help, because ANGLE rewrites it anyway.
+- *A JS shim rewriting the GLSL in `shaderSource`.* Adding precision
+  statements does nothing for the same reason. Unrolling the arrays in the
+  GLSL with regexes would be fragile, and swapping in hand-written GLSL would
+  have to track naga's output names. Fixing the WGSL lets naga and wgpu
+  validate it.
+
 ## What was gated or stubbed
 
 Every gate uses `cfg(target_arch = "wasm32")`, so native builds keep the
@@ -73,6 +142,15 @@ trunk build                                   # -> dist/ (~37 MB debug wasm; use
 trunk serve                                   # http://127.0.0.1:8080/
 trunk serve --address 0.0.0.0 --port 8080     # reachable from a phone on the LAN / Tailscale
 ```
+
+`index.html` mirrors console output, errors and some environment details
+(secure context, WebGPU/WebGL2 availability, viewport, canvas sizes) into a
+log panel at the bottom of the page, because a phone's browser console isn't
+visible. Tap the panel to hide it.
+
+To test the WebGL2 path from a desktop browser, open the page through the
+machine's LAN or Tailscale address (not `127.0.0.1`/`localhost`, which count
+as secure contexts and may get WebGPU).
 
 The phone opens `http://<this-machine's-LAN-or-Tailscale-IP>:8080/`. A
 release build is much smaller and faster: `trunk serve --release --address
