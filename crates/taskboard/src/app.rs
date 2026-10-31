@@ -123,6 +123,18 @@ pub enum Action {
         owner: Owner,
         file: Ulid,
     },
+    /// Creates an empty file in the store, attaches it to `task` and opens it
+    /// in the viewer; see [`taskboard_core::new_file_name`] for the name.
+    NewFile {
+        task: Ulid,
+        name: String,
+    },
+    /// Replaces the contents of one of `task`'s files.
+    WriteFile {
+        task: Ulid,
+        file: Ulid,
+        text: String,
+    },
     ViewFile(Option<(Ulid, Ulid)>),
     SetSearch(String),
     ToggleStatusFilter(Status),
@@ -232,10 +244,11 @@ impl App {
                 {
                     self.editing = None;
                 }
-                if self
-                    .viewing_file
-                    .is_some_and(|(t, _)| self.board.get(t).is_none())
-                {
+                if self.viewing_file.is_some_and(|(t, f)| {
+                    self.board
+                        .get(t)
+                        .is_none_or(|t| t.files.iter().all(|a| a.id != f))
+                }) {
                     self.viewing_file = None;
                 }
                 self.check_projects();
@@ -390,6 +403,8 @@ impl App {
                     owner: Owner::Task(_),
                     ..
                 }
+                | Action::NewFile { .. }
+                | Action::WriteFile { .. }
         );
         match action {
             Action::Select(id) => {
@@ -554,6 +569,13 @@ impl App {
                 }
                 Owner::Draft => self.draft.files.retain(|f| f.id != file),
             },
+            Action::NewFile { task, name } => {
+                let att = self.store.create_file(task, &name)?;
+                self.viewing_file = Some((task, att.id));
+            }
+            Action::WriteFile { task, file, text } => {
+                self.store.write_file(task, file, text.as_bytes())?;
+            }
             Action::RelocateProject { from, to } => {
                 let to = to.trim();
                 if to.is_empty() {
@@ -880,6 +902,44 @@ mod tests {
         });
         assert_eq!(app.error, None);
         assert_eq!(app.draft, Draft::default());
+    }
+
+    #[test]
+    fn new_file_is_created_opened_and_writable() {
+        let (_dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        app.apply(Action::NewFile {
+            task: a,
+            name: "a/b".into(),
+        });
+        assert!(app.error.take().is_some());
+        assert_eq!(app.viewing_file, None);
+
+        app.apply(Action::NewFile {
+            task: a,
+            name: "plan".into(),
+        });
+        assert_eq!(app.error, None);
+        let att = app.board.get(a).unwrap().files[0].clone();
+        assert_eq!(att.name, "plan.md");
+        assert_eq!(app.viewing_file, Some((a, att.id)));
+
+        let updated = app.board.get(a).unwrap().updated;
+        app.apply(Action::WriteFile {
+            task: a,
+            file: att.id,
+            text: "# Plan\n".into(),
+        });
+        assert_eq!(app.error, None);
+        let path = app.store.file_path(&att);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "# Plan\n");
+        assert!(app.board.get(a).unwrap().updated >= updated);
+
+        // The viewer closes when its file is detached elsewhere.
+        app.store.detach(a, att.id).unwrap(); // as if `tb file rm` ran
+        app.reload();
+        assert_eq!(app.viewing_file, None);
+        assert!(app.board.get(a).is_some());
     }
 
     #[test]

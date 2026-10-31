@@ -92,6 +92,8 @@ taskboard ~/src/app  # ...or to another one
 - `+` on a column (or `Ctrl+N`) creates a task, at the top of the column (Settings → New tasks can make it the bottom, for `tb add` too); `Ctrl+S` saves, `Esc` cancels or closes
 - `Ctrl+F` focuses search; status and project chips and the date range filter what's shown
 - Add links and attach files (by path) from the task panel; click a file to view it
+- New… in the task panel's Files creates an empty file in the store (a name without an extension gets `.md`) and opens it for editing
+- Edit in the file viewer edits any attached text file as plain text; `Ctrl+S` saves, Cancel discards. With unsaved changes, `Esc` and clicking outside don't close the viewer
 
 ### CLI
 
@@ -116,6 +118,7 @@ tb close 7F3TPKKW
 tb rm 7F3TPKKW
 tb link add 7F3TPKKW https://docs.rs -l "API docs" -k context   # -k defaults to source until the task has one
 tb file add 7F3TPKKW screenshot.png
+tb file new 7F3TPKKW plan    # empty file owned by the store: plan.md
 tb file cat 7F3TPKKW notes.md
 ```
 

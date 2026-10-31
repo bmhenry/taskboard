@@ -1,21 +1,21 @@
 //! The panel beside the board or list: a task's details, or the editor.
 
-use iced::keyboard::{Key, key::Named};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Column, Space, button, column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Length};
-use taskboard_core::{FileKind, Link, LinkKind, Status, Task, Ulid, default_link_kind};
+use taskboard_core::{
+    FileKind, Link, LinkKind, Status, Task, Ulid, default_link_kind, new_file_name,
+};
 
 use super::popup::popup;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::viewer::markdown;
 use super::widgets::{
-    El, btn, grow, input, label, link, path_label, section_title, shorten_path, status_dot,
-    warning_icon,
+    El, btn, grow, input, label, link, path_label, save_keys, section_title, shorten_path,
+    status_dot, warning_icon,
 };
-use super::{EDIT_TITLE, Gui, Message};
+use super::{EDIT_TITLE, Gui, Message, NEW_FILE_NAME};
 use crate::app::{Action, EditTarget, Owner, ProjectInput};
 
 /// Unscaled minimum width of the status dropdown's list.
@@ -282,24 +282,65 @@ fn files_editor<'a>(
             .align_y(Alignment::Center),
         );
     }
-    body.push(
+    let mut attach = row![
+        input(
+            p,
+            "attach_path",
+            "Path to a file to attach",
+            &gui.ui.attach_path,
+            false,
+            Message::AttachPath
+        )
+        .on_submit(Message::Attach(owner))
+        .width(Length::Fill),
+        btn(p, "Attach", Style::Normal, Message::Attach(owner)),
+        btn(p, "Browse…", Style::Normal, Message::Browse(owner)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    // A new file is created in the store right away, so the draft has none.
+    if let Owner::Task(task) = owner {
+        let face = btn(p, "New…", Style::Normal, Message::ToggleNewFile(task));
+        let dialog = (gui.ui.new_file_for == Some(task)).then(|| new_file(gui, task));
+        attach = attach.push(popup(face, dialog).on_dismiss(Message::CloseNewFile));
+    }
+    body.push(attach)
+}
+
+/// Asks for the name of a new file to create and attach to `task`, saying
+/// what the file will be called.
+fn new_file(gui: &Gui, task: Ulid) -> El<'_> {
+    let (p, name) = (gui.pal(), &gui.ui.new_file_name);
+    let checked = new_file_name(name);
+    let hint = match &checked {
+        _ if name.trim().is_empty() => label(p, "Without an extension, it's a .md file."),
+        Ok(name) => label(p, format!("Creates {name}")),
+        Err(e) => text(e.to_string()).size(12).color(rgb(p.danger)).into(),
+    };
+    let body = column![
+        text("New file").size(14).font(BOLD),
+        input(
+            p,
+            NEW_FILE_NAME,
+            "notes.md",
+            name,
+            !name.trim().is_empty() && checked.is_err(),
+            Message::NewFileName
+        )
+        .on_submit(Message::CreateFile(task)),
+        hint,
         row![
-            input(
-                p,
-                "attach_path",
-                "Path to a file to attach",
-                &gui.ui.attach_path,
-                false,
-                Message::AttachPath
-            )
-            .on_submit(Message::Attach(owner))
-            .width(Length::Fill),
-            btn(p, "Attach", Style::Normal, Message::Attach(owner)),
-            btn(p, "Browse…", Style::Normal, Message::Browse(owner)),
+            btn(p, "Create", Style::Primary, Message::CreateFile(task)),
+            btn(p, "Cancel", Style::Quiet, Message::CloseNewFile),
         ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
+        .spacing(8),
+    ]
+    .spacing(8);
+    container(body)
+        .width(280)
+        .padding(12)
+        .style(move |_| theme::boxed(p.panel, p.border, 8.0))
+        .into()
 }
 
 /// Shows the task's status; clicking it opens a list of statuses to move the
@@ -416,14 +457,7 @@ pub fn editor<'a>(gui: &'a Gui, width: Length) -> El<'a> {
         .padding([7, 8])
         .min_height(200)
         .height(Length::Shrink)
-        // Ctrl+S and Ctrl+Enter save, handled for the whole window.
-        .key_binding(|press: KeyPress| {
-            let ctrl = press.modifiers.control() || press.modifiers.logo();
-            match press.key.as_ref() {
-                Key::Named(Named::Enter) | Key::Character("s") if ctrl => None,
-                _ => Binding::from_key_press(press),
-            }
-        })
+        .key_binding(save_keys)
         .style(move |_, status| theme::editor_style(p, status));
     let mut body = column![
         text(heading).size(18).font(BOLD),

@@ -3,8 +3,10 @@
 use std::path::Path;
 
 use iced::alignment::Vertical;
+use iced::keyboard::{Key, key::Named};
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, LineJoin, Stroke};
 use iced::widget::text::Wrapping;
+use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Space, button, column, container, mouse_area, row, text, text_input, tooltip};
 use iced::{
     Alignment, Background, Border, Element, Length, Point, Rectangle, Renderer, Theme, mouse,
@@ -101,6 +103,16 @@ pub fn input<'a>(
         .size(14)
         .padding([6, 8])
         .style(move |_, status| theme::input_style(p, invalid, status))
+}
+
+/// A text editor's key bindings, leaving out Ctrl+S and Ctrl+Enter, which
+/// save and are handled for the whole window.
+pub fn save_keys(press: KeyPress) -> Option<Binding<Message>> {
+    let ctrl = press.modifiers.control() || press.modifiers.logo();
+    match press.key.as_ref() {
+        Key::Named(Named::Enter) | Key::Character("s") if ctrl => None,
+        _ => Binding::from_key_press(press),
+    }
 }
 
 /// A box that's ticked when `on`, followed by `label`.
