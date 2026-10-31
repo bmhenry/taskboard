@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use iced::widget::Id;
 use iced::{Point, Rectangle};
 use taskboard_core::{Status, Ulid};
 
@@ -23,15 +24,20 @@ pub struct Drag {
     pub id: Ulid,
     /// The dragged card's height, which the gap's box opens to.
     pub height: f32,
-    /// Where the columns were when the drag started, to find the one under
-    /// the pointer.
+    /// The columns, card lists and cards measured to place the gap, again
+    /// whenever the board scrolls.
+    pub zones: Vec<Id>,
+    /// Where the columns were when last measured, to find the one under the
+    /// pointer.
     pub columns: Vec<(Status, Rectangle)>,
-    /// Each expanded column's cards when the drag started, leaving out the
+    /// Each expanded column's cards when last measured, leaving out the
     /// dragged one: their ids and where their middles would be with no gap
     /// open. Empty until measured.
     pub cards: HashMap<Status, Vec<(Ulid, f32)>>,
     /// Where the card would land if dropped now.
     pub target: Option<Slot>,
+    /// Where the pointer was last dragged to.
+    pub pointer: Point,
     /// Where the card came from, which Esc sends it back to.
     pub origin: Slot,
     /// How far each gap is open, from 0 to 1, as they move toward
@@ -46,13 +52,15 @@ pub struct Drag {
 impl Drag {
     /// A drag of `id` from `origin`. Its gap starts fully open, so it takes
     /// the place of the card that just left.
-    pub fn new(id: Ulid, height: f32, origin: Slot) -> Drag {
+    pub fn new(id: Ulid, height: f32, origin: Slot, zones: Vec<Id>) -> Drag {
         Drag {
             id,
             height,
+            zones,
             columns: Vec::new(),
             cards: HashMap::new(),
             target: Some(origin),
+            pointer: Point::ORIGIN,
             origin,
             gaps: vec![(origin, 1.0)],
             last_frame: None,
@@ -68,6 +76,7 @@ impl Drag {
     /// Points the gap at where the card would land with the pointer at
     /// `point`, once the board's been measured.
     pub fn hover(&mut self, point: Point) {
+        self.pointer = point;
         if self.cancelled || self.columns.is_empty() {
             return;
         }
@@ -182,7 +191,7 @@ mod tests {
     #[test]
     fn hover_targets_slot_before_card_below_pointer() {
         let (dragged, a, b) = ids();
-        let mut drag = Drag::new(dragged, 40.0, (Status::Open, None));
+        let mut drag = Drag::new(dragged, 40.0, (Status::Open, None), Vec::new());
         drag.columns = vec![
             (
                 Status::Open,
@@ -212,7 +221,7 @@ mod tests {
     fn hover_waits_for_measurement_and_ignores_cancelled() {
         let (dragged, a, _) = ids();
         let origin = (Status::Open, Some(a));
-        let mut drag = Drag::new(dragged, 40.0, origin);
+        let mut drag = Drag::new(dragged, 40.0, origin, Vec::new());
         drag.hover(Point::new(1000.0, 1000.0));
         assert_eq!(drag.target, Some(origin));
 
@@ -231,7 +240,7 @@ mod tests {
     fn gaps_open_toward_target_and_close_elsewhere() {
         let (dragged, a, b) = ids();
         let (from, to) = ((Status::Open, Some(a)), (Status::Open, Some(b)));
-        let mut drag = Drag::new(dragged, 40.0, from);
+        let mut drag = Drag::new(dragged, 40.0, from, Vec::new());
         assert_eq!(drag.gap(from), 1.0);
         assert!(!drag.animating());
 

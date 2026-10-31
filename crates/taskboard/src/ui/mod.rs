@@ -170,6 +170,8 @@ pub enum Message {
     /// A card was dragged to a point; it's as big as the rectangle.
     DragMoved(Ulid, Point, Rectangle),
     DragZones(Vec<(iced::widget::Id, Rectangle)>),
+    /// A column or the board scrolled, maybe mid-drag.
+    DragScrolled,
     /// A frame of the gap under a dragged card opening or closing.
     Frame(Instant),
     Dropped(Ulid, Point),
@@ -488,8 +490,6 @@ impl Gui {
                         .map(|t| t.id)
                         .collect();
                     let next = visible.iter().skip_while(|t| **t != id).nth(1).copied();
-                    ui.drag = Some(Drag::new(id, bounds.height, (status, next)));
-                    // Measure the board as it was before the card left it.
                     let mut ids = board::column_ids();
                     for status in Status::ALL {
                         ids.push(board::cards_id(status));
@@ -500,6 +500,10 @@ impl Gui {
                                 .map(|t| board::card_id(t.id)),
                         );
                     }
+                    let mut drag = Drag::new(id, bounds.height, (status, next), ids.clone());
+                    drag.pointer = point;
+                    ui.drag = Some(drag);
+                    // Measure the board as it was before the card left it.
                     return zones::find(ids).map(Message::DragZones);
                 }
                 if let Some(drag) = &mut ui.drag {
@@ -531,6 +535,13 @@ impl Gui {
                         let cards = cards.iter().map(|(id, _)| *id).zip(mids).collect();
                         drag.cards.insert(status, cards);
                     }
+                    // Place the gap now rather than on the next move.
+                    drag.hover(drag.pointer);
+                }
+            }
+            Message::DragScrolled => {
+                if let Some(drag) = &ui.drag {
+                    return zones::find(drag.zones.clone()).map(Message::DragZones);
                 }
             }
             Message::Frame(now) => {

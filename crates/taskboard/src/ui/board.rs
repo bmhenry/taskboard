@@ -79,6 +79,7 @@ pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
     });
     scrollable(row(columns).spacing(COLUMN_GAP).height(Length::Fill))
         .id("board")
+        .on_scroll(|_| Message::DragScrolled)
         .direction(Direction::Horizontal(
             Scrollbar::new().width(6).scroller_width(6),
         ))
@@ -194,17 +195,24 @@ fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
     // Each card sits below the gap that opens while a card is dragged in
     // above it, and the last gap opens below them all. The cards keep the
     // same widgets throughout, so the dragged one stays dragged.
+    let dragged = |t: &Task| gui.ui.drag.as_ref().is_some_and(|d| d.id == t.id);
+    let last = tasks.iter().rev().find(|t| !dragged(t)).map(|t| t.id);
     let list = column(tasks.iter().map(|t| {
-        let dragged = gui.ui.drag.as_ref().is_some_and(|d| d.id == t.id);
         // The dragged card shrinks to nothing, as it's drawn under the
         // pointer instead, and its gap takes its place.
-        let below = if dragged { 0.0 } else { CARD_GAP };
-        column![gap(gui, (status, Some(t.id))), card(gui, t)]
+        let below = if dragged(t) || Some(t.id) == last {
+            0.0
+        } else {
+            CARD_GAP
+        };
+        column![gap(gui, (status, Some(t.id)), false), card(gui, t)]
             .padding(iced::Padding::ZERO.bottom(below))
             .into()
     }))
-    .push(gap(gui, (status, None)));
+    .push(gap(gui, (status, None), last.is_some()));
     let cards = scrollable(container(list).id(cards_id(status)))
+        // Scrolling moves the cards the gap is placed between.
+        .on_scroll(|_| Message::DragScrolled)
         .direction(Direction::Vertical(
             Scrollbar::new().width(4).scroller_width(4),
         ))
@@ -221,8 +229,9 @@ fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
 }
 
 /// The gap at `slot`, which opens to a box the size of the dragged card
-/// while it would land there.
-fn gap(gui: &Gui, slot: Slot) -> El<'_> {
+/// while it would land there. It's spaced from the card above it if
+/// `after_card`, or else from the card below it.
+fn gap(gui: &Gui, slot: Slot, after_card: bool) -> El<'_> {
     let Some(drag) = &gui.ui.drag else {
         return Space::new().into();
     };
@@ -237,7 +246,11 @@ fn gap(gui: &Gui, slot: Slot) -> El<'_> {
             .height(open * drag.height)
             .style(move |_| theme::placeholder(p)),
     )
-    .padding(iced::Padding::ZERO.bottom(open * CARD_GAP))
+    .padding(if after_card {
+        iced::Padding::ZERO.top(open * CARD_GAP)
+    } else {
+        iced::Padding::ZERO.bottom(open * CARD_GAP)
+    })
     .into()
 }
 
