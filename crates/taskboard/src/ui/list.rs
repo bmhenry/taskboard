@@ -8,7 +8,7 @@ use taskboard_core::{Status, Task};
 
 use super::board::card_body;
 use super::theme::{self, BOLD, MONO, Pal, rgb};
-use super::widgets::{El, count_badge, label, missing_project_badge};
+use super::widgets::{El, count_badge, epic_badge, label, missing_project_badge, parent_label};
 use super::{Gui, Message, panels};
 use crate::app::Action;
 
@@ -27,13 +27,22 @@ pub fn list(gui: &Gui) -> El<'_> {
             .format("%Y-%m-%d %H:%M")
             .to_string();
         let selected = app.selected == Some(task.id);
-        let missing = app
-            .project_missing(&task.project)
-            .then(|| missing_project_badge(p, &task.project, 14.0));
+        let mut badges: Vec<El> = Vec::new();
+        if app.project_missing(&task.project) {
+            badges.push(missing_project_badge(p, &task.project, 14.0));
+        }
+        if task.epic {
+            badges.push(epic_badge(p, app.board.progress(task.id)));
+        }
+        let parent = app
+            .board
+            .parent_of(task)
+            .map(|epic| parent_label(p, &epic.title));
         let cells = list_row(
             p,
             Some(task.status),
-            missing,
+            (!badges.is_empty()).then(|| row(badges).spacing(6).into()),
+            parent,
             [
                 task.status.label().to_string(),
                 task.short_id(),
@@ -71,6 +80,7 @@ pub fn list(gui: &Gui) -> El<'_> {
         p,
         None,
         None,
+        None,
         ["Status", "ID", "Title", "Project", "Updated"].map(String::from),
     );
     container(column![
@@ -90,11 +100,12 @@ pub fn list(gui: &Gui) -> El<'_> {
 }
 
 /// One row of the list table; `status` is `None` for the header. `badge` goes
-/// before the title.
+/// before the title, and `parent` under it.
 fn list_row<'a>(
     p: Pal,
     status: Option<Status>,
     badge: Option<El<'a>>,
+    parent: Option<El<'a>>,
     cells: [String; 5],
 ) -> El<'a> {
     let header = status.is_none();
@@ -105,15 +116,19 @@ fn list_row<'a>(
         container(text(status_cell).size(size).color(rgb(first))).width(120),
         container(text(id).size(size).font(MONO).color(rgb(p.muted))).width(90),
         container(
-            row![]
-                .push(badge)
-                .push(
-                    text(title)
-                        .size(size)
-                        .color(rgb(if header { p.muted } else { p.text }))
-                )
-                .spacing(6)
-                .align_y(Alignment::Center)
+            column![
+                row![]
+                    .push(badge)
+                    .push(
+                        text(title)
+                            .size(size)
+                            .color(rgb(if header { p.muted } else { p.text }))
+                    )
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+            ]
+            .push(parent)
+            .spacing(2)
         )
         .width(Length::Fill),
         container(
@@ -191,6 +206,7 @@ fn in_progress_item<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     button(
         container(card_body(
             p,
+            &gui.app.board,
             task,
             None,
             gui.app.project_missing(&task.project),
@@ -210,7 +226,13 @@ fn in_progress_item<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
             }))),
             text_color: rgb(p.text),
             border: Border {
-                color: rgb(if selected { p.accent } else { p.card_edge }),
+                color: rgb(if selected {
+                    p.accent
+                } else if task.epic {
+                    p.epic
+                } else {
+                    p.card_edge
+                }),
                 width: 1.0,
                 radius: 6.0.into(),
             },

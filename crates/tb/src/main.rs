@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use taskboard_core::{
-    Board, DateField, Error, Filter, GlobalSettings, Link, LinkKind, NewTask, Status, Store, Task,
-    TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path, project_root,
-    short_id,
+    Board, DateField, Error, Filter, GlobalSettings, Link, LinkKind, NewTask, Progress, Status,
+    Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path,
+    project_root, short_id,
 };
 
 #[derive(Parser, Debug)]
@@ -52,13 +52,19 @@ enum Command {
         /// File to copy in and attach (repeatable).
         #[arg(long, value_name = "PATH")]
         file: Vec<PathBuf>,
+        /// Create the task as an epic, which other tasks can be children of.
+        #[arg(long, conflicts_with = "parent")]
+        epic: bool,
+        /// Make it a child of this epic, in the epic's project unless --project is given.
+        #[arg(long, value_name = "EPIC")]
+        parent: Option<String>,
     },
     /// List the project's tasks, grouped by status. Closed tasks are hidden unless asked for.
     #[command(alias = "ls")]
     List(ListArgs),
     /// Show one task in full.
     Show { id: String },
-    /// Change a task's title, description, status, or project.
+    /// Change a task's title, description, status, project, or epic.
     Edit {
         id: String,
         #[arg(short, long)]
@@ -68,10 +74,21 @@ enum Command {
         description: Option<String>,
         #[arg(short, long)]
         status: Option<Status>,
-        /// Move the task to the project in DIR, creating it if needed.
+        /// Move the task to the project in DIR, creating it if needed. An epic's
+        /// children go with it; a child must leave its epic to move on its own.
         #[arg(long, value_name = "DIR")]
         to_project: Option<PathBuf>,
+        /// Make the task a child of this epic.
+        #[arg(long, value_name = "EPIC", conflicts_with = "no_parent")]
+        parent: Option<String>,
+        /// Take the task out of its epic.
+        #[arg(long)]
+        no_parent: bool,
     },
+    /// Make a task an epic, which other tasks can be children of.
+    Promote { id: String },
+    /// Make an epic a normal task again. It must have no children.
+    Demote { id: String },
     /// Move a task to a status and/or position (1 = top of the column).
     #[command(alias = "mv")]
     Move {
@@ -82,7 +99,7 @@ enum Command {
     },
     /// Close a task.
     Close { id: String },
-    /// Delete a task and its attached files.
+    /// Delete a task and its attached files. An epic's children are kept.
     #[command(alias = "rm")]
     Delete { id: String },
     /// Manage a task's links.
@@ -120,6 +137,10 @@ struct ListArgs {
     /// List tasks from every project, not just the current one.
     #[arg(short = 'A', long)]
     all_projects: bool,
+    /// Only child tasks of this epic, whichever project it's in. Closed ones
+    /// are still hidden unless asked for.
+    #[arg(long, value_name = "EPIC")]
+    parent: Option<String>,
     /// Search title, description, and links.
     #[arg(short, long)]
     query: Option<String>,
@@ -219,6 +240,7 @@ fn run(
     out: &mut impl Write,
 ) -> Result<(), Error> {
     let json = cli.json;
+    let project_given = cli.project.is_some();
     let fire = |events: Vec<TaskEvent>| {
         for failure in hooks::run(&settings.hooks, &events) {
             eprintln!("tb: warning: {failure}");
@@ -232,6 +254,8 @@ fn run(
             source,
             context,
             file,
+            epic,
+            parent,
         } => {
             let links = source
                 .into_iter()
@@ -246,13 +270,27 @@ fn run(
                     kind: LinkKind::Context,
                 }))
                 .collect();
+            let parent = parent
+                .map(|query| {
+                    let board = store.load()?;
+                    let id = board.resolve(&query)?;
+                    Ok::<_, Error>((id, board.get(id).expect("resolved").project.clone()))
+                })
+                .transpose()?;
+            // A child goes in its epic's project, wherever `tb` was run.
+            let project = match &parent {
+                Some((_, epic_project)) if !project_given => epic_project.clone(),
+                _ => create_project_dir(project)?,
+            };
             let new = NewTask {
                 title,
-                project: create_project_dir(project)?,
+                project,
                 description: description.map(read_text).transpose()?.unwrap_or_default(),
                 status,
                 links,
                 position: settings.new_task_position,
+                epic,
+                parent: parent.map(|(id, _)| id),
             };
             let (id, events) = store.update_with_events(|b| b.create(new))?;
             // Hooks run once the files are attached, so they see the whole task.
@@ -271,29 +309,38 @@ fn run(
         }
         Command::List(args) => {
             let mut filter = list_filter(&args)?;
-            if !args.all_projects {
-                filter.project = Some(project.to_path_buf());
-            }
             let board = store.load()?;
+            let children: Option<Vec<Ulid>> = match &args.parent {
+                Some(parent) => {
+                    let epic = board.resolve_epic(parent)?;
+                    Some(board.children(epic).iter().map(|t| t.id).collect())
+                }
+                None => {
+                    if !args.all_projects {
+                        filter.project = Some(project.to_path_buf());
+                    }
+                    None
+                }
+            };
+            let is_listed = |t: &Task| children.as_ref().is_none_or(|ids| ids.contains(&t.id));
             let tasks: Vec<&Task> = Status::ALL
                 .into_iter()
                 .flat_map(|s| board.column(s))
-                .filter(|t| filter.matches(t))
+                .filter(|t| filter.matches(t) && is_listed(t))
                 .collect();
             if json {
                 print_json(out, &tasks)?;
             } else {
-                let board = args.all_projects.then_some(&board);
-                write_list(out, &tasks, board)?;
+                write_list(out, &tasks, &board, args.all_projects)?;
             }
         }
         Command::Show { id } => {
             let board = store.load()?;
             let task = board.get(board.resolve(&id)?).expect("resolved id exists");
             if json {
-                print_json(out, task)?;
+                print_json(out, &TaskDetails::new(&board, task))?;
             } else {
-                write_task(out, task, &board.project_name(&task.project))?;
+                write_task(out, task, &board)?;
             }
         }
         Command::Edit {
@@ -302,19 +349,47 @@ fn run(
             description,
             status,
             to_project,
+            parent,
+            no_parent,
         } => {
-            let patch = TaskPatch {
+            let mut patch = TaskPatch {
                 title,
                 project: to_project.as_deref().map(create_project_dir).transpose()?,
                 description: description.map(read_text).transpose()?,
                 status,
+                parent: no_parent.then_some(None),
             };
             let (id, events) = store.update_with_events(|b| {
                 let id = b.resolve(&id)?;
+                if let Some(parent) = &parent {
+                    patch.parent = Some(Some(b.resolve(parent)?));
+                }
                 b.edit(id, patch).map(|_| id)
             })?;
             fire(events);
             report(out, json, store, id, "Updated")?;
+        }
+        Command::Promote { id } => {
+            let (id, already) = store.update(|b| {
+                let id = b.resolve(&id)?;
+                let already = b.get(id).expect("resolved id exists").epic;
+                b.promote(id).map(|_| (id, already))
+            })?;
+            let verb = if already {
+                "Already an epic:"
+            } else {
+                "Promoted"
+            };
+            report(out, json, store, id, verb)?;
+        }
+        Command::Demote { id } => {
+            let (id, was_epic) = store.update(|b| {
+                let id = b.resolve(&id)?;
+                let was_epic = b.get(id).expect("resolved id exists").epic;
+                b.demote(id).map(|_| (id, was_epic))
+            })?;
+            let verb = if was_epic { "Demoted" } else { "Not an epic:" };
+            report(out, json, store, id, verb)?;
         }
         Command::Move {
             id,
@@ -542,15 +617,62 @@ fn report(
     }
 }
 
+/// What `show --json` prints: the task, plus its epic or its children.
+#[derive(serde::Serialize)]
+struct TaskDetails<'a> {
+    #[serde(flatten)]
+    task: &'a Task,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_task: Option<TaskSummary<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<TaskSummary<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<Progress>,
+}
+
+impl<'a> TaskDetails<'a> {
+    fn new(board: &'a Board, task: &'a Task) -> TaskDetails<'a> {
+        let children = board.children(task.id).into_iter();
+        TaskDetails {
+            task,
+            parent_task: board.parent_of(task).map(TaskSummary::of),
+            children: task.epic.then(|| children.map(TaskSummary::of).collect()),
+            progress: task.epic.then(|| board.progress(task.id)),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct TaskSummary<'a> {
+    id: Ulid,
+    title: &'a str,
+    status: Status,
+}
+
+impl<'a> TaskSummary<'a> {
+    fn of(task: &'a Task) -> TaskSummary<'a> {
+        TaskSummary {
+            id: task.id,
+            title: &task.title,
+            status: task.status,
+        }
+    }
+}
+
 fn print_json<T: serde::Serialize + ?Sized>(out: &mut impl Write, value: &T) -> Result<(), Error> {
     serde_json::to_writer_pretty(&mut *out, value)?;
     writeln!(out)?;
     Ok(())
 }
 
-/// Writes `tasks` grouped by status, naming each task's project when given
-/// the `board` they're from.
-fn write_list(out: &mut impl Write, tasks: &[&Task], board: Option<&Board>) -> io::Result<()> {
+/// Writes `tasks` from `board` grouped by status, naming each task's project
+/// if `show_project`.
+fn write_list(
+    out: &mut impl Write,
+    tasks: &[&Task],
+    board: &Board,
+    show_project: bool,
+) -> io::Result<()> {
     if tasks.is_empty() {
         return writeln!(out, "No tasks.");
     }
@@ -564,6 +686,12 @@ fn write_list(out: &mut impl Write, tasks: &[&Task], board: Option<&Board>) -> i
             current = Some(task.status);
         }
         let mut extras = Vec::new();
+        if task.epic {
+            extras.push(format!("epic, {}", progress_text(board.progress(task.id))));
+        }
+        if let Some(epic) = board.parent_of(task) {
+            extras.push(format!("in {}  {}", epic.short_id(), epic.title));
+        }
         if !task.links.is_empty() {
             extras.push(plural(task.links.len(), "link"));
         }
@@ -575,9 +703,11 @@ fn write_list(out: &mut impl Write, tasks: &[&Task], board: Option<&Board>) -> i
         } else {
             format!("  ({})", extras.join(", "))
         };
-        let project = board.map_or_else(String::new, |b| {
-            format!("[{}]  ", b.project_name(&task.project))
-        });
+        let project = if show_project {
+            format!("[{}]  ", board.project_name(&task.project))
+        } else {
+            String::new()
+        };
         writeln!(
             out,
             "  {}  {project}{}{}",
@@ -589,7 +719,11 @@ fn write_list(out: &mut impl Write, tasks: &[&Task], board: Option<&Board>) -> i
     Ok(())
 }
 
-fn write_task(out: &mut impl Write, task: &Task, project_name: &str) -> io::Result<()> {
+fn progress_text(progress: Progress) -> String {
+    format!("{}/{} closed", progress.closed, progress.total)
+}
+
+fn write_task(out: &mut impl Write, task: &Task, board: &Board) -> io::Result<()> {
     let fmt = |d: chrono::DateTime<chrono::Utc>| {
         d.with_timezone(&chrono::Local)
             .format("%Y-%m-%d %H:%M")
@@ -597,12 +731,30 @@ fn write_task(out: &mut impl Write, task: &Task, project_name: &str) -> io::Resu
     };
     writeln!(out, "{}  {}", task.short_id(), task.title)?;
     writeln!(out, "id:       {}", task.id)?;
+    let project_name = board.project_name(&task.project);
     writeln!(out, "project:  {project_name} ({})", task.project.display())?;
     writeln!(out, "status:   {}", task.status)?;
+    if task.epic {
+        let progress = progress_text(board.progress(task.id));
+        writeln!(out, "epic:     yes, children {progress}")?;
+    }
+    if let Some(epic) = board.parent_of(task) {
+        writeln!(out, "parent:   {}  {}", epic.short_id(), epic.title)?;
+    } else if let Some(parent) = task.parent {
+        writeln!(out, "parent:   {parent} (not found)")?;
+    }
     writeln!(out, "created:  {}", fmt(task.created))?;
     writeln!(out, "updated:  {}", fmt(task.updated))?;
     if let Some(closed) = task.closed {
         writeln!(out, "closed:   {}", fmt(closed))?;
+    }
+    let children = board.children(task.id);
+    if !children.is_empty() {
+        writeln!(out, "\nChildren:")?;
+        for child in children {
+            let status = child.status;
+            writeln!(out, "  {}  {} [{status}]", child.short_id(), child.title)?;
+        }
     }
     if !task.links.is_empty() {
         writeln!(out, "\nLinks:")?;
@@ -739,6 +891,86 @@ mod tests {
             ],
         );
         assert!(tb(&store, &["list"]).contains("Theirs"));
+    }
+
+    #[test]
+    fn epics_from_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let add = |args: &[&str]| -> Task {
+            let args = [&["--json", "add"], args].concat();
+            serde_json::from_str(&tb(&store, &args)).unwrap()
+        };
+        let epic = add(&["Rework auth", "--epic"]);
+        let epic_id = epic.short_id();
+        // Added from another project, a child still lands in its epic's.
+        let child: Task = serde_json::from_str(&tb_in(
+            &store,
+            "other",
+            &["--json", "add", "Login page", "--parent", &epic_id],
+        ))
+        .unwrap();
+        assert_eq!(child.project, epic.project);
+        let done = add(&["Logout", "-s", "closed"]);
+        tb(&store, &["edit", &done.short_id(), "--parent", &epic_id]);
+        let loose = add(&["Unrelated"]);
+
+        let listed = tb_in(&store, "other", &["list", "--parent", &epic_id]);
+        assert!(listed.contains("Login page") && !listed.contains("Logout"));
+        assert!(!listed.contains("Unrelated"));
+        assert!(tb(&store, &["list", "-a", "--parent", &epic_id]).contains("Logout"));
+
+        let listed = tb(&store, &["list"]);
+        assert!(listed.contains("(epic, 1/2 closed)"));
+        assert!(listed.contains(&format!("(in {epic_id}  Rework auth)")));
+        let shown = tb(&store, &["show", &epic_id]);
+        assert!(shown.contains("epic:     yes, children 1/2 closed"));
+        assert!(shown.contains("Login page [Open]"));
+        let shown: serde_json::Value =
+            serde_json::from_str(&tb(&store, &["--json", "show", &epic_id])).unwrap();
+        assert_eq!(shown["progress"]["total"], 2);
+        assert_eq!(shown["children"][0]["title"], "Login page");
+        let shown: serde_json::Value =
+            serde_json::from_str(&tb(&store, &["--json", "show", &child.short_id()])).unwrap();
+        assert_eq!(shown["parent_task"]["title"], "Rework auth");
+
+        // Only a real change is reported as one.
+        let id = loose.short_id();
+        assert!(tb(&store, &["demote", &id]).starts_with("Not an epic: "));
+        assert!(tb(&store, &["promote", &id]).starts_with("Promoted "));
+        assert!(tb(&store, &["promote", &id]).starts_with("Already an epic: "));
+        assert!(tb(&store, &["demote", &id]).starts_with("Demoted "));
+
+        tb(&store, &["edit", &child.short_id(), "--no-parent"]);
+        let board = store.load().unwrap();
+        assert_eq!(board.get(child.id).unwrap().parent, None);
+    }
+
+    #[test]
+    fn list_parent_wants_an_epic_and_skips_stale_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let epic: Task =
+            serde_json::from_str(&tb(&store, &["--json", "add", "Epic", "--epic"])).unwrap();
+        let stale: Task =
+            serde_json::from_str(&tb_in(&store, "other", &["--json", "add", "Stale"])).unwrap();
+        store
+            .update(|b| {
+                // As if the file was edited by hand: its epic's in another project.
+                let task = b.tasks.iter_mut().find(|t| t.id == stale.id).unwrap();
+                task.parent = Some(epic.id);
+                Ok(())
+            })
+            .unwrap();
+
+        let args = ["list", "--parent", &epic.short_id()];
+        assert_eq!(tb(&store, &args), "No tasks.\n");
+
+        let id = stale.short_id();
+        let cli = Cli::try_parse_from(["tb", "list", "--parent", &id]).unwrap();
+        let settings = GlobalSettings::default();
+        let err = run(cli, &store, dir.path(), &settings, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("isn't an epic"), "{err}");
     }
 
     #[test]

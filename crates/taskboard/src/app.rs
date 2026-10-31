@@ -106,6 +106,15 @@ pub enum Action {
         position: Option<usize>,
     },
     Delete(Ulid),
+    /// Makes a task an epic.
+    Promote(Ulid),
+    /// Makes an epic a normal task.
+    Demote(Ulid),
+    /// Makes a task a child of the epic `parent`, or of none.
+    SetParent {
+        id: Ulid,
+        parent: Option<Ulid>,
+    },
     AddLink {
         owner: Owner,
         url: String,
@@ -385,6 +394,9 @@ impl App {
             Action::Save { .. }
                 | Action::Move { .. }
                 | Action::Delete(_)
+                | Action::Promote(_)
+                | Action::Demote(_)
+                | Action::SetParent { .. }
                 | Action::RelocateProject { .. }
                 | Action::DeleteProject(_)
                 | Action::AddLink {
@@ -465,7 +477,7 @@ impl App {
                             title: Some(title),
                             project: Some(project),
                             description: Some(description),
-                            status: None,
+                            ..Default::default()
                         };
                         self.store.update(|b| b.edit(id, patch))?;
                         self.selected = Some(id);
@@ -478,6 +490,7 @@ impl App {
                             status: Some(status),
                             links: self.draft.links.clone(),
                             position: self.settings.new_task_position,
+                            ..Default::default()
                         };
                         // The draft is kept if creating fails, e.g. on an empty title.
                         let (id, events) = self.store.update_with_events(|b| b.create(new))?;
@@ -521,6 +534,11 @@ impl App {
                     self.selected = None;
                     self.editing = None;
                 }
+            }
+            Action::Promote(id) => self.store.update(|b| b.promote(id))?,
+            Action::Demote(id) => self.store.update(|b| b.demote(id))?,
+            Action::SetParent { id, parent } => {
+                self.store.update(|b| b.set_parent(id, parent))?;
             }
             Action::AddLink { owner, url, kind } => {
                 let url = url.trim().to_string();
@@ -871,6 +889,32 @@ mod tests {
         assert_eq!(task.links[0].url, "https://example.com/1");
         assert_eq!(task.files.len(), 1);
         assert_eq!(task.files[0].name, "notes.md");
+    }
+
+    #[test]
+    fn epic_actions_apply_and_show_refusals() {
+        let (_dir, mut app) = app();
+        let epic = add(&mut app, "epic");
+        let child = add(&mut app, "child");
+        let join = Action::SetParent {
+            id: child,
+            parent: Some(epic),
+        };
+        app.apply(join.clone());
+        assert!(app.error.take().unwrap().contains("isn't an epic"));
+
+        app.apply(Action::Promote(epic));
+        app.apply(join);
+        assert_eq!(app.error, None);
+        assert_eq!(app.board.children(epic)[0].id, child);
+
+        app.apply(Action::SetParent {
+            id: child,
+            parent: None,
+        });
+        app.apply(Action::Demote(epic));
+        assert_eq!(app.error, None);
+        assert!(!app.board.get(epic).unwrap().epic);
     }
 
     #[test]

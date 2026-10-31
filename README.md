@@ -19,6 +19,9 @@ Taskboard tasks are powerful:
     - order (relative to the current status)
     - arbitrary URLs: clickable links which can be tagged as a "source" or as "context"
     - arbitrary files, which may be images, markdown, or plain text which is useful for the task
+    - whether it's an epic, and the epic it's a child of, if any
+
+Epics are promoted tasks for larger, longer running work. An epic has everything a task has, and stays on the board like one, with a status you set yourself and an order in its column; it can also have child tasks, which stay on the board as normal cards. Epics are one level deep: an epic can't have a parent, and only an epic can be one. A child is always in the same project as its epic, so moving an epic to another project takes its children along, and a child has to leave its epic to move on its own. Only an epic without children can be demoted. Closing an epic doesn't touch its children, and deleting one keeps them, without a parent.
 
 Tasks for every project are stored together in `$XDG_DATA_HOME/tb/` (`~/.local/share/tb/` by default) in a single JSON file, `tasks.json`, which also lists the known projects. Each task names its project by absolute directory; a project's name is its directory's name, with parent directories added in front (`work/app`, `src/app`) when it's needed to tell same-named projects apart. Tasks can reference other files, which are copied into `$XDG_DATA_HOME/tb/files/` under ULIDs; the task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema version so it can be migrated later if necessary. Settings (font size, theme, where new tasks go, hooks, which board columns are collapsed) are kept in `$XDG_CONFIG_HOME/tb/settings.json` (`~/.config/tb/` by default).
 
@@ -91,6 +94,8 @@ taskboard ~/src/app  # ...or to another one
 - If a project's folder disappears (moved or deleted), its tasks get a yellow ⚠; hover it for details. Open one of the tasks to point Taskboard at the project's new folder, or to delete the project and its tasks
 - `+` on a column (or `Ctrl+N`) creates a task, at the top of the column (Settings → New tasks can make it the bottom, for `tb add` too); `Ctrl+S` saves, `Esc` cancels or closes
 - `Ctrl+F` focuses search; status and project chips and the date range filter what's shown
+- Epics have a colored edge and a badge with how many of their children are closed, and child cards name their epic
+- In the task panel, Promote to epic makes a task an epic and Choose epic ▾ makes it a child of one in its project; an epic lists its children, which open on a click, and × takes a child out of its epic
 - Add links and attach files (by path) from the task panel; click a file to view it
 - New… in the task panel's Files creates an empty file in the store (a name without an extension gets `.md`) and opens it for editing
 - Edit in the file viewer edits any attached text file as plain text; `Ctrl+S` saves, Cancel discards. With unsaved changes, `Esc` and clicking outside don't close the viewer
@@ -110,6 +115,12 @@ tb list --date updated --after 2026-01-01
 tb show 7F3TPKKW
 tb edit 7F3TPKKW -t "New title" -d -
 tb edit 7F3TPKKW --to-project ~/src/app
+tb add "Rework auth" --epic  # create an epic, or...
+tb promote 7F3TPKKW          # ...promote a task (tb demote undoes it, if it has no children)
+tb add "Login page" --parent 7F3TPKKW   # a child, in its epic's project unless --project says otherwise
+tb edit 8M2QKRTW --parent 7F3TPKKW      # make a task a child of an epic
+tb edit 8M2QKRTW --no-parent            # take it out again
+tb list --parent 7F3TPKKW    # an epic's children, whichever project you're in; closed ones need -a
 tb project ls                # projects, flagging any whose folder is missing
 tb project mv ~/src/old ~/src/new   # after moving a project's folder
 tb project rm ~/src/old      # delete a project and all its tasks

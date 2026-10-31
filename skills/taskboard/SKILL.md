@@ -1,6 +1,6 @@
 ---
 name: taskboard
-description: Manage the project's Taskboard tasks with the `tb` CLI — list, show, add, edit, move, prioritize, close, or delete tasks, and attach links or files to them. Use when the user mentions tasks, the taskboard, the backlog, "what's next", or asks to track, file, pick up, update, or close a task in this project.
+description: Manage the project's Taskboard tasks with the `tb` CLI — list, show, add, edit, move, prioritize, close, or delete tasks, group them under epics, and attach links or files to them. Use when the user mentions tasks, epics, the taskboard, the backlog, "what's next", or asks to track, file, pick up, update, or close a task in this project.
 ---
 
 # Taskboard (`tb`)
@@ -47,6 +47,20 @@ unless the user's settings say bottom (`"new_task_position": "bottom"` in
 `~/.config/tb/settings.json`, or the GUI's settings); follow `add` with
 `move -p N` to place one elsewhere.
 
+## Epics
+
+An epic is a promoted task for larger work: it has everything a task has, plus child
+tasks. Epics and their children stay on the board in the normal columns.
+
+- Epics are one level deep: an epic can't have a parent, and only an epic can be one.
+- A child is in the same project as its epic. `edit --to-project` on an epic takes its
+  children along; on a child it's refused unless the same command leaves the epic
+  (`--no-parent`) or joins one in the new project (`--parent`).
+- Only an epic with no children can be demoted. A child can't be promoted until it
+  leaves its epic.
+- An epic's status is yours to set; its children never change it. Closing an epic
+  doesn't touch its children, and `tb rm` on an epic keeps them, clearing their `parent`.
+
 ## Commands
 
 ```sh
@@ -56,6 +70,7 @@ tb --json list -A                    # ...from every project
 tb --json list -s backlog            # one status (-s is repeatable)
 tb --json list --all -q login        # search title/description/links, incl. closed
 tb --json list --date updated --after 2026-01-01 --before 2026-02-01
+tb --json list --parent 7F3TPKKW     # an epic's non-closed children, from any project (add --all for closed)
 tb --json show 7F3TPKKW              # one task in full, including description
 
 # Create
@@ -64,6 +79,9 @@ tb --json add "Fix login redirect" -s backlog \
 tb --json add "Write docs" -d - <<'MD'
 Longer *markdown* description.
 MD
+
+tb --json add "Rework auth" --epic   # an epic
+tb --json add "Login page" --parent 7F3TPKKW    # a child; goes in the epic's project
 
 # Update
 tb --json edit 7F3TPKKW -t "New title"          # -t title, -d description, -s status
@@ -74,6 +92,12 @@ tb --json move 7F3TPKKW in-progress -p 1        # ...and put it at the top
 tb --json move 7F3TPKKW -p 1                    # reprioritize within its column
 tb --json close 7F3TPKKW
 tb --json rm 7F3TPKKW                           # permanent; ask first
+
+# Epics
+tb --json promote 7F3TPKKW                      # make a task an epic
+tb --json demote 7F3TPKKW                       # back to a task; it must have no children
+tb --json edit 8M2QKRTW --parent 7F3TPKKW       # make a task a child of an epic
+tb --json edit 8M2QKRTW --no-parent             # take it out of its epic
 
 # Projects
 tb --json project ls                            # path, name, task count, "missing" if its folder is gone
@@ -109,13 +133,27 @@ tb --json file rm 7F3TPKKW notes.md
   "updated": "2026-10-26T22:59:53Z",
   "closed": null,
   "links": [{ "url": "https://…", "label": null, "kind": "source" }],
-  "files": [{ "id": "01M…", "name": "notes.md", "path": "files/01M….md", "kind": "markdown" }]
+  "files": [{ "id": "01M…", "name": "notes.md", "path": "files/01M….md", "kind": "markdown" }],
+  "epic": false,
+  "parent": "01M5X724HRT6FPK984034NF3M4"
 }
 ```
 
 The short ID is the last 8 characters of `id`; `project` is the project's absolute
 directory. `list --json` returns an array in
 board order: grouped by status (open → closed), then by `order` within each status.
+
+`epic` is true for epics, and `parent` is the full ID of a task's epic, or null. A
+`parent` that no longer resolves is ignored rather than an error. `show --json` adds
+what those point at: `parent_task` on a child, and `children` and `progress` on an epic.
+
+```json
+{
+  "epic": true,
+  "children": [{ "id": "01M…", "title": "Login page", "status": "backlog" }],
+  "progress": { "closed": 0, "total": 1 }
+}
+```
 
 ## Common workflows
 
@@ -128,6 +166,9 @@ board order: grouped by status (open → closed), then by `order` within each st
 - **File a new task from a conversation:** `tb add "<title>" -d -` with a Markdown
   description; add `--source <url>` for the issue/thread it came from. Default status
   is `open`; use `-s backlog` only if it's ready to be worked on.
+- **Break down larger work:** `tb add "<title>" --epic -d -` with the details, then
+  `tb add "<step>" --parent <epic>` for each piece. `tb --json show <epic>` gives
+  its `children` and `progress`.
 - **Attach generated docs** (plans, requirements, notes): write the file somewhere
   temporary, then `tb file add <id> <path>`. Attaching the same name again adds a
   second file — `tb file rm` the old one first to replace it.

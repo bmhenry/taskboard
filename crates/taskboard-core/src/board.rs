@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde::Serialize;
 use ulid::Ulid;
 
 use crate::model::{Board, Link, Project, Status, Task};
@@ -21,6 +22,9 @@ pub struct NewTask {
     pub links: Vec<Link>,
     /// Top or bottom of its status column.
     pub position: NewTaskPosition,
+    pub epic: bool,
+    /// The epic it's a child of, which must be in the same project.
+    pub parent: Option<Ulid>,
 }
 
 /// Changes to apply to an existing task; `None` leaves a field alone.
@@ -31,6 +35,15 @@ pub struct TaskPatch {
     pub project: Option<PathBuf>,
     pub description: Option<String>,
     pub status: Option<Status>,
+    /// Sets or, with `Some(None)`, clears the task's epic.
+    pub parent: Option<Option<Ulid>>,
+}
+
+/// How far through its child tasks an epic is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Progress {
+    pub closed: usize,
+    pub total: usize,
 }
 
 impl Board {
@@ -156,6 +169,17 @@ impl Board {
         }
     }
 
+    /// Like [`Board::resolve`], for a task that has to be an epic.
+    pub fn resolve_epic(&self, query: &str) -> Result<Ulid> {
+        let id = self.resolve(query)?;
+        match self.get(id) {
+            Some(task) if !task.epic => {
+                Err(Error::Invalid(format!("'{}' isn't an epic", task.title)))
+            }
+            _ => Ok(id),
+        }
+    }
+
     /// Tasks with the given status, in board order.
     pub fn column(&self, status: Status) -> Vec<&Task> {
         let mut col: Vec<&Task> = self.tasks.iter().filter(|t| t.status == status).collect();
@@ -163,11 +187,79 @@ impl Board {
         col
     }
 
+    /// The epic `task` is a child of. A `parent` that isn't an epic in the
+    /// task's project, as a hand-edited file can leave behind, counts as none.
+    pub fn parent_of(&self, task: &Task) -> Option<&Task> {
+        let parent = self.get(task.parent?)?;
+        (!task.epic && parent.epic && parent.project == task.project).then_some(parent)
+    }
+
+    /// The child tasks of the epic `id`, in board order.
+    pub fn children(&self, id: Ulid) -> Vec<&Task> {
+        let mut children: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.parent == Some(id) && self.parent_of(t).is_some())
+            .collect();
+        children.sort_by_key(|t| (t.status, t.order, t.id));
+        children
+    }
+
+    pub fn progress(&self, id: Ulid) -> Progress {
+        let children = self.children(id);
+        Progress {
+            closed: children
+                .iter()
+                .filter(|t| t.status == Status::Closed)
+                .count(),
+            total: children.len(),
+        }
+    }
+
+    /// The epics in the project at `path`, in board order.
+    pub fn epics(&self, path: &Path) -> Vec<&Task> {
+        let mut epics: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.epic && t.project == path)
+            .collect();
+        epics.sort_by_key(|t| (t.status, t.order, t.id));
+        epics
+    }
+
+    /// Checks that a task in `project` can be a child of `parent`. Epics are
+    /// one level deep: only they can be parents, and they can't have one.
+    fn check_parent(&self, epic: bool, parent: Ulid, project: &Path) -> Result<()> {
+        if epic {
+            return Err(Error::Invalid("an epic can't have a parent".into()));
+        }
+        let parent = self
+            .get(parent)
+            .ok_or_else(|| Error::NotFound(parent.to_string()))?;
+        if !parent.epic {
+            return Err(Error::Invalid(format!(
+                "'{}' isn't an epic; promote it first",
+                parent.title
+            )));
+        }
+        if parent.project != project {
+            return Err(Error::Invalid(format!(
+                "a task must be in its epic's project, and '{}' is in {}",
+                parent.title,
+                self.project_name(&parent.project)
+            )));
+        }
+        Ok(())
+    }
+
     /// Adds a task at the top or bottom of its status column.
     pub fn create(&mut self, new: NewTask) -> Result<Ulid> {
         let title = new.title.trim().to_string();
         if title.is_empty() {
             return Err(Error::Invalid("title must not be empty".into()));
+        }
+        if let Some(parent) = new.parent {
+            self.check_parent(new.epic, parent, &new.project)?;
         }
         self.add_project(&new.project)?;
         let status = new.status.unwrap_or(Status::Open);
@@ -184,6 +276,8 @@ impl Board {
             closed: (status == Status::Closed).then_some(now),
             links: new.links,
             files: Vec::new(),
+            epic: new.epic,
+            parent: new.parent,
         };
         let id = task.id;
         let mut ids: Vec<Ulid> = self.column(status).iter().map(|t| t.id).collect();
@@ -196,9 +290,36 @@ impl Board {
         Ok(id)
     }
 
+    /// Changes a task. A child can't leave its epic's project unless the same
+    /// edit clears or replaces its epic; an epic takes its children with it.
     pub fn edit(&mut self, id: Ulid, patch: TaskPatch) -> Result<()> {
+        let task = self
+            .get(id)
+            .ok_or_else(|| Error::NotFound(id.to_string()))?;
+        let project = patch.project.as_deref().unwrap_or(&task.project);
+        let parent = patch
+            .parent
+            .unwrap_or_else(|| self.parent_of(task).map(|epic| epic.id));
+        if patch.parent.is_none()
+            && let Some(epic) = self.parent_of(task)
+            && epic.project != project
+        {
+            return Err(Error::Invalid(format!(
+                "'{}' is a child of '{}' in {}; to move it, leave the epic or pick one in the destination in the same edit",
+                task.title,
+                epic.title,
+                self.project_name(&epic.project)
+            )));
+        }
+        if let Some(parent) = parent {
+            self.check_parent(task.epic, parent, project)?;
+        }
+        let children: Vec<Ulid> = if project == task.project {
+            Vec::new()
+        } else {
+            self.children(id).iter().map(|t| t.id).collect()
+        };
         if let Some(project) = &patch.project {
-            self.get_mut(id)?;
             self.add_project(project)?;
         }
         let task = self.get_mut(id)?;
@@ -215,11 +336,71 @@ impl Board {
         if let Some(project) = patch.project {
             task.project = project;
         }
-        task.updated = Utc::now();
-        match patch.status {
-            Some(status) if status != task.status => self.move_to(id, status, None),
-            _ => Ok(()),
+        if let Some(parent) = patch.parent {
+            task.parent = parent;
         }
+        let now = Utc::now();
+        task.updated = now;
+        let status = patch.status.filter(|s| *s != task.status);
+        let project = task.project.clone();
+        for child in self.tasks.iter_mut().filter(|t| children.contains(&t.id)) {
+            child.project = project.clone();
+            child.updated = now;
+        }
+        match status {
+            Some(status) => self.move_to(id, status, None),
+            None => Ok(()),
+        }
+    }
+
+    /// Makes a task an epic, unless it's a child of one.
+    pub fn promote(&mut self, id: Ulid) -> Result<()> {
+        let task = self
+            .get(id)
+            .ok_or_else(|| Error::NotFound(id.to_string()))?;
+        if task.epic {
+            return Ok(());
+        }
+        if let Some(epic) = self.parent_of(task) {
+            return Err(Error::Invalid(format!(
+                "an epic can't have a parent; take '{}' out of '{}' first",
+                task.title, epic.title
+            )));
+        }
+        let task = self.get_mut(id)?;
+        task.epic = true;
+        task.parent = None; // only a leftover, as it didn't count as an epic
+        task.updated = Utc::now();
+        Ok(())
+    }
+
+    /// Makes an epic a normal task, unless it still has children.
+    pub fn demote(&mut self, id: Ulid) -> Result<()> {
+        let children = self.children(id).len();
+        let task = self.get_mut(id)?;
+        if !task.epic {
+            return Ok(());
+        }
+        if children > 0 {
+            return Err(Error::Invalid(format!(
+                "'{}' still has child tasks ({children}); move them out first",
+                task.title
+            )));
+        }
+        task.epic = false;
+        task.updated = Utc::now();
+        Ok(())
+    }
+
+    /// Makes a task a child of the epic `parent`, or of none.
+    pub fn set_parent(&mut self, id: Ulid, parent: Option<Ulid>) -> Result<()> {
+        self.edit(
+            id,
+            TaskPatch {
+                parent: Some(parent),
+                ..Default::default()
+            },
+        )
     }
 
     /// Moves a task to `position` within `status` (end of the column if `None`
@@ -259,6 +440,7 @@ impl Board {
     }
 
     /// Removes a task and returns it, so the caller can clean up its files.
+    /// An epic's children stay, without a parent.
     pub fn delete(&mut self, id: Ulid) -> Result<Task> {
         let idx = self
             .tasks
@@ -266,6 +448,11 @@ impl Board {
             .position(|t| t.id == id)
             .ok_or_else(|| Error::NotFound(id.to_string()))?;
         let task = self.tasks.remove(idx);
+        let now = Utc::now();
+        for child in self.tasks.iter_mut().filter(|t| t.parent == Some(id)) {
+            child.parent = None;
+            child.updated = now;
+        }
         let rest: Vec<Ulid> = self.column(task.status).iter().map(|t| t.id).collect();
         self.renumber(&rest);
         Ok(task)
@@ -434,6 +621,131 @@ mod tests {
         assert_eq!(removed.len(), 3);
         assert_eq!(titles(&b, Status::Backlog), ["d"]);
         assert_eq!(b.column(Status::Backlog)[0].order, 0);
+    }
+
+    fn epic(board: &mut Board, title: &str) -> Ulid {
+        let id = titled(board, title, Status::Backlog);
+        board.promote(id).unwrap();
+        id
+    }
+
+    #[test]
+    fn epics_track_their_children() {
+        let mut b = Board::default();
+        let e = epic(&mut b, "e");
+        let x = titled(&mut b, "x", Status::Backlog);
+        let y = titled(&mut b, "y", Status::Closed);
+        b.set_parent(x, Some(e)).unwrap();
+        b.set_parent(y, Some(e)).unwrap();
+
+        assert_eq!(b.parent_of(b.get(x).unwrap()).unwrap().id, e);
+        let children: Vec<Ulid> = b.children(e).iter().map(|t| t.id).collect();
+        assert_eq!(children, [x, y]);
+        assert_eq!(
+            b.progress(e),
+            Progress {
+                closed: 1,
+                total: 2
+            }
+        );
+
+        // Children keep an epic from being demoted, and closing it leaves them.
+        assert!(b.demote(e).is_err());
+        b.move_to(e, Status::Closed, None).unwrap();
+        assert_eq!(b.get(x).unwrap().status, Status::Backlog);
+        assert_eq!(b.get(x).unwrap().parent, Some(e));
+        b.set_parent(x, None).unwrap();
+        b.set_parent(y, None).unwrap();
+        b.demote(e).unwrap();
+        assert!(!b.get(e).unwrap().epic);
+    }
+
+    #[test]
+    fn epics_are_one_level_deep_and_stay_in_their_project() {
+        let mut b = Board::default();
+        let e = epic(&mut b, "e");
+        let other = epic(&mut b, "other");
+        let x = titled(&mut b, "x", Status::Open);
+        let y = titled(&mut b, "y", Status::Open);
+
+        assert!(b.set_parent(x, Some(y)).is_err()); // not an epic
+        assert!(b.set_parent(x, Some(x)).is_err());
+        assert!(b.set_parent(e, Some(other)).is_err()); // epics have no parent
+        assert!(b.set_parent(e, Some(e)).is_err());
+        b.set_parent(x, Some(e)).unwrap();
+        assert!(b.promote(x).is_err());
+
+        let elsewhere = |parent, epic| NewTask {
+            title: "z".into(),
+            project: "/q".into(),
+            epic,
+            parent,
+            ..Default::default()
+        };
+        assert!(b.create(elsewhere(Some(e), false)).is_err());
+        assert!(b.create(elsewhere(Some(e), true)).is_err());
+        assert_eq!(b.tasks.len(), 4);
+        // Nothing is registered by a create that failed.
+        assert!(b.project(Path::new("/q")).is_none());
+        let q = b.create(elsewhere(None, false)).unwrap();
+        assert!(b.set_parent(q, Some(e)).is_err());
+    }
+
+    #[test]
+    fn moving_projects_keeps_children_with_their_epic() {
+        let mut b = Board::default();
+        let e = epic(&mut b, "e");
+        let x = titled(&mut b, "x", Status::Open);
+        b.set_parent(x, Some(e)).unwrap();
+        let to = |project: &str, parent| TaskPatch {
+            project: Some(project.into()),
+            parent,
+            ..Default::default()
+        };
+
+        // A child can't leave on its own, but saving it unmoved is fine.
+        let err = b.edit(x, to("/q", None)).unwrap_err().to_string();
+        assert!(err.contains("leave the epic"), "{err}");
+        b.edit(x, to("/p", None)).unwrap();
+
+        b.edit(e, to("/q", None)).unwrap();
+        assert_eq!(b.get(x).unwrap().project, Path::new("/q"));
+        assert_eq!(b.get(x).unwrap().parent, Some(e));
+
+        // Leaving the epic in the same edit lets it go.
+        b.edit(x, to("/p", Some(None))).unwrap();
+        assert_eq!(b.get(x).unwrap().project, Path::new("/p"));
+        assert_eq!(b.get(x).unwrap().parent, None);
+    }
+
+    #[test]
+    fn deleting_an_epic_keeps_its_children() {
+        let mut b = Board::default();
+        let e = epic(&mut b, "e");
+        let x = titled(&mut b, "x", Status::Open);
+        b.set_parent(x, Some(e)).unwrap();
+        b.delete(e).unwrap();
+        assert_eq!(b.get(x).unwrap().parent, None);
+    }
+
+    #[test]
+    fn a_dangling_parent_counts_as_none() {
+        let mut b = Board::default();
+        let x = titled(&mut b, "x", Status::Open);
+        b.get_mut(x).unwrap().parent = Some(Ulid::generate());
+        assert!(b.parent_of(b.get(x).unwrap()).is_none());
+
+        // It doesn't get in the way of anything, and promoting drops it.
+        b.edit(
+            x,
+            TaskPatch {
+                project: Some("/q".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        b.promote(x).unwrap();
+        assert_eq!(b.get(x).unwrap().parent, None);
     }
 
     #[test]

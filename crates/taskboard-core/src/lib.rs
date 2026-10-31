@@ -9,7 +9,7 @@ pub mod model;
 pub mod settings;
 pub mod store;
 
-pub use board::{NewTask, TaskPatch};
+pub use board::{NewTask, Progress, TaskPatch};
 pub use filter::{DateField, Filter, parse_date};
 pub use hooks::{Hook, HookEvent, TaskEvent};
 pub use model::{

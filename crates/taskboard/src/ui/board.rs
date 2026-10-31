@@ -13,11 +13,13 @@ use iced::widget::{
     Id, Space, button, column, container, hover, image, mouse_area, row, scrollable, text,
 };
 use iced::{Alignment, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
-use taskboard_core::{LinkKind, Status, Task, Ulid};
+use taskboard_core::{Board, LinkKind, Status, Task, Ulid};
 
 use super::drag::{CARD_GAP, Slot};
 use super::theme::{self, BOLD, Pal, Style, rgb, status_index};
-use super::widgets::{El, btn, count_badge, dot, grow, missing_project_badge, plural};
+use super::widgets::{
+    El, btn, count_badge, dot, epic_badge, grow, missing_project_badge, parent_label, plural,
+};
 use super::{EDGE, Gui, Message, side_width};
 use crate::app::{Action, DRAG_THRESHOLD, EditTarget, View};
 use crate::source_link::{self, Site};
@@ -272,12 +274,13 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     } else if selected {
         (if hovered { p.card_hover } else { p.card }, p.accent)
     } else {
-        (if hovered { p.card_hover } else { p.card }, p.card_edge)
+        let edge = if task.epic { p.epic } else { p.card_edge };
+        (if hovered { p.card_hover } else { p.card }, edge)
     };
     let app = &gui.app;
     let project = Some(app.board.project_name(&task.project));
     let missing = app.project_missing(&task.project);
-    let face = container(card_body(p, task, project, missing))
+    let face = container(card_body(p, &app.board, task, project, missing))
         .padding(10)
         .width(Length::Fill)
         .style(move |_| theme::boxed(bg, edge, 6.0));
@@ -299,9 +302,16 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     container(droppable).id(card_id(id)).into()
 }
 
-/// A card's title, counts and source link, plus its project's name if given,
-/// and a warning if its project's folder is `missing`.
-pub fn card_body<'a>(p: Pal, task: &'a Task, project: Option<String>, missing: bool) -> El<'a> {
+/// A card's title, counts and source link, its epic badge or parent epic,
+/// plus its project's name if given, and a warning if its project's folder is
+/// `missing`.
+pub fn card_body<'a>(
+    p: Pal,
+    board: &'a Board,
+    task: &'a Task,
+    project: Option<String>,
+    missing: bool,
+) -> El<'a> {
     let mut meta = row![].spacing(10).align_y(Alignment::Center);
     if missing {
         meta = meta.push(missing_project_badge(p, &task.project, 14.0));
@@ -315,7 +325,15 @@ pub fn card_body<'a>(p: Pal, task: &'a Task, project: Option<String>, missing: b
     if !task.files.is_empty() {
         meta = meta.push(small(p, plural(task.files.len(), "file")));
     }
-    let mut body = column![text(&task.title).size(14), meta].spacing(6);
+    let mut body = column![].spacing(6);
+    if task.epic {
+        body = body.push(epic_badge(p, board.progress(task.id)));
+    }
+    body = body.push(text(&task.title).size(14));
+    if let Some(epic) = board.parent_of(task) {
+        body = body.push(parent_label(p, &epic.title));
+    }
+    body = body.push(meta);
     if let Some(link) = task.links.iter().find(|l| l.kind == LinkKind::Source) {
         body = body.push(source_pill(p, &link.url));
     }
