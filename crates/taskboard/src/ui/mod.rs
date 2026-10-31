@@ -916,14 +916,18 @@ mod tests {
     }
 
     #[test]
-    fn esc_closes_the_new_file_popup_and_cancels_a_drag() {
+    fn esc_closes_the_new_file_popup() {
         let (_dir, mut gui, (task, _)) = gui_with_file("");
         let _ = gui.update(Message::ToggleNewFile(task));
         assert_eq!(gui.ui.new_file_for, Some(task));
         esc(&mut gui);
         assert_eq!(gui.ui.new_file_for, None);
         assert_eq!(gui.app.selected, Some(task));
+    }
 
+    #[test]
+    fn esc_cancels_a_drag() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 60.0));
         let _ = gui.update(Message::DragMoved(task, Point::new(10.0, 10.0), bounds));
         esc(&mut gui);
