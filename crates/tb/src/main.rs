@@ -164,6 +164,9 @@ enum LinkCommand {
 enum FileCommand {
     /// Copy a file into the task store and attach it to a task.
     Add { id: String, path: PathBuf },
+    /// Create an empty file in the task store and attach it to a task. A name
+    /// without an extension gets `.md`.
+    New { id: String, name: String },
     /// Detach and delete a file, by name or file id suffix.
     Rm { id: String, file: String },
     /// Print an attached file's contents, by name or file id suffix.
@@ -382,6 +385,11 @@ fn run(
             let id = store.load()?.resolve(&id)?;
             store.attach(id, &path)?;
             report(out, json, store, id, "Attached to")?;
+        }
+        Command::File(FileCommand::New { id, name }) => {
+            let id = store.load()?.resolve(&id)?;
+            let att = store.create_file(id, &name)?;
+            report(out, json, store, id, &format!("Created {} on", att.name))?;
         }
         Command::File(FileCommand::Rm { id, file }) => {
             let board = store.load()?;
@@ -742,5 +750,17 @@ mod tests {
             kinds,
             [LinkKind::Context, LinkKind::Source, LinkKind::Context]
         );
+    }
+
+    #[test]
+    fn file_new_creates_an_empty_markdown_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let task: Task = serde_json::from_str(&tb(&store, &["--json", "add", "T"])).unwrap();
+        let id = task.short_id();
+        assert!(tb(&store, &["file", "new", &id, "plan"]).starts_with("Created plan.md on "));
+        assert_eq!(tb(&store, &["file", "cat", &id, "plan.md"]), "");
+        let task: Task = serde_json::from_str(&tb(&store, &["--json", "show", &id])).unwrap();
+        assert_eq!(task.files[0].name, "plan.md");
     }
 }

@@ -149,6 +149,25 @@ impl Store {
             .and_then(|n| n.to_str())
             .ok_or_else(|| Error::Invalid(format!("bad file name: {}", src.display())))?
             .to_string();
+        self.add_file(id, name, |dest| fs::copy(src, dest).map(|_| ()))
+    }
+
+    /// Creates an empty file named `name` in the store and attaches it to
+    /// task `id`; see [`new_file_name`] for how the name is read. Like an
+    /// attached file, it may share its name with another of the task's files.
+    pub fn create_file(&self, id: Ulid, name: &str) -> Result<Attachment> {
+        let name = new_file_name(name)?;
+        self.add_file(id, name, |dest| fs::write(dest, b""))
+    }
+
+    /// Makes the store's copy of a file named `name` with `fill`, then
+    /// attaches it to task `id`. The copy is removed if attaching fails.
+    fn add_file(
+        &self,
+        id: Ulid,
+        name: String,
+        fill: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<Attachment> {
         let file_id = Ulid::generate();
         let ext = Path::new(&name)
             .extension()
@@ -157,7 +176,7 @@ impl Store {
             .unwrap_or_default();
         let rel = format!("{FILES_DIR}/{file_id}{ext}");
         let dest = self.dir.join(&rel);
-        fs::copy(src, &dest)?;
+        fill(&dest)?;
 
         let att = Attachment {
             id: file_id,
@@ -181,6 +200,32 @@ impl Store {
             return Err(e);
         }
         Ok(att)
+    }
+
+    /// Replaces the contents of task `id`'s file `file_id` and marks the task
+    /// updated. The file is swapped in whole, so readers never see it half
+    /// written.
+    pub fn write_file(&self, id: Ulid, file_id: Ulid, contents: &[u8]) -> Result<()> {
+        // Written under the board's lock so the file can't be detached meanwhile.
+        self.update(|b| {
+            let task = b
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| Error::NotFound(id.to_string()))?;
+            let att = task
+                .files
+                .iter()
+                .find(|f| f.id == file_id)
+                .ok_or_else(|| Error::NotFound(file_id.to_string()))?;
+            let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join(FILES_DIR))?;
+            tmp.write_all(contents)?;
+            tmp.as_file().sync_all()?;
+            tmp.persist(self.file_path(att))
+                .map_err(|e| Error::Io(e.error))?;
+            task.updated = Utc::now();
+            Ok(())
+        })
     }
 
     /// Detaches file `file_id` from task `id` and deletes its copy.
@@ -220,6 +265,35 @@ impl Store {
             let _ = fs::remove_file(self.file_path(att));
         }
         Ok(())
+    }
+}
+
+/// The extension a new file gets when its name has none.
+pub const DEFAULT_FILE_EXTENSION: &str = "md";
+
+/// Reads the name typed for a new file: trimmed, and given a `.md`
+/// extension if it has none. It must be a plain file name, not a path.
+pub fn new_file_name(typed: &str) -> Result<String> {
+    let name = typed.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("the file needs a name".into()));
+    }
+    if name.contains(['/', '\\']) {
+        return Err(Error::Invalid(format!(
+            "'{name}' is a path; give just the file's name"
+        )));
+    }
+    if matches!(name, "." | "..") {
+        return Err(Error::Invalid(format!("'{name}' isn't a file name")));
+    }
+    // A leading dot starts a hidden file's name rather than an extension,
+    // and a trailing one is an extension left blank.
+    match Path::new(name).extension() {
+        Some(ext) if !ext.is_empty() => Ok(name.to_string()),
+        _ => Ok(format!(
+            "{}.{DEFAULT_FILE_EXTENSION}",
+            name.trim_end_matches('.')
+        )),
     }
 }
 
@@ -266,6 +340,60 @@ mod tests {
         assert_eq!(task.files[0].name, "notes.md");
         assert_eq!(task.files[0].kind, FileKind::Markdown);
         assert_eq!(fs::read_to_string(store.file_path(&att)).unwrap(), "# hi");
+    }
+
+    #[test]
+    fn new_file_names_default_to_markdown() {
+        assert_eq!(new_file_name(" notes ").unwrap(), "notes.md");
+        assert_eq!(new_file_name("data.json").unwrap(), "data.json");
+        assert_eq!(new_file_name("plan.").unwrap(), "plan.md");
+        assert_eq!(new_file_name(".env").unwrap(), ".env.md");
+        assert_eq!(new_file_name("v1.2 notes.txt").unwrap(), "v1.2 notes.txt");
+        for bad in ["", "  ", "a/b.md", "a\\b", "..", "."] {
+            assert!(new_file_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn created_files_can_be_written_and_bump_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let id = store
+            .update(|b| {
+                b.create(NewTask {
+                    title: "first".into(),
+                    project: dir.path().to_path_buf(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+
+        let att = store.create_file(id, "notes").unwrap();
+        assert_eq!(att.name, "notes.md");
+        assert_eq!(att.kind, FileKind::Markdown);
+        assert!(att.path.ends_with(".md"));
+        assert_eq!(fs::read_to_string(store.file_path(&att)).unwrap(), "");
+        // Names may repeat, as with attached files.
+        let again = store.create_file(id, "notes.md").unwrap();
+        assert_ne!(again.path, att.path);
+        assert!(store.create_file(id, "../escape.md").is_err());
+
+        let before = store.load().unwrap().get(id).unwrap().updated;
+        store.write_file(id, att.id, b"# plan\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(store.file_path(&att)).unwrap(),
+            "# plan\n"
+        );
+        let task = store.load().unwrap().get(id).unwrap().clone();
+        assert!(task.updated >= before);
+        assert_eq!(task.files.len(), 2);
+
+        // Neither creating on a missing task nor writing a missing file
+        // leaves anything behind.
+        assert!(store.create_file(Ulid::generate(), "x").is_err());
+        assert!(store.write_file(id, Ulid::generate(), b"x").is_err());
+        let stored = fs::read_dir(dir.path().join(FILES_DIR)).unwrap().count();
+        assert_eq!(stored, 2);
     }
 
     #[test]

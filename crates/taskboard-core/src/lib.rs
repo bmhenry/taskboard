@@ -16,7 +16,7 @@ pub use model::{
     Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task, default_link_kind, short_id,
 };
 pub use settings::GlobalSettings;
-pub use store::{Store, create_project_dir, project_path, project_root};
+pub use store::{Store, create_project_dir, new_file_name, project_path, project_root};
 pub use ulid::Ulid;
 
 #[derive(Debug, thiserror::Error)]
