@@ -811,3 +811,122 @@ fn side_width(window_width: f32) -> f32 {
         .clamp(340.0, 480.0)
         .min(window_width * 0.6)
 }
+
+#[cfg(test)]
+mod tests {
+    use taskboard_core::{Store, create_project_dir};
+    use text_editor::Edit;
+
+    use super::*;
+
+    /// A GUI with one task, `(task, file)`, whose attached text file holds
+    /// `text`, not yet open in the viewer.
+    fn gui_with_file(text: &str) -> (tempfile::TempDir, Gui, (Ulid, Ulid)) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Store::open(&dir.path().join("data")).unwrap(), None);
+        app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::Save {
+            title: "alpha".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        let task = app.board.column(Status::Open)[0].id;
+        app.apply(Action::NewFile {
+            task,
+            name: "notes.txt".into(),
+        });
+        let file = app.board.get(task).unwrap().files[0].id;
+        app.apply(Action::WriteFile {
+            task,
+            file,
+            text: text.into(),
+        });
+        app.apply(Action::ViewFile(None));
+        app.apply(Action::Select(Some(task)));
+        assert_eq!(app.error, None);
+        (dir, Gui::new(app), (task, file))
+    }
+
+    fn esc(gui: &mut Gui) {
+        let _ = gui.update(Message::Key(
+            Key::Named(Named::Escape),
+            Modifiers::default(),
+            event::Status::Ignored,
+        ));
+    }
+
+    #[test]
+    fn unedited_file_is_clean_whatever_its_line_endings() {
+        for text in [
+            "",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\nb\n",
+            "\n\n",
+            "a\r\nb\r\n",
+            "a\r\nb",
+        ] {
+            let (_dir, mut gui, file) = gui_with_file(text);
+            let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+            let _ = gui.update(Message::EditFile);
+            assert!(gui.ui.file_edit.is_some(), "{text:?}");
+            assert!(!gui.file_edit_dirty(), "{text:?}");
+
+            let _ = gui.update(Message::EditFileText(text_editor::Action::Edit(
+                Edit::Insert('x'),
+            )));
+            assert!(gui.file_edit_dirty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn esc_leaves_a_clean_edit_then_closes_the_viewer() {
+        let (_dir, mut gui, file) = gui_with_file("one\ntwo\n");
+        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        let _ = gui.update(Message::EditFile);
+
+        esc(&mut gui);
+        assert!(gui.ui.file_edit.is_none());
+        assert_eq!(gui.app.viewing_file, Some(file));
+
+        esc(&mut gui);
+        assert_eq!(gui.app.viewing_file, None);
+        assert_eq!(gui.app.selected, Some(file.0));
+    }
+
+    #[test]
+    fn only_cancel_drops_unsaved_changes() {
+        let (_dir, mut gui, file) = gui_with_file("one\n");
+        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        let _ = gui.update(Message::EditFile);
+        let _ = gui.update(Message::EditFileText(text_editor::Action::Edit(
+            Edit::Insert('x'),
+        )));
+
+        esc(&mut gui);
+        let _ = gui.update(Message::CloseViewer);
+        assert!(gui.file_edit_dirty());
+        assert_eq!(gui.app.viewing_file, Some(file));
+
+        let _ = gui.update(Message::CancelFileEdit);
+        assert!(gui.ui.file_edit.is_none());
+        assert_eq!(gui.app.viewing_file, Some(file));
+    }
+
+    #[test]
+    fn esc_closes_the_new_file_popup_and_cancels_a_drag() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::ToggleNewFile(task));
+        assert_eq!(gui.ui.new_file_for, Some(task));
+        esc(&mut gui);
+        assert_eq!(gui.ui.new_file_for, None);
+        assert_eq!(gui.app.selected, Some(task));
+
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 60.0));
+        let _ = gui.update(Message::DragMoved(task, Point::new(10.0, 10.0), bounds));
+        esc(&mut gui);
+        assert!(gui.ui.drag.as_ref().is_some_and(|d| d.cancelled));
+    }
+}

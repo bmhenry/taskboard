@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use iced::Subscription;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// What the watcher reports to the UI.
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ fn watch(store_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEve
         let tx = out.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res
+                && changes_file(event.kind)
                 && event
                     .paths
                     .iter()
@@ -57,4 +59,38 @@ fn watch(store_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEve
             }
         }
     })
+}
+
+/// Whether `kind` can mean the file's contents changed. Opening and reading
+/// it don't, and counting them would reload forever, since reloading opens it.
+fn changes_file(kind: EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use notify::event::{CreateKind, ModifyKind, RenameMode};
+
+    use super::*;
+
+    #[test]
+    fn reads_are_not_changes() {
+        assert!(!changes_file(EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!changes_file(EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(changes_file(EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(changes_file(EventKind::Modify(ModifyKind::Name(
+            RenameMode::To
+        ))));
+        assert!(changes_file(EventKind::Create(CreateKind::File)));
+    }
 }
