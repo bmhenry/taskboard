@@ -137,7 +137,8 @@ struct ListArgs {
     /// List tasks from every project, not just the current one.
     #[arg(short = 'A', long)]
     all_projects: bool,
-    /// Only child tasks of this epic, whichever project it's in.
+    /// Only child tasks of this epic, whichever project it's in. Closed ones
+    /// are still hidden unless asked for.
     #[arg(long, value_name = "EPIC")]
     parent: Option<String>,
     /// Search title, description, and links.
@@ -309,15 +310,23 @@ fn run(
         Command::List(args) => {
             let mut filter = list_filter(&args)?;
             let board = store.load()?;
-            if let Some(parent) = &args.parent {
-                filter.parent = Some(board.resolve(parent)?);
-            } else if !args.all_projects {
-                filter.project = Some(project.to_path_buf());
-            }
+            let children: Option<Vec<Ulid>> = match &args.parent {
+                Some(parent) => {
+                    let epic = board.resolve_epic(parent)?;
+                    Some(board.children(epic).iter().map(|t| t.id).collect())
+                }
+                None => {
+                    if !args.all_projects {
+                        filter.project = Some(project.to_path_buf());
+                    }
+                    None
+                }
+            };
+            let is_listed = |t: &Task| children.as_ref().is_none_or(|ids| ids.contains(&t.id));
             let tasks: Vec<&Task> = Status::ALL
                 .into_iter()
                 .flat_map(|s| board.column(s))
-                .filter(|t| filter.matches(t))
+                .filter(|t| filter.matches(t) && is_listed(t))
                 .collect();
             if json {
                 print_json(out, &tasks)?;
@@ -361,18 +370,26 @@ fn run(
             report(out, json, store, id, "Updated")?;
         }
         Command::Promote { id } => {
-            let id = store.update(|b| {
+            let (id, already) = store.update(|b| {
                 let id = b.resolve(&id)?;
-                b.promote(id).map(|_| id)
+                let already = b.get(id).expect("resolved id exists").epic;
+                b.promote(id).map(|_| (id, already))
             })?;
-            report(out, json, store, id, "Promoted")?;
+            let verb = if already {
+                "Already an epic:"
+            } else {
+                "Promoted"
+            };
+            report(out, json, store, id, verb)?;
         }
         Command::Demote { id } => {
-            let id = store.update(|b| {
+            let (id, was_epic) = store.update(|b| {
                 let id = b.resolve(&id)?;
-                b.demote(id).map(|_| id)
+                let was_epic = b.get(id).expect("resolved id exists").epic;
+                b.demote(id).map(|_| (id, was_epic))
             })?;
-            report(out, json, store, id, "Demoted")?;
+            let verb = if was_epic { "Demoted" } else { "Not an epic:" };
+            report(out, json, store, id, verb)?;
         }
         Command::Move {
             id,
@@ -554,7 +571,6 @@ fn list_filter(args: &ListArgs) -> Result<Filter, Error> {
         text: args.query.clone().unwrap_or_default(),
         statuses,
         project: None,
-        parent: None,
         date_field: args.date.0,
         after: args.after.as_deref().map(parse_date).transpose()?,
         before: args.before.as_deref().map(parse_date).transpose()?,
@@ -878,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn epics_end_to_end() {
+    fn epics_from_the_command_line() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let add = |args: &[&str]| -> Task {
@@ -887,49 +903,74 @@ mod tests {
         };
         let epic = add(&["Rework auth", "--epic"]);
         let epic_id = epic.short_id();
-        assert!(epic.epic);
-        let child = add(&["Login page", "--parent", &epic_id]);
-        assert_eq!(child.parent, Some(epic.id));
+        // Added from another project, a child still lands in its epic's.
+        let child: Task = serde_json::from_str(&tb_in(
+            &store,
+            "other",
+            &["--json", "add", "Login page", "--parent", &epic_id],
+        ))
+        .unwrap();
+        assert_eq!(child.project, epic.project);
         let done = add(&["Logout", "-s", "closed"]);
         tb(&store, &["edit", &done.short_id(), "--parent", &epic_id]);
         let loose = add(&["Unrelated"]);
 
-        // Run from another project, a child still lands in its epic's.
-        let far: Task = serde_json::from_str(&tb_in(
-            &store,
-            "other",
-            &["--json", "add", "Far", "--parent", &epic_id],
-        ))
-        .unwrap();
-        assert_eq!(far.project, epic.project);
-        tb(&store, &["rm", &far.short_id()]);
-
-        let listed = tb_in(&store, "other", &["list", "--all", "--parent", &epic_id]);
-        assert!(listed.contains("Login page") && listed.contains("Logout"));
+        let listed = tb_in(&store, "other", &["list", "--parent", &epic_id]);
+        assert!(listed.contains("Login page") && !listed.contains("Logout"));
         assert!(!listed.contains("Unrelated"));
-        assert!(tb(&store, &["list"]).contains("(epic, 1/2 closed)"));
-        assert!(tb(&store, &["list"]).contains(&format!("(in {epic_id}  Rework auth)")));
+        assert!(tb(&store, &["list", "-a", "--parent", &epic_id]).contains("Logout"));
 
+        let listed = tb(&store, &["list"]);
+        assert!(listed.contains("(epic, 1/2 closed)"));
+        assert!(listed.contains(&format!("(in {epic_id}  Rework auth)")));
         let shown = tb(&store, &["show", &epic_id]);
         assert!(shown.contains("epic:     yes, children 1/2 closed"));
         assert!(shown.contains("Login page [Open]"));
         let shown: serde_json::Value =
             serde_json::from_str(&tb(&store, &["--json", "show", &epic_id])).unwrap();
-        assert_eq!(shown["epic"], true);
-        assert_eq!(shown["progress"]["closed"], 1);
         assert_eq!(shown["progress"]["total"], 2);
         assert_eq!(shown["children"][0]["title"], "Login page");
         let shown: serde_json::Value =
             serde_json::from_str(&tb(&store, &["--json", "show", &child.short_id()])).unwrap();
         assert_eq!(shown["parent_task"]["title"], "Rework auth");
 
-        tb(&store, &["promote", &loose.short_id()]);
-        tb(&store, &["demote", &loose.short_id()]);
+        // Only a real change is reported as one.
+        let id = loose.short_id();
+        assert!(tb(&store, &["demote", &id]).starts_with("Not an epic: "));
+        assert!(tb(&store, &["promote", &id]).starts_with("Promoted "));
+        assert!(tb(&store, &["promote", &id]).starts_with("Already an epic: "));
+        assert!(tb(&store, &["demote", &id]).starts_with("Demoted "));
+
         tb(&store, &["edit", &child.short_id(), "--no-parent"]);
-        tb(&store, &["edit", &done.short_id(), "--no-parent"]);
-        tb(&store, &["demote", &epic_id]);
         let board = store.load().unwrap();
-        assert!(board.tasks.iter().all(|t| !t.epic && t.parent.is_none()));
+        assert_eq!(board.get(child.id).unwrap().parent, None);
+    }
+
+    #[test]
+    fn list_parent_wants_an_epic_and_skips_stale_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let epic: Task =
+            serde_json::from_str(&tb(&store, &["--json", "add", "Epic", "--epic"])).unwrap();
+        let stale: Task =
+            serde_json::from_str(&tb_in(&store, "other", &["--json", "add", "Stale"])).unwrap();
+        store
+            .update(|b| {
+                // As if the file was edited by hand: its epic's in another project.
+                let task = b.tasks.iter_mut().find(|t| t.id == stale.id).unwrap();
+                task.parent = Some(epic.id);
+                Ok(())
+            })
+            .unwrap();
+
+        let args = ["list", "--parent", &epic.short_id()];
+        assert_eq!(tb(&store, &args), "No tasks.\n");
+
+        let id = stale.short_id();
+        let cli = Cli::try_parse_from(["tb", "list", "--parent", &id]).unwrap();
+        let settings = GlobalSettings::default();
+        let err = run(cli, &store, dir.path(), &settings, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("isn't an epic"), "{err}");
     }
 
     #[test]

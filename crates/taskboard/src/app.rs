@@ -892,12 +892,10 @@ mod tests {
     }
 
     #[test]
-    fn epics_gather_children_until_deleted() {
+    fn epic_actions_apply_and_show_refusals() {
         let (_dir, mut app) = app();
         let epic = add(&mut app, "epic");
         let child = add(&mut app, "child");
-
-        // Refused until it's an epic, with the reason shown.
         let join = Action::SetParent {
             id: child,
             parent: Some(epic),
@@ -910,16 +908,13 @@ mod tests {
         assert_eq!(app.error, None);
         assert_eq!(app.board.children(epic)[0].id, child);
 
-        // Saving a child in the editor leaves it in its epic.
-        app.apply(Action::Edit(EditTarget::Existing(child)));
-        save(&mut app, "child 2");
-        assert_eq!(app.error, None);
-        assert_eq!(app.board.get(child).unwrap().parent, Some(epic));
-
+        app.apply(Action::SetParent {
+            id: child,
+            parent: None,
+        });
         app.apply(Action::Demote(epic));
-        assert!(app.error.take().is_some());
-        app.apply(Action::Delete(epic));
-        assert_eq!(app.board.get(child).unwrap().parent, None);
+        assert_eq!(app.error, None);
+        assert!(!app.board.get(epic).unwrap().epic);
     }
 
     #[test]

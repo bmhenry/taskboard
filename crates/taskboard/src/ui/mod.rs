@@ -255,7 +255,12 @@ impl Gui {
         if app.editing.is_some() || app.selected != ui.status_open {
             ui.status_open = None;
         }
-        if app.editing.is_some() || app.selected != ui.epic_open {
+        // A task that's become an epic or a child elsewhere has no list of
+        // epics, which mustn't pop open if it later stops being one.
+        let can_join_epic = app
+            .selected_task()
+            .is_some_and(|t| !t.epic && app.board.parent_of(t).is_none());
+        if app.editing.is_some() || app.selected != ui.epic_open || !can_join_epic {
             ui.epic_open = None;
         }
         if app.editing.is_none() {
@@ -973,6 +978,20 @@ mod tests {
         assert_eq!(gui.ui.epic_open, None);
         assert_eq!(gui.app.error, None);
         assert!(gui.app.board.get(task).unwrap().parent.is_some());
+    }
+
+    #[test]
+    fn epic_menu_closes_when_its_task_is_promoted_elsewhere() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::ToggleEpicMenu(task));
+        gui.app.store.update(|b| b.promote(task)).unwrap(); // as if `tb promote` ran
+        let _ = gui.update(Message::Watch(WatchEvent::Changed));
+        assert_eq!(gui.ui.epic_open, None);
+
+        // Demoted again, it doesn't reopen by itself.
+        gui.app.store.update(|b| b.demote(task)).unwrap();
+        let _ = gui.update(Message::Watch(WatchEvent::Changed));
+        assert_eq!(gui.ui.epic_open, None);
     }
 
     #[test]

@@ -169,6 +169,17 @@ impl Board {
         }
     }
 
+    /// Like [`Board::resolve`], for a task that has to be an epic.
+    pub fn resolve_epic(&self, query: &str) -> Result<Ulid> {
+        let id = self.resolve(query)?;
+        match self.get(id) {
+            Some(task) if !task.epic => {
+                Err(Error::Invalid(format!("'{}' isn't an epic", task.title)))
+            }
+            _ => Ok(id),
+        }
+    }
+
     /// Tasks with the given status, in board order.
     pub fn column(&self, status: Status) -> Vec<&Task> {
         let mut col: Vec<&Task> = self.tasks.iter().filter(|t| t.status == status).collect();
@@ -289,6 +300,17 @@ impl Board {
         let parent = patch
             .parent
             .unwrap_or_else(|| self.parent_of(task).map(|epic| epic.id));
+        if patch.parent.is_none()
+            && let Some(epic) = self.parent_of(task)
+            && epic.project != project
+        {
+            return Err(Error::Invalid(format!(
+                "'{}' is a child of '{}' in {}; to move it, leave the epic or pick one in the destination in the same edit",
+                task.title,
+                epic.title,
+                self.project_name(&epic.project)
+            )));
+        }
         if let Some(parent) = parent {
             self.check_parent(task.epic, parent, project)?;
         }
@@ -682,7 +704,8 @@ mod tests {
         };
 
         // A child can't leave on its own, but saving it unmoved is fine.
-        assert!(b.edit(x, to("/q", None)).is_err());
+        let err = b.edit(x, to("/q", None)).unwrap_err().to_string();
+        assert!(err.contains("leave the epic"), "{err}");
         b.edit(x, to("/p", None)).unwrap();
 
         b.edit(e, to("/q", None)).unwrap();

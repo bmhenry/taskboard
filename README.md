@@ -120,7 +120,7 @@ tb promote 7F3TPKKW          # ...promote a task (tb demote undoes it, if it has
 tb add "Login page" --parent 7F3TPKKW   # a child, in its epic's project unless --project says otherwise
 tb edit 8M2QKRTW --parent 7F3TPKKW      # make a task a child of an epic
 tb edit 8M2QKRTW --no-parent            # take it out again
-tb list --parent 7F3TPKKW    # an epic's children, whichever project you're in
+tb list --parent 7F3TPKKW    # an epic's children, whichever project you're in; closed ones need -a
 tb project ls                # projects, flagging any whose folder is missing
 tb project mv ~/src/old ~/src/new   # after moving a project's folder
 tb project rm ~/src/old      # delete a project and all its tasks

@@ -227,6 +227,24 @@ fn task_epic<'a>(
     )
 }
 
+/// A row in the list of epics or of projects.
+fn menu_item_style(p: Pal, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(rgb(if hovered {
+            p.card_hover
+        } else {
+            p.panel
+        }))),
+        text_color: rgb(p.text),
+        border: Border {
+            radius: 4.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
 /// The epics in `task`'s project; picking one makes the task its child.
 fn epic_menu<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     let p = gui.pal();
@@ -247,22 +265,7 @@ fn epic_menu<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
             )
             .width(Length::Fill)
             .padding([5, 10])
-            .style(move |_, s| {
-                let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(Background::Color(rgb(if hovered {
-                        p.card_hover
-                    } else {
-                        p.panel
-                    }))),
-                    text_color: rgb(p.text),
-                    border: Border {
-                        radius: 4.0.into(),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                }
-            })
+            .style(move |_, status| menu_item_style(p, status))
             .on_press(Message::ChooseEpic(task.id, epic.id))
             .into()
         });
@@ -730,22 +733,7 @@ fn project_menu(gui: &Gui) -> El<'_> {
             )
             .width(Length::Fill)
             .padding([5, 10])
-            .style(move |_, s| {
-                let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(Background::Color(rgb(if hovered {
-                        p.card_hover
-                    } else {
-                        p.panel
-                    }))),
-                    text_color: rgb(p.text),
-                    border: Border {
-                        radius: 4.0.into(),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                }
-            })
+            .style(move |_, status| menu_item_style(p, status))
             .on_press(Message::ChooseProject(project.path.clone()))
             .into()
         });
