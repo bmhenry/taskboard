@@ -58,6 +58,12 @@ pub struct Task {
     pub links: Vec<Link>,
     #[serde(default)]
     pub files: Vec<Attachment>,
+    /// An epic is a longer running task that other tasks can be children of.
+    #[serde(default)]
+    pub epic: bool,
+    /// The epic this task is a child of; see [`Board::parent_of`].
+    #[serde(default)]
+    pub parent: Option<Ulid>,
 }
 
 impl Task {

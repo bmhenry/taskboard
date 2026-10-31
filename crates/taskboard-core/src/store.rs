@@ -464,6 +464,27 @@ mod tests {
     }
 
     #[test]
+    fn loads_tasks_without_epic_fields_and_with_a_dangling_parent() {
+        let task = |id: &str, extra: &str| {
+            format!(
+                r#"{{"id": "{id}", "title": "t", "project": "/p", "status": "open", "order": 0,
+                "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"{extra}}}"#
+            )
+        };
+        let (old, child) = ("01M5X724HRT6FPK984034NF3M2", "01M5X724HRT6FPK984034NF3M3");
+        let dangling = r#", "parent": "01M5X724HRT6FPK984034NF3M4""#;
+        let text = format!(
+            r#"{{"schema_version": 2, "tasks": [{}, {}]}}"#,
+            task(old, ""),
+            task(child, dangling)
+        );
+        let board = parse_board(&text).unwrap();
+        assert!(!board.tasks[0].epic && board.tasks[0].parent.is_none());
+        assert!(board.tasks[1].parent.is_some());
+        assert!(board.parent_of(&board.tasks[1]).is_none());
+    }
+
+    #[test]
     fn rejects_newer_schema() {
         let err = parse_board(r#"{"schema_version": 999, "tasks": []}"#).unwrap_err();
         assert!(matches!(err, Error::UnsupportedSchema(999)));

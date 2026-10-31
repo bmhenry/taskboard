@@ -465,7 +465,7 @@ impl App {
                             title: Some(title),
                             project: Some(project),
                             description: Some(description),
-                            status: None,
+                            ..Default::default()
                         };
                         self.store.update(|b| b.edit(id, patch))?;
                         self.selected = Some(id);
@@ -478,6 +478,7 @@ impl App {
                             status: Some(status),
                             links: self.draft.links.clone(),
                             position: self.settings.new_task_position,
+                            ..Default::default()
                         };
                         // The draft is kept if creating fails, e.g. on an empty title.
                         let (id, events) = self.store.update_with_events(|b| b.create(new))?;

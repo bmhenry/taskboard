@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use ulid::Ulid;
 
 use crate::Error;
 use crate::model::{Status, Task};
@@ -47,6 +48,8 @@ pub struct Filter {
     pub statuses: Vec<Status>,
     /// Only tasks in the project at this directory.
     pub project: Option<PathBuf>,
+    /// Only child tasks of this epic.
+    pub parent: Option<Ulid>,
     pub date_field: DateField,
     /// Inclusive lower bound on `date_field`.
     pub after: Option<DateTime<Utc>>,
@@ -59,6 +62,7 @@ impl Filter {
         self.text.trim().is_empty()
             && self.statuses.is_empty()
             && self.project.is_none()
+            && self.parent.is_none()
             && self.after.is_none()
             && self.before.is_none()
     }
@@ -68,6 +72,9 @@ impl Filter {
             return false;
         }
         if self.project.as_ref().is_some_and(|p| *p != task.project) {
+            return false;
+        }
+        if self.parent.is_some() && self.parent != task.parent {
             return false;
         }
         if self.after.is_some() || self.before.is_some() {
@@ -144,6 +151,12 @@ mod tests {
             ..Default::default()
         };
         assert!(!other_project.matches(task));
+
+        let other_epic = Filter {
+            parent: Some(Ulid::generate()),
+            ..Default::default()
+        };
+        assert!(!other_epic.matches(task));
 
         let future = Filter {
             after: Some(parse_date("2999-01-01").unwrap()),
