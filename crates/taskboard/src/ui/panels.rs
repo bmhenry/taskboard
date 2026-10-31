@@ -12,15 +12,15 @@ use super::popup::popup;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::viewer::markdown;
 use super::widgets::{
-    El, btn, grow, input, label, link, path_label, save_keys, section_title, shorten_path,
-    status_dot, warning_icon,
+    El, btn, epic_badge, grow, input, label, link, path_label, save_keys, section_title,
+    shorten_path, status_dot, warning_icon,
 };
 use super::{EDIT_TITLE, Gui, Message, NEW_FILE_NAME};
 use crate::app::{Action, EditTarget, Owner, ProjectInput};
 
 /// Unscaled minimum width of the status dropdown's list.
 const STATUS_MENU_MIN_WIDTH: f32 = 160.0;
-/// Unscaled width and greatest height of the editor's list of projects.
+/// Unscaled width and greatest height of the lists of projects and of epics.
 const PROJECT_MENU_WIDTH: f32 = 360.0;
 const PROJECT_MENU_MAX_HEIGHT: f32 = 320.0;
 /// The longest project path shown in the list of projects.
@@ -53,22 +53,26 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     } else {
         btn(p, "Delete", Style::Quiet, Message::ConfirmDelete(task.id))
     };
+    let board = &gui.app.board;
     let top = row![
         status_dot(p, task.status),
         text(task.short_id())
             .size(12)
             .font(MONO)
             .color(rgb(p.muted)),
+    ]
+    .push(task.epic.then(|| epic_badge(p, board.progress(task.id))))
+    .extend([
         grow(),
         btn(
             p,
             "Edit",
             Style::Normal,
-            Message::App(Action::Edit(EditTarget::Existing(task.id)))
+            Message::App(Action::Edit(EditTarget::Existing(task.id))),
         ),
         delete,
         btn(p, "×", Style::Quiet, Message::App(Action::Select(None))),
-    ]
+    ])
     .spacing(8)
     .align_y(Alignment::Center);
 
@@ -102,11 +106,179 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     } else {
         body.push(markdown(p, &task.description))
     };
+    body = if task.epic {
+        epic_children(gui, body, task)
+    } else {
+        task_epic(gui, body, task)
+    };
     let owner = Owner::Task(task.id);
     body = links_editor(gui, body, owner, &task.links);
     let files = task.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
     body = files_editor(gui, body, owner, files);
     side_panel(p, width, body)
+}
+
+/// Adds an epic's child tasks, each opening on a click and removable, and
+/// the way to demote it once it has none.
+fn epic_children<'a>(
+    gui: &'a Gui,
+    mut body: Column<'a, Message>,
+    task: &'a Task,
+) -> Column<'a, Message> {
+    let p = gui.pal();
+    body = body.push(section_title(p, "Child tasks"));
+    let children = gui.app.board.children(task.id);
+    if children.is_empty() {
+        return body.extend([
+            label(p, "No child tasks yet. Pick this epic in a task's details."),
+            row![btn(
+                p,
+                "Demote to task",
+                Style::Normal,
+                Message::App(Action::Demote(task.id))
+            )]
+            .into(),
+        ]);
+    }
+    for child in children {
+        body = body.push(
+            row![
+                status_dot(p, child.status),
+                container(link(
+                    p,
+                    &child.title,
+                    13,
+                    Message::App(Action::Select(Some(child.id)))
+                ))
+                .width(Length::Fill),
+                btn(
+                    p,
+                    "×",
+                    Style::Quiet,
+                    Message::App(Action::SetParent {
+                        id: child.id,
+                        parent: None
+                    })
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    body.push(label(
+        p,
+        "An epic can be demoted once it has no child tasks.",
+    ))
+}
+
+/// Adds the epic a task belongs to, which opens on a click and can be left,
+/// or else the ways to join one or to become one.
+fn task_epic<'a>(
+    gui: &'a Gui,
+    mut body: Column<'a, Message>,
+    task: &'a Task,
+) -> Column<'a, Message> {
+    let p = gui.pal();
+    body = body.push(section_title(p, "Epic"));
+    if let Some(epic) = gui.app.board.parent_of(task) {
+        return body.push(
+            row![
+                status_dot(p, epic.status),
+                container(link(
+                    p,
+                    &epic.title,
+                    13,
+                    Message::App(Action::Select(Some(epic.id)))
+                ))
+                .width(Length::Fill),
+                btn(
+                    p,
+                    "×",
+                    Style::Quiet,
+                    Message::App(Action::SetParent {
+                        id: task.id,
+                        parent: None
+                    })
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    let face = btn(
+        p,
+        "Choose epic ▾",
+        Style::Normal,
+        Message::ToggleEpicMenu(task.id),
+    );
+    let menu = (gui.ui.epic_open == Some(task.id)).then(|| epic_menu(gui, task));
+    body.push(
+        row![
+            popup(face, menu).on_dismiss(Message::CloseEpicMenu),
+            btn(
+                p,
+                "Promote to epic",
+                Style::Normal,
+                Message::App(Action::Promote(task.id))
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+}
+
+/// The epics in `task`'s project; picking one makes the task its child.
+fn epic_menu<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
+    let p = gui.pal();
+    let epics = gui.app.board.epics(&task.project);
+    let list: El = if epics.is_empty() {
+        container(label(
+            p,
+            "No epics in this project. Promote a task to make one.",
+        ))
+        .padding(6)
+        .into()
+    } else {
+        let items = epics.into_iter().map(|epic| {
+            button(
+                row![status_dot(p, epic.status), text(&epic.title).size(13)]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([5, 10])
+            .style(move |_, s| {
+                let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: Some(Background::Color(rgb(if hovered {
+                        p.card_hover
+                    } else {
+                        p.panel
+                    }))),
+                    text_color: rgb(p.text),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+            .on_press(Message::ChooseEpic(task.id, epic.id))
+            .into()
+        });
+        scrollable(column(items).spacing(2))
+            .direction(Direction::Vertical(
+                Scrollbar::new().width(4).scroller_width(4),
+            ))
+            .style(move |_, s| theme::scroll_style(p, s))
+            .into()
+    };
+    container(list)
+        .width(PROJECT_MENU_WIDTH)
+        .max_height(PROJECT_MENU_MAX_HEIGHT)
+        .padding(6)
+        .style(move |_| theme::boxed(p.panel, p.border, 8.0))
+        .into()
 }
 
 /// Says the project at `path` has no folder any more, with ways to point it

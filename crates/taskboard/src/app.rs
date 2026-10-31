@@ -106,6 +106,15 @@ pub enum Action {
         position: Option<usize>,
     },
     Delete(Ulid),
+    /// Makes a task an epic.
+    Promote(Ulid),
+    /// Makes an epic a normal task.
+    Demote(Ulid),
+    /// Makes a task a child of the epic `parent`, or of none.
+    SetParent {
+        id: Ulid,
+        parent: Option<Ulid>,
+    },
     AddLink {
         owner: Owner,
         url: String,
@@ -385,6 +394,9 @@ impl App {
             Action::Save { .. }
                 | Action::Move { .. }
                 | Action::Delete(_)
+                | Action::Promote(_)
+                | Action::Demote(_)
+                | Action::SetParent { .. }
                 | Action::RelocateProject { .. }
                 | Action::DeleteProject(_)
                 | Action::AddLink {
@@ -522,6 +534,11 @@ impl App {
                     self.selected = None;
                     self.editing = None;
                 }
+            }
+            Action::Promote(id) => self.store.update(|b| b.promote(id))?,
+            Action::Demote(id) => self.store.update(|b| b.demote(id))?,
+            Action::SetParent { id, parent } => {
+                self.store.update(|b| b.set_parent(id, parent))?;
             }
             Action::AddLink { owner, url, kind } => {
                 let url = url.trim().to_string();
@@ -872,6 +889,37 @@ mod tests {
         assert_eq!(task.links[0].url, "https://example.com/1");
         assert_eq!(task.files.len(), 1);
         assert_eq!(task.files[0].name, "notes.md");
+    }
+
+    #[test]
+    fn epics_gather_children_until_deleted() {
+        let (_dir, mut app) = app();
+        let epic = add(&mut app, "epic");
+        let child = add(&mut app, "child");
+
+        // Refused until it's an epic, with the reason shown.
+        let join = Action::SetParent {
+            id: child,
+            parent: Some(epic),
+        };
+        app.apply(join.clone());
+        assert!(app.error.take().unwrap().contains("isn't an epic"));
+
+        app.apply(Action::Promote(epic));
+        app.apply(join);
+        assert_eq!(app.error, None);
+        assert_eq!(app.board.children(epic)[0].id, child);
+
+        // Saving a child in the editor leaves it in its epic.
+        app.apply(Action::Edit(EditTarget::Existing(child)));
+        save(&mut app, "child 2");
+        assert_eq!(app.error, None);
+        assert_eq!(app.board.get(child).unwrap().parent, Some(epic));
+
+        app.apply(Action::Demote(epic));
+        assert!(app.error.take().is_some());
+        app.apply(Action::Delete(epic));
+        assert_eq!(app.board.get(child).unwrap().parent, None);
     }
 
     #[test]

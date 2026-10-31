@@ -85,6 +85,8 @@ struct UiState {
     filters_open: bool,
     /// The task whose status dropdown in the detail panel is open.
     status_open: Option<Ulid>,
+    /// The task whose list of epics to join in the detail panel is open.
+    epic_open: Option<Ulid>,
     /// The new folder typed for the selected task's missing project.
     relocate_path: String,
     /// The missing project whose Delete button was pressed once.
@@ -116,6 +118,10 @@ pub enum Message {
     CloseFilters,
     ToggleStatusMenu(Ulid),
     CloseStatusMenu,
+    ToggleEpicMenu(Ulid),
+    CloseEpicMenu,
+    /// An epic was picked from the task's list: (task, epic).
+    ChooseEpic(Ulid, Ulid),
     ConfirmDelete(Ulid),
     SetLinkKind(Owner, LinkKind),
     LinkUrl(String),
@@ -249,6 +255,9 @@ impl Gui {
         if app.editing.is_some() || app.selected != ui.status_open {
             ui.status_open = None;
         }
+        if app.editing.is_some() || app.selected != ui.epic_open {
+            ui.epic_open = None;
+        }
         if app.editing.is_none() {
             ui.project_menu_open = false;
         }
@@ -312,6 +321,20 @@ impl Gui {
                 }
             }
             Message::CloseStatusMenu => ui.status_open = None,
+            Message::ToggleEpicMenu(id) => {
+                ui.epic_open = match ui.epic_open {
+                    Some(_) => None,
+                    None => Some(id),
+                }
+            }
+            Message::CloseEpicMenu => ui.epic_open = None,
+            Message::ChooseEpic(id, epic) => {
+                ui.epic_open = None;
+                self.app.apply(Action::SetParent {
+                    id,
+                    parent: Some(epic),
+                });
+            }
             Message::ConfirmDelete(id) => ui.confirm_delete = Some(id),
             Message::SetLinkKind(owner, kind) => ui.link_kind = Some((owner, kind)),
             Message::LinkUrl(s) => ui.link_url = s,
@@ -674,6 +697,8 @@ impl Gui {
                     ui.project_menu_open = false;
                 } else if ui.status_open.is_some() {
                     ui.status_open = None;
+                } else if ui.epic_open.is_some() {
+                    ui.epic_open = None;
                 } else if ui.new_file_for.is_some() {
                     ui.new_file_for = None;
                 } else if ui.file_edit.is_some() {
@@ -923,6 +948,31 @@ mod tests {
         esc(&mut gui);
         assert_eq!(gui.ui.new_file_for, None);
         assert_eq!(gui.app.selected, Some(task));
+    }
+
+    #[test]
+    fn epic_menu_closes_on_esc_and_on_choosing() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let epic = gui.app.store.update(|b| {
+            let epic = b.create(taskboard_core::NewTask {
+                title: "epic".into(),
+                project: b.get(task).unwrap().project.clone(),
+                epic: true,
+                ..Default::default()
+            })?;
+            Ok(epic)
+        });
+        gui.app.reload();
+        let _ = gui.update(Message::ToggleEpicMenu(task));
+        esc(&mut gui);
+        assert_eq!(gui.ui.epic_open, None);
+        assert_eq!(gui.app.selected, Some(task));
+
+        let _ = gui.update(Message::ToggleEpicMenu(task));
+        let _ = gui.update(Message::ChooseEpic(task, epic.unwrap()));
+        assert_eq!(gui.ui.epic_open, None);
+        assert_eq!(gui.app.error, None);
+        assert!(gui.app.board.get(task).unwrap().parent.is_some());
     }
 
     #[test]

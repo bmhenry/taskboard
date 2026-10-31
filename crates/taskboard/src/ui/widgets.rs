@@ -11,7 +11,7 @@ use iced::widget::{Space, button, column, container, mouse_area, row, text, text
 use iced::{
     Alignment, Background, Border, Element, Length, Point, Rectangle, Renderer, Theme, mouse,
 };
-use taskboard_core::Status;
+use taskboard_core::{Progress, Status};
 
 use super::Message;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
@@ -272,6 +272,37 @@ pub fn section_title<'a>(p: Pal, s: &'a str) -> El<'a> {
     container(text(s).size(13).font(BOLD).color(rgb(p.muted)))
         .padding(iced::Padding::ZERO.top(8).bottom(2))
         .into()
+}
+
+/// A small pill marking an epic, saying how many of its children are closed.
+pub fn epic_badge<'a>(p: Pal, progress: Progress) -> El<'a> {
+    let label = match progress.total {
+        0 => "Epic".to_string(),
+        total => format!("Epic · {}/{total} closed", progress.closed),
+    };
+    container(
+        text(label)
+            .size(11)
+            .color(rgb(p.epic))
+            .wrapping(Wrapping::None),
+    )
+    .height(18)
+    .padding([0, 7])
+    .center_y(18)
+    .style(move |_| theme::boxed(p.panel, p.epic, 9.0))
+    .into()
+}
+
+/// Names the epic a task belongs to, on one line clipped to the space there is.
+pub fn parent_label<'a>(p: Pal, title: &'a str) -> El<'a> {
+    container(
+        text(format!("↳ {title}"))
+            .size(11)
+            .color(rgb(p.epic))
+            .wrapping(Wrapping::None),
+    )
+    .clip(true)
+    .into()
 }
 
 /// A column's task count, in a small pill next to its title.
