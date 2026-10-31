@@ -15,7 +15,9 @@
             if (a instanceof Error) return a.stack || String(a);
             return typeof a === "string" ? a : (function () { try { return JSON.stringify(a); } catch (e) { return String(a); } })();
           }).join(" ");
-          if (text.length > 400) text = text.slice(0, 400) + "…";
+          // Keep errors whole (driver and panic messages are long); cap the rest.
+          var cap = kind === "error" || kind === "onerror" || kind === "rejection" ? Infinity : 2000;
+          if (text.length > cap) text = text.slice(0, cap) + "…";
           lines.push(((performance.now() / 1000).toFixed(1)) + "s [" + kind + "] " + text);
           if (lines.length > 60) lines.shift();
           if (box) box.textContent = lines.join("\n");
@@ -30,16 +32,27 @@
         document.addEventListener("DOMContentLoaded", function () {
           box = document.createElement("pre");
           box.id = "debug-log";
-          box.addEventListener("click", function () { box.style.display = "none"; });
+          var tick;
+          box.addEventListener("click", function () { box.style.display = "none"; clearInterval(tick); });
           document.body.appendChild(box);
-          var c = document.createElement("canvas");
+          // Throwaway probe context: release it so it doesn't hold a GL context slot.
+          var probe = document.createElement("canvas").getContext("webgl2");
           show("env", [navigator.userAgent]);
           show("env", ["secure=" + window.isSecureContext + " webgpu=" + !!navigator.gpu +
-            " webgl2=" + !!c.getContext("webgl2") + " viewport=" + innerWidth + "x" + innerHeight +
+            " webgl2=" + !!probe + " viewport=" + innerWidth + "x" + innerHeight +
             " dpr=" + devicePixelRatio]);
-          setInterval(function () {
+          if (probe) {
+            var lose = probe.getExtension("WEBGL_lose_context");
+            if (lose) lose.loseContext();
+          }
+          // Report canvas sizes every 5 s until a non-zero canvas has been seen twice.
+          var sized = 0;
+          tick = setInterval(function () {
             var cs = document.querySelectorAll("canvas");
             show("tick", [cs.length + " canvas: " + Array.prototype.map.call(cs, function (x) { return x.width + "x" + x.height; }).join(", ")]);
+            if (Array.prototype.some.call(cs, function (x) { return x.width > 0 && x.height > 0; }) && ++sized >= 2) {
+              clearInterval(tick);
+            }
           }, 5000);
         });
       })();
