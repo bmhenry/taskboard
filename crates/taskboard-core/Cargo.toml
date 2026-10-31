@@ -10,3 +10,8 @@ serde_json.workspace = true
 ulid.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+
+# ulid/rand use getrandom 0.4, which needs its JS backend in the browser
+# (wasm spike; no effect on native builds).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

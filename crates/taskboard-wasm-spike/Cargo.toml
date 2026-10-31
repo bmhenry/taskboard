@@ -1,0 +1,21 @@
+[package]
+name = "taskboard-wasm-spike"
+version.workspace = true
+edition.workspace = true
+description = "Phase 0 spike: the taskboard GUI built for wasm32 with a fixture board"
+publish = false
+
+# Everything is wasm-only, so `cargo build/test --workspace` on the desktop
+# only builds an empty stub binary.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+taskboard-core.workspace = true
+chrono = { workspace = true, features = ["wasmbind"] }
+# No `tokio`: iced uses wasm-bindgen-futures on the web. `webgl` lets wgpu
+# fall back to WebGL2 where WebGPU isn't available.
+iced = { version = "0.14", features = ["image", "canvas", "advanced", "webgl"] }
+iced_drop = "=0.2.54"
+image = { version = "0.25", default-features = false, features = ["png"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+console_error_panic_hook = "0.1"
+console_log = "1"
+log = "0.4"
