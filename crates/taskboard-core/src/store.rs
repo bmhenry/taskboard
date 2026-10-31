@@ -271,30 +271,36 @@ impl Store {
 /// The extension a new file gets when its name has none.
 pub const DEFAULT_FILE_EXTENSION: &str = "md";
 
-/// Reads the name typed for a new file: trimmed, and given a `.md`
-/// extension if it has none. It must be a plain file name, not a path.
+/// Reads the name typed for a new file: trimmed of spaces and trailing dots,
+/// and given a `.md` extension if it has none. Dotfiles like `.gitignore`
+/// are kept as typed. It must be a plain file name, not a path, and not an
+/// image, since an empty one can't be edited.
 pub fn new_file_name(typed: &str) -> Result<String> {
-    let name = typed.trim();
-    if name.is_empty() {
+    let typed = typed.trim();
+    if typed.is_empty() {
         return Err(Error::Invalid("the file needs a name".into()));
     }
-    if name.contains(['/', '\\']) {
+    if typed.contains(['/', '\\']) {
         return Err(Error::Invalid(format!(
-            "'{name}' is a path; give just the file's name"
+            "'{typed}' is a path; give just the file's name"
         )));
     }
-    if matches!(name, "." | "..") {
-        return Err(Error::Invalid(format!("'{name}' isn't a file name")));
+    let name = typed.trim_end_matches('.');
+    if name.is_empty() {
+        return Err(Error::Invalid(format!("'{typed}' isn't a file name")));
     }
-    // A leading dot starts a hidden file's name rather than an extension,
-    // and a trailing one is an extension left blank.
-    match Path::new(name).extension() {
-        Some(ext) if !ext.is_empty() => Ok(name.to_string()),
-        _ => Ok(format!(
-            "{}.{DEFAULT_FILE_EXTENSION}",
-            name.trim_end_matches('.')
-        )),
+    // A leading dot starts a hidden file's name rather than an extension.
+    let name = if name.starts_with('.') || Path::new(name).extension().is_some() {
+        name.to_string()
+    } else {
+        format!("{name}.{DEFAULT_FILE_EXTENSION}")
+    };
+    if FileKind::from_name(&name) == FileKind::Image {
+        return Err(Error::Invalid(format!(
+            "'{name}' would be an empty image; attach an image instead"
+        )));
     }
+    Ok(name)
 }
 
 /// Parses `tasks.json`, migrating older schemas to the current one.
@@ -347,9 +353,11 @@ mod tests {
         assert_eq!(new_file_name(" notes ").unwrap(), "notes.md");
         assert_eq!(new_file_name("data.json").unwrap(), "data.json");
         assert_eq!(new_file_name("plan.").unwrap(), "plan.md");
-        assert_eq!(new_file_name(".env").unwrap(), ".env.md");
+        assert_eq!(new_file_name("notes.md.").unwrap(), "notes.md");
+        assert_eq!(new_file_name(".gitignore").unwrap(), ".gitignore");
+        assert_eq!(new_file_name(".env.").unwrap(), ".env");
         assert_eq!(new_file_name("v1.2 notes.txt").unwrap(), "v1.2 notes.txt");
-        for bad in ["", "  ", "a/b.md", "a\\b", "..", "."] {
+        for bad in ["", "  ", "a/b.md", "a\\b", "..", ".", "shot.png"] {
             assert!(new_file_name(bad).is_err(), "{bad:?}");
         }
     }
@@ -394,6 +402,36 @@ mod tests {
         assert!(store.write_file(id, Ulid::generate(), b"x").is_err());
         let stored = fs::read_dir(dir.path().join(FILES_DIR)).unwrap().count();
         assert_eq!(stored, 2);
+    }
+
+    #[test]
+    fn write_file_replaces_contents_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let id = store
+            .update(|b| {
+                b.create(NewTask {
+                    title: "first".into(),
+                    project: dir.path().to_path_buf(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let src = dir.path().join("long.txt");
+        fs::write(&src, "a much longer original text\n").unwrap();
+        let att = store.attach(id, &src).unwrap();
+
+        store.write_file(id, att.id, b"short").unwrap();
+        store.write_file(id, att.id, b"shorter").unwrap();
+        assert_eq!(
+            fs::read_to_string(store.file_path(&att)).unwrap(),
+            "shorter"
+        );
+        let stored: Vec<_> = fs::read_dir(dir.path().join(FILES_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(stored, [store.file_path(&att)]);
     }
 
     #[test]

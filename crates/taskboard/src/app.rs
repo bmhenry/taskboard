@@ -244,10 +244,11 @@ impl App {
                 {
                     self.editing = None;
                 }
-                if self
-                    .viewing_file
-                    .is_some_and(|(t, _)| self.board.get(t).is_none())
-                {
+                if self.viewing_file.is_some_and(|(t, f)| {
+                    self.board
+                        .get(t)
+                        .is_none_or(|t| t.files.iter().all(|a| a.id != f))
+                }) {
                     self.viewing_file = None;
                 }
                 self.check_projects();
@@ -933,6 +934,12 @@ mod tests {
         let path = app.store.file_path(&att);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "# Plan\n");
         assert!(app.board.get(a).unwrap().updated >= updated);
+
+        // The viewer closes when its file is detached elsewhere.
+        app.store.detach(a, att.id).unwrap(); // as if `tb file rm` ran
+        app.reload();
+        assert_eq!(app.viewing_file, None);
+        assert!(app.board.get(a).is_some());
     }
 
     #[test]

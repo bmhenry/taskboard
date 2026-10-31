@@ -65,6 +65,8 @@ struct UiState {
     /// Link kind the user toggled to for a task or the draft; otherwise the
     /// add-link row uses [`taskboard_core::default_link_kind`].
     link_kind: Option<(Owner, LinkKind)>,
+    /// The (task, file) whose text is in `file_text`.
+    file_shown: Option<(Ulid, Ulid)>,
     /// The open file viewer's text, read when it opened.
     file_text: Option<String>,
     /// The viewed file is UTF-8 text, so it can be edited without loss.
@@ -227,7 +229,19 @@ impl Gui {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let was_editing = self.app.editing.is_some();
         let was_selected = self.app.selected;
-        let task = self.handle(message);
+        let mut task = self.handle(message);
+        // The viewer can't be closed with unsaved changes, so they're only
+        // lost when the file or its task is removed elsewhere.
+        if self.app.viewing_file != self.ui.file_shown
+            && self.file_edit_dirty()
+            && let Some(content) = &self.ui.file_edit
+        {
+            self.app.error = Some(
+                "The file being edited was removed elsewhere; your unsaved text was copied to the clipboard."
+                    .into(),
+            );
+            task = Task::batch([task, iced::clipboard::write(content.text())]);
+        }
         let (app, ui) = (&self.app, &mut self.ui);
         if !app.settings_open {
             ui.show_keybindings = false;
@@ -242,25 +256,26 @@ impl Gui {
         if app.selected.is_none_or(|id| ui.new_file_for != Some(id)) || app.editing.is_some() {
             ui.new_file_for = None;
         }
-        // The text is read once, so reloads (like the watcher's after a save)
-        // don't disturb the viewer or an edit in progress.
-        match app.viewing_file {
-            None => {
-                ui.file_text = None;
-                ui.file_edit = None;
+        if ui.new_file_for.is_none() {
+            ui.new_file_name.clear();
+        }
+        // The text is read once per file shown, so reloads (like the
+        // watcher's after a save) don't disturb the viewer or an edit in
+        // progress.
+        if app.viewing_file != ui.file_shown {
+            ui.file_shown = app.viewing_file;
+            ui.file_text = None;
+            ui.file_editable = false;
+            ui.file_edit = None;
+            let att = app.viewing_file.and_then(|(task, file)| {
+                let task = app.board.get(task)?;
+                task.files.iter().find(|f| f.id == file)
+            });
+            if let Some(att) = att.filter(|a| a.kind != FileKind::Image) {
+                let (text, editable) = viewer::read_text(&app.store.file_path(att));
+                ui.file_text = Some(text);
+                ui.file_editable = editable;
             }
-            Some((task, file)) if ui.file_text.is_none() => {
-                let att = app
-                    .board
-                    .get(task)
-                    .and_then(|t| t.files.iter().find(|f| f.id == file));
-                if let Some(att) = att.filter(|a| a.kind != FileKind::Image) {
-                    let (text, editable) = viewer::read_text(&app.store.file_path(att));
-                    ui.file_text = Some(text);
-                    ui.file_editable = editable;
-                }
-            }
-            Some(_) => {}
         }
         // A missing project's fix belongs to the task it was started on.
         if app.selected != was_selected {
@@ -331,12 +346,17 @@ impl Gui {
             Message::NewFileName(s) => ui.new_file_name = s,
             Message::CreateFile(task) => {
                 let name = ui.new_file_name.clone();
+                // Any earlier error is cleared so a failed create shows.
+                self.app.error = None;
                 self.app.apply(Action::NewFile { task, name });
                 // Kept open with the typed name to fix if creating failed.
-                if self.app.viewing_file.is_some() {
+                if self.app.error.is_none() {
+                    // The new file is empty; it opens ready to edit.
                     let ui = &mut self.ui;
                     ui.new_file_for = None;
-                    ui.new_file_name.clear();
+                    ui.file_shown = self.app.viewing_file;
+                    ui.file_text = Some(String::new());
+                    ui.file_editable = true;
                     ui.file_edit = Some(text_editor::Content::new());
                     return iced::widget::operation::focus(FILE_EDITOR);
                 }
