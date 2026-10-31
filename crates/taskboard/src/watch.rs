@@ -1,4 +1,4 @@
-//! Watches `.tb/` so edits from other processes (like `tb`) show up live.
+//! Watches the task store so edits from other processes (like `tb`) show up live.
 
 use std::path::{Path, PathBuf};
 
@@ -16,17 +16,17 @@ pub enum WatchEvent {
     Failed(String),
 }
 
-/// Reports changes to `tasks_file`, which lives in `tb_dir`.
-pub fn subscription(tb_dir: &Path, tasks_file: &Path) -> Subscription<WatchEvent> {
+/// Reports changes to `tasks_file`, which lives in `store_dir`.
+pub fn subscription(store_dir: &Path, tasks_file: &Path) -> Subscription<WatchEvent> {
     Subscription::run_with(
-        (tb_dir.to_path_buf(), tasks_file.to_path_buf()),
+        (store_dir.to_path_buf(), tasks_file.to_path_buf()),
         |(dir, file)| watch(dir.clone(), file.clone()),
     )
 }
 
-/// Watches the `.tb/` directory rather than `tasks.json` itself, because
+/// Watches the store's directory rather than `tasks.json` itself, because
 /// writes replace the file by renaming over it.
-fn watch(tb_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEvent> {
+fn watch(store_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEvent> {
     iced::stream::channel(16, async move |mut out: mpsc::Sender<WatchEvent>| {
         let file_name = tasks_file.file_name().map(|n| n.to_os_string());
         let tx = out.clone();
@@ -42,7 +42,7 @@ fn watch(tb_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEvent>
             }
         })
         .and_then(|mut w: RecommendedWatcher| {
-            w.watch(&tb_dir, RecursiveMode::NonRecursive)?;
+            w.watch(&store_dir, RecursiveMode::NonRecursive)?;
             Ok(w)
         });
         match watcher {

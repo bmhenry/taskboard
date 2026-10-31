@@ -192,19 +192,6 @@ fn main() -> ExitCode {
         None => GlobalSettings::default(),
     };
     let result = Store::open_default().and_then(|store| {
-        // Bring over tasks kept in the project from before the store was shared.
-        match store.import_legacy(&project) {
-            Ok(0) => {}
-            Ok(n) => eprintln!(
-                "tb: moved {n} tasks from {} into {}",
-                project.display(),
-                store.dir().display()
-            ),
-            Err(e) => eprintln!(
-                "tb: warning: couldn't import {}/.tb: {e}",
-                project.display()
-            ),
-        }
         run(
             cli,
             &store,

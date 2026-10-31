@@ -6,13 +6,9 @@ use chrono::Utc;
 use ulid::Ulid;
 
 use crate::hooks::{self, TaskEvent};
-use crate::model::{Attachment, Board, FileKind, Project, SCHEMA_VERSION};
+use crate::model::{Attachment, Board, FileKind, SCHEMA_VERSION};
 use crate::{Error, Result};
 
-/// Where projects kept their tasks before the store was shared.
-pub const LEGACY_DIR: &str = ".tb";
-/// What a project's legacy directory is renamed to once imported.
-pub const IMPORTED_DIR: &str = ".tb.imported";
 const TASKS_FILE: &str = "tasks.json";
 const LOCK_FILE: &str = "lock";
 const FILES_DIR: &str = "files";
@@ -97,7 +93,7 @@ impl Store {
     /// Reads the board; a missing file is an empty board.
     pub fn load(&self) -> Result<Board> {
         match fs::read_to_string(self.tasks_path()) {
-            Ok(text) => parse_board(&text, None),
+            Ok(text) => parse_board(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Board::default()),
             Err(e) => Err(e.into()),
         }
@@ -207,50 +203,6 @@ impl Store {
         Ok(att)
     }
 
-    /// Moves the tasks and files from `project`'s legacy `.tb/` directory into
-    /// the store, then renames that directory to `.tb.imported`. Tasks already
-    /// in the store are skipped, so an import interrupted before the rename can
-    /// simply run again. Returns how many tasks were imported; 0 if there's
-    /// nothing to import.
-    pub fn import_legacy(&self, project: &Path) -> Result<usize> {
-        let legacy = project.join(LEGACY_DIR);
-        let text = match fs::read_to_string(legacy.join(TASKS_FILE)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        let project = project_path(project);
-        let old = parse_board(&text, Some(&project))?;
-        let imported = self.update(|board| {
-            let mut tasks: Vec<_> = old
-                .tasks
-                .into_iter()
-                .filter(|t| board.get(t.id).is_none())
-                .collect();
-            // Imported tasks go below each column's existing ones, in their order.
-            tasks.sort_by_key(|t| (t.status, t.order, t.id));
-            for mut task in tasks.iter().cloned() {
-                for att in &task.files {
-                    // Attachment paths are relative, so they carry over as-is.
-                    let dest = self.file_path(att);
-                    if !dest.exists() {
-                        fs::copy(legacy.join(&att.path), dest)?;
-                    }
-                }
-                task.order = board.column(task.status).len() as u32;
-                board.tasks.push(task);
-            }
-            if !tasks.is_empty() && board.project(&project).is_none() {
-                board.projects.push(Project {
-                    path: project.clone(),
-                });
-            }
-            Ok(tasks.len())
-        })?;
-        fs::rename(&legacy, project.join(IMPORTED_DIR))?;
-        Ok(imported)
-    }
-
     /// Removes the project at `path` along with its tasks and their files.
     /// Returns how many tasks were deleted.
     pub fn delete_project(&self, path: &Path) -> Result<usize> {
@@ -271,10 +223,9 @@ impl Store {
     }
 }
 
-/// Parses `tasks.json`, migrating older schemas to the current one. Version 1
-/// boards belonged to a single project, given as `legacy_project`.
-pub fn parse_board(text: &str, legacy_project: Option<&Path>) -> Result<Board> {
-    let mut value: serde_json::Value = serde_json::from_str(text)?;
+/// Parses `tasks.json`, migrating older schemas to the current one.
+pub fn parse_board(text: &str) -> Result<Board> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
     let version = value
         .get("schema_version")
         .and_then(|v| v.as_u64())
@@ -283,18 +234,7 @@ pub fn parse_board(text: &str, legacy_project: Option<&Path>) -> Result<Board> {
     if version > SCHEMA_VERSION {
         return Err(Error::UnsupportedSchema(version));
     }
-    // Each migration upgrades `value` by one version.
-    if version < 2 {
-        let project = legacy_project
-            .ok_or_else(|| Error::Invalid("tasks.json is from a single-project board".into()))?;
-        let project = serde_json::to_value(project)?;
-        if let Some(tasks) = value.get_mut("tasks").and_then(|t| t.as_array_mut()) {
-            for task in tasks.iter_mut().filter_map(|t| t.as_object_mut()) {
-                task.insert("project".into(), project.clone());
-            }
-        }
-        value["schema_version"] = SCHEMA_VERSION.into();
-    }
+    // Migrations from older versions go here, each upgrading `value` by one step.
     Ok(serde_json::from_value(value)?)
 }
 
@@ -302,7 +242,6 @@ pub fn parse_board(text: &str, legacy_project: Option<&Path>) -> Result<Board> {
 mod tests {
     use super::*;
     use crate::board::NewTask;
-    use crate::model::Status;
 
     #[test]
     fn update_persists_and_attaches_files() {
@@ -360,57 +299,7 @@ mod tests {
 
     #[test]
     fn rejects_newer_schema() {
-        let err = parse_board(r#"{"schema_version": 999, "tasks": []}"#, None).unwrap_err();
+        let err = parse_board(r#"{"schema_version": 999, "tasks": []}"#).unwrap_err();
         assert!(matches!(err, Error::UnsupportedSchema(999)));
-    }
-
-    #[test]
-    fn imports_a_legacy_project_board_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("data")).unwrap();
-        let existing = store
-            .update(|b| {
-                b.create(NewTask {
-                    title: "existing".into(),
-                    project: "/elsewhere".into(),
-                    status: Some(Status::Backlog),
-                    ..Default::default()
-                })
-            })
-            .unwrap();
-
-        // A version 1 board, as `.tb/` held it, with one attached file.
-        let project = dir.path().join("app");
-        let legacy = project.join(LEGACY_DIR);
-        fs::create_dir_all(legacy.join("files")).unwrap();
-        fs::write(legacy.join("files/01M5X724HRT6FPK984034NF3M3.md"), "# hi").unwrap();
-        fs::write(
-            legacy.join("tasks.json"),
-            r#"{"schema_version": 1, "tasks": [{
-                "id": "01M5X724HRT6FPK984034NF3M2", "title": "old", "status": "backlog",
-                "order": 0, "created": "2026-10-26T22:59:53Z", "updated": "2026-10-26T22:59:53Z",
-                "files": [{"id": "01M5X724HRT6FPK984034NF3M3", "name": "notes.md",
-                           "path": "files/01M5X724HRT6FPK984034NF3M3.md", "kind": "markdown"}]
-            }]}"#,
-        )
-        .unwrap();
-
-        assert_eq!(store.import_legacy(&project).unwrap(), 1);
-        assert!(!legacy.exists());
-        assert!(project.join(IMPORTED_DIR).join("tasks.json").exists());
-        assert_eq!(store.import_legacy(&project).unwrap(), 0);
-
-        let board = store.load().unwrap();
-        let ids: Vec<Ulid> = board.column(Status::Backlog).iter().map(|t| t.id).collect();
-        let old: Ulid = "01M5X724HRT6FPK984034NF3M2".parse().unwrap();
-        assert_eq!(ids, [existing, old]);
-        let task = board.get(old).unwrap();
-        let project = fs::canonicalize(&project).unwrap();
-        assert_eq!(task.project, project);
-        assert_eq!(board.project_name(&project), "app");
-        assert_eq!(
-            fs::read_to_string(store.file_path(&task.files[0])).unwrap(),
-            "# hi"
-        );
     }
 }

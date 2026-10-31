@@ -22,7 +22,7 @@ Taskboard tasks are powerful:
 
 Tasks for every project are stored together in `$XDG_DATA_HOME/tb/` (`~/.local/share/tb/` by default) in a single JSON file, `tasks.json`, which also lists the known projects. Each task names its project by absolute directory; a project's name is its directory's name, with parent directories added in front (`work/app`, `src/app`) when it's needed to tell same-named projects apart. Tasks can reference other files, which are copied into `$XDG_DATA_HOME/tb/files/` under ULIDs; the task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema version so it can be migrated later if necessary. Settings (font size, theme, hooks, which board columns are collapsed) are kept in `$XDG_CONFIG_HOME/tb/settings.json` (`~/.config/tb/` by default).
 
-The current project is the root of the git repo Taskboard was started inside, otherwise the directory it was started from. Older versions kept tasks in a `.tb/` folder inside each project: when `tb` or `taskboard` starts in such a project, its tasks and files are moved into the shared store and the folder is renamed to `.tb.imported` (delete it once you're happy with the result).
+The current project is the root of the git repo Taskboard was started inside, otherwise the directory it was started from.
 
 Taskboard is actually two distinct programs:
 - `taskboard`: The main application, which runs a local GUI

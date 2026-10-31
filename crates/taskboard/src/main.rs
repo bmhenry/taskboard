@@ -31,11 +31,6 @@ fn main() -> iced::Result {
             std::process::exit(1);
         }
     };
-    // Bring over tasks kept in the project from before the store was shared.
-    let import_error = match store.import_legacy(&project) {
-        Ok(_) => None,
-        Err(e) => Some(format!("Couldn't import {}/.tb: {e}", project.display())),
-    };
     iced::application(
         move || {
             let mut app = App::new(store.clone(), GlobalSettings::default_path());
@@ -45,9 +40,6 @@ fn main() -> iced::Result {
                 || project.join(".git").exists()
                 || app.board.project(&project).is_some();
             app.default_project = is_project.then(|| project.clone());
-            if let Some(e) = &import_error {
-                app.error = Some(e.clone());
-            }
             Gui::new(app)
         },
         Gui::update,

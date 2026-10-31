@@ -33,8 +33,7 @@ Everything goes through `skills/gui-test/scripts/gui.sh` (run `gui.sh help`):
 `$STATE` = `${TMPDIR:-/tmp}/taskboard-gui-$USER`) and sets `XDG_CONFIG_HOME` to
 `$STATE/config` and `XDG_DATA_HOME` to `$STATE/data`, so tests never touch the
 user's real tasks or settings. Never launch the app or `tb` without those set:
-the real store is shared by every project, and starting in a project that still
-has a `.tb/` folder moves its tasks into the store.
+the real store is shared by every project.
 
 Seed data with `gui.sh tb add ...` / `tb move ...` (add `--project DIR` to file a
 task under a second project); the app's file watcher picks it
