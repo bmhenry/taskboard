@@ -42,12 +42,14 @@ const HOOK_SAVE_DELAY: Duration = Duration::from_secs(1);
 
 const EDIT_TITLE: &str = "edit_title";
 const SEARCH: &str = "search";
+const NEW_FILE_NAME: &str = "new_file_name";
+const FILE_EDITOR: &str = "file_editor";
 
 /// Shown in the settings modal's keybindings page.
 const KEYBINDINGS: &[(&str, &str)] = &[
     ("Ctrl+F", "Focus search"),
     ("Ctrl+N", "New task"),
-    ("Ctrl+S / Ctrl+Enter", "Save the task being edited"),
+    ("Ctrl+S / Ctrl+Enter", "Save the task or file being edited"),
     ("Ctrl+=", "Increase font size"),
     ("Ctrl+-", "Decrease font size"),
     ("Esc", "Close a dialog or menu, cancel editing, or deselect"),
@@ -65,8 +67,18 @@ struct UiState {
     /// Link kind the user toggled to for a task or the draft; otherwise the
     /// add-link row uses [`taskboard_core::default_link_kind`].
     link_kind: Option<(Owner, LinkKind)>,
+    /// The (task, file) whose text is in `file_text`.
+    file_shown: Option<(Ulid, Ulid)>,
     /// The open file viewer's text, read when it opened.
     file_text: Option<String>,
+    /// The viewed file is UTF-8 text, so it can be edited without loss.
+    file_editable: bool,
+    /// The viewed file's text being edited, while the viewer is in edit mode.
+    file_edit: Option<text_editor::Content>,
+    /// The task whose new-file popup is open.
+    new_file_for: Option<Ulid>,
+    /// The name typed in the new-file popup.
+    new_file_name: String,
     /// The settings modal shows keybindings instead of settings.
     show_keybindings: bool,
     /// The filter dropdown under the search bar is open.
@@ -114,6 +126,20 @@ pub enum Message {
     Browse(Owner),
     /// The file dialog closed; `None` if it was cancelled.
     Picked(Owner, Option<PathBuf>),
+    /// Opens or closes the popup asking for a new file's name.
+    ToggleNewFile(Ulid),
+    CloseNewFile,
+    NewFileName(String),
+    /// Creates the file named in the popup and opens it for editing.
+    CreateFile(Ulid),
+    /// Switches the file viewer to editing the file's text.
+    EditFile,
+    EditFileText(text_editor::Action),
+    SaveFile,
+    /// Leaves edit mode, dropping unsaved changes.
+    CancelFileEdit,
+    /// Closes the file viewer, unless it has unsaved changes.
+    CloseViewer,
     EditTitle(String),
     EditProject(String),
     ToggleProjectMenu,
@@ -200,7 +226,19 @@ impl Gui {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let was_editing = self.app.editing.is_some();
         let was_selected = self.app.selected;
-        let task = self.handle(message);
+        let mut task = self.handle(message);
+        // The viewer can't be closed with unsaved changes, so they're only
+        // lost when the file or its task is removed elsewhere.
+        if self.app.viewing_file != self.ui.file_shown
+            && self.file_edit_dirty()
+            && let Some(content) = &self.ui.file_edit
+        {
+            self.app.error = Some(
+                "The file being edited was removed elsewhere; your unsaved text was copied to the clipboard."
+                    .into(),
+            );
+            task = Task::batch([task, iced::clipboard::write(content.text())]);
+        }
         let (app, ui) = (&self.app, &mut self.ui);
         if !app.settings_open {
             ui.show_keybindings = false;
@@ -212,18 +250,29 @@ impl Gui {
         if app.editing.is_none() {
             ui.project_menu_open = false;
         }
-        match app.viewing_file {
-            None => ui.file_text = None,
-            Some((task, file)) if ui.file_text.is_none() => {
-                let att = app
-                    .board
-                    .get(task)
-                    .and_then(|t| t.files.iter().find(|f| f.id == file));
-                if let Some(att) = att.filter(|a| a.kind != FileKind::Image) {
-                    ui.file_text = Some(viewer::read_text(&app.store.file_path(att)));
-                }
+        if app.selected.is_none_or(|id| ui.new_file_for != Some(id)) || app.editing.is_some() {
+            ui.new_file_for = None;
+        }
+        if ui.new_file_for.is_none() {
+            ui.new_file_name.clear();
+        }
+        // The text is read once per file shown, so reloads (like the
+        // watcher's after a save) don't disturb the viewer or an edit in
+        // progress.
+        if app.viewing_file != ui.file_shown {
+            ui.file_shown = app.viewing_file;
+            ui.file_text = None;
+            ui.file_editable = false;
+            ui.file_edit = None;
+            let att = app.viewing_file.and_then(|(task, file)| {
+                let task = app.board.get(task)?;
+                task.files.iter().find(|f| f.id == file)
+            });
+            if let Some(att) = att.filter(|a| a.kind != FileKind::Image) {
+                let (text, editable) = viewer::read_text(&app.store.file_path(att));
+                ui.file_text = Some(text);
+                ui.file_editable = editable;
             }
-            Some(_) => {}
         }
         // A missing project's fix belongs to the task it was started on.
         if app.selected != was_selected {
@@ -281,6 +330,70 @@ impl Gui {
             }
             Message::Picked(owner, Some(path)) => self.app.apply(Action::Attach { owner, path }),
             Message::Picked(_, None) => {}
+            Message::ToggleNewFile(task) => {
+                ui.new_file_for = match ui.new_file_for {
+                    Some(_) => None,
+                    None => Some(task),
+                };
+                if ui.new_file_for.is_some() {
+                    return iced::widget::operation::focus(NEW_FILE_NAME);
+                }
+            }
+            Message::CloseNewFile => ui.new_file_for = None,
+            Message::NewFileName(s) => ui.new_file_name = s,
+            Message::CreateFile(task) => {
+                let name = ui.new_file_name.clone();
+                // Any earlier error is cleared so a failed create shows.
+                self.app.error = None;
+                self.app.apply(Action::NewFile { task, name });
+                // Kept open with the typed name to fix if creating failed.
+                if self.app.error.is_none() {
+                    // The new file is empty; it opens ready to edit.
+                    let ui = &mut self.ui;
+                    ui.new_file_for = None;
+                    ui.file_shown = self.app.viewing_file;
+                    ui.file_text = Some(String::new());
+                    ui.file_editable = true;
+                    ui.file_edit = Some(text_editor::Content::new());
+                    return iced::widget::operation::focus(FILE_EDITOR);
+                }
+            }
+            Message::EditFile => {
+                if ui.file_editable
+                    && let Some(text) = &ui.file_text
+                {
+                    ui.file_edit = Some(text_editor::Content::with_text(text));
+                    return iced::widget::operation::focus(FILE_EDITOR);
+                }
+            }
+            Message::EditFileText(action) => {
+                if let Some(content) = &mut ui.file_edit {
+                    content.perform(action);
+                }
+            }
+            Message::SaveFile => {
+                if let (Some(content), Some((task, file))) = (&ui.file_edit, self.app.viewing_file)
+                {
+                    let text = content.text();
+                    // Any earlier error is cleared so a failed save shows.
+                    self.app.error = None;
+                    self.app.apply(Action::WriteFile {
+                        task,
+                        file,
+                        text: text.clone(),
+                    });
+                    if self.app.error.is_none() {
+                        self.ui.file_text = Some(text);
+                        self.ui.file_edit = None;
+                    }
+                }
+            }
+            Message::CancelFileEdit => ui.file_edit = None,
+            Message::CloseViewer => {
+                if !self.file_edit_dirty() {
+                    return self.apply(Action::ViewFile(None));
+                }
+            }
             Message::EditTitle(s) => ui.edit_title = s,
             Message::EditProject(s) => ui.edit_project = s,
             Message::ToggleProjectMenu => ui.project_menu_open = !ui.project_menu_open,
@@ -323,7 +436,10 @@ impl Gui {
             Message::ConfirmDeleteProject(path) => ui.confirm_delete_project = Some(path),
             Message::CheckProjects => self.app.check_projects(),
             Message::Save => {
-                if self.app.editing.is_some() {
+                // The file editor sits above the task editor, so it saves first.
+                if ui.file_edit.is_some() {
+                    return self.handle(Message::SaveFile);
+                } else if self.app.editing.is_some() {
                     self.app.apply(Action::Save {
                         title: ui.edit_title.clone(),
                         project: ui.edit_project.clone(),
@@ -470,6 +586,14 @@ impl Gui {
         Task::none()
     }
 
+    /// The file being edited has changes that aren't saved.
+    fn file_edit_dirty(&self) -> bool {
+        self.ui
+            .file_edit
+            .as_ref()
+            .is_some_and(|c| Some(c.text()) != self.ui.file_text)
+    }
+
     /// The ids of a column's visible tasks, leaving out the dragged one.
     fn visible_except(&self, status: Status, dragged: Ulid) -> Vec<Ulid> {
         self.app
@@ -539,6 +663,13 @@ impl Gui {
                     ui.project_menu_open = false;
                 } else if ui.status_open.is_some() {
                     ui.status_open = None;
+                } else if ui.new_file_for.is_some() {
+                    ui.new_file_for = None;
+                } else if ui.file_edit.is_some() {
+                    // Unsaved changes are only dropped by pressing Cancel.
+                    if !self.file_edit_dirty() {
+                        self.ui.file_edit = None;
+                    }
                 } else if app.viewing_file.is_some() {
                     return self.apply(Action::ViewFile(None));
                 } else if app.editing.is_some() {
@@ -607,7 +738,7 @@ impl Gui {
                 .and_then(|t| t.files.iter().find(|f| f.id == file_id))
         {
             let dialog = viewer::file_viewer(self, att, size);
-            layers = layers.push(modal(dialog, Message::App(Action::ViewFile(None))));
+            layers = layers.push(modal(dialog, Message::CloseViewer));
         }
         if app.settings_open {
             let dialog = settings::settings(self, size);

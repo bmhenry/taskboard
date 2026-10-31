@@ -87,6 +87,7 @@ tb --json link rm 7F3TPKKW 2                    # by number, as listed by `tb sh
 
 # Files (copied into the store; referenced by original name or file-id suffix)
 tb --json file add 7F3TPKKW screenshot.png
+tb --json file new 7F3TPKKW notes               # empty file owned by the store; no extension → .md
 tb file cat 7F3TPKKW notes.md                   # prints raw contents (no JSON wrapper)
 tb --json file rm 7F3TPKKW notes.md
 ```

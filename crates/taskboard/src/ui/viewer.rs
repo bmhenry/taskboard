@@ -2,13 +2,13 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, image, row, scrollable, text};
+use iced::widget::{column, container, image, row, scrollable, text, text_editor};
 use iced::{Border, Length, Padding, Size};
 use taskboard_core::{Attachment, FileKind};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
-use super::widgets::{El, btn, grow, label};
-use super::{Gui, Message};
+use super::widgets::{El, btn, grow, label, save_keys};
+use super::{FILE_EDITOR, Gui, Message};
 use crate::app::Action;
 use crate::markdown::{self, BlockKind};
 
@@ -70,18 +70,37 @@ pub fn markdown<'a>(p: Pal, src: &str) -> El<'a> {
 pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a> {
     let (app, p) = (&gui.app, gui.pal());
     let path = app.store.file_path(att);
-    let header = row![
-        text(&att.name).size(16).font(BOLD),
-        grow(),
-        btn(
-            p,
-            "Close",
-            Style::Normal,
-            Message::App(Action::ViewFile(None))
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
+    let mut header = row![text(&att.name).size(16).font(BOLD), grow()]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+    if let Some(content) = &gui.ui.file_edit {
+        if gui.file_edit_dirty() {
+            header = header.push(label(p, "Unsaved changes"));
+        }
+        header = header.extend([
+            btn(p, "Save", Style::Primary, Message::SaveFile),
+            btn(p, "Cancel", Style::Quiet, Message::CancelFileEdit),
+        ]);
+        let editor = text_editor(content)
+            .id(FILE_EDITOR)
+            .on_action(Message::EditFileText)
+            .font(MONO)
+            .size(13)
+            .padding([7, 8])
+            .height(Length::Fill)
+            .key_binding(save_keys)
+            .style(move |_, status| theme::editor_style(p, status));
+        return dialog(p, column![header, editor].spacing(12), window);
+    }
+    if att.kind != FileKind::Image && gui.ui.file_editable {
+        header = header.push(btn(p, "Edit", Style::Normal, Message::EditFile));
+    }
+    header = header.push(btn(
+        p,
+        "Close",
+        Style::Normal,
+        Message::App(Action::ViewFile(None)),
+    ));
     let body: El = match att.kind {
         FileKind::Image if path.is_file() => image(image::Handle::from_path(path)).into(),
         FileKind::Image => label(p, "Couldn't load this image."),
@@ -114,7 +133,12 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_, s| theme::scroll_style(p, s));
-    container(column![header, body].spacing(12))
+    dialog(p, column![header, body].spacing(12), window)
+}
+
+/// The viewer's frame around `content`, sized to the window.
+fn dialog<'a>(p: Pal, content: iced::widget::Column<'a, Message>, window: Size) -> El<'a> {
+    container(content)
         .width((window.width * 0.8).min(1100.0))
         .height(window.height * 0.85)
         .padding(16)
@@ -129,9 +153,14 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
         .into()
 }
 
-/// Reads a text file for the viewer, or says why it couldn't.
-pub fn read_text(path: &std::path::Path) -> String {
-    std::fs::read(path)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_else(|e| format!("Couldn't read file: {e}"))
+/// Reads a text file for the viewer, or says why it couldn't, and whether
+/// the text can be edited: only UTF-8 survives being saved back unchanged.
+pub fn read_text(path: &std::path::Path) -> (String, bool) {
+    match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => (text, true),
+            Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
+        },
+        Err(e) => (format!("Couldn't read file: {e}"), false),
+    }
 }
