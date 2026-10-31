@@ -69,7 +69,7 @@ MD
 tb --json edit 7F3TPKKW -t "New title"          # -t title, -d description, -s status
 tb --json edit 7F3TPKKW -d - < description.md   # "-" reads the description from stdin
 tb --json edit 7F3TPKKW --to-project ~/src/app  # move to another project
-tb --json move 7F3TPKKW in-progress             # change status (goes to the bottom)
+tb --json move 7F3TPKKW in-progress             # change status (goes to the bottom of the new column)
 tb --json move 7F3TPKKW in-progress -p 1        # ...and put it at the top
 tb --json move 7F3TPKKW -p 1                    # reprioritize within its column
 tb --json close 7F3TPKKW

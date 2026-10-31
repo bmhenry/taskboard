@@ -187,7 +187,7 @@ fn main() -> ExitCode {
     );
     let settings = match GlobalSettings::default_path().filter(|_| uses_settings) {
         Some(path) => GlobalSettings::load(&path).unwrap_or_else(|e| {
-            eprintln!("tb: warning: using default settings, so hooks are off: {e}");
+            eprintln!("tb: warning: using default settings (hooks off, new tasks at top): {e}");
             GlobalSettings::default()
         }),
         None => GlobalSettings::default(),
@@ -630,18 +630,46 @@ fn plural(n: usize, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taskboard_core::settings::NewTaskPosition;
 
     /// Runs `tb` with the project `project` under the store's directory.
     fn tb_in(store: &Store, project: &str, args: &[&str]) -> String {
+        tb_with(store, project, &GlobalSettings::default(), args)
+    }
+
+    /// Runs `tb` in `project` with the given user settings.
+    fn tb_with(store: &Store, project: &str, settings: &GlobalSettings, args: &[&str]) -> String {
         let cli = Cli::try_parse_from(std::iter::once("tb").chain(args.iter().copied())).unwrap();
         let mut out = Vec::new();
         let project = store.dir().join(project);
-        run(cli, store, &project, &GlobalSettings::default(), &mut out).unwrap();
+        run(cli, store, &project, settings, &mut out).unwrap();
         String::from_utf8(out).unwrap()
     }
 
     fn tb(store: &Store, args: &[&str]) -> String {
         tb_in(store, "app", args)
+    }
+
+    #[test]
+    fn add_puts_new_tasks_where_the_settings_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let bottom = GlobalSettings {
+            new_task_position: NewTaskPosition::Bottom,
+            ..GlobalSettings::default()
+        };
+        tb(&store, &["add", "a"]);
+        tb(&store, &["add", "b"]);
+        tb_with(&store, "app", &bottom, &["add", "c"]);
+        tb(&store, &["add", "d"]);
+
+        let board = store.load().unwrap();
+        let order: Vec<&str> = board
+            .column(Status::Open)
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(order, ["d", "b", "a", "c"]);
     }
 
     #[test]
