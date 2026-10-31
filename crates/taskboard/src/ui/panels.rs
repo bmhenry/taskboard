@@ -11,12 +11,20 @@ use taskboard_core::{FileKind, Link, LinkKind, Status, Task, Ulid, default_link_
 use super::popup::popup;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::viewer::markdown;
-use super::widgets::{El, btn, grow, input, label, link, section_title, status_dot};
+use super::widgets::{
+    El, btn, grow, input, label, link, path_label, section_title, shorten_path, status_dot,
+    warning_icon,
+};
 use super::{EDIT_TITLE, Gui, Message};
-use crate::app::{Action, EditTarget, Owner};
+use crate::app::{Action, EditTarget, Owner, ProjectInput};
 
 /// Unscaled minimum width of the status dropdown's list.
 const STATUS_MENU_MIN_WIDTH: f32 = 160.0;
+/// Unscaled width and greatest height of the editor's list of projects.
+const PROJECT_MENU_WIDTH: f32 = 360.0;
+const PROJECT_MENU_MAX_HEIGHT: f32 = 320.0;
+/// The longest project path shown in the list of projects.
+const PROJECT_MENU_PATH_CHARS: usize = 48;
 
 pub fn side_panel<'a>(p: Pal, width: Length, body: Column<'a, Message>) -> El<'a> {
     container(
@@ -78,13 +86,17 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
         stamps.push_str(&format!("   ·   Closed {}", fmt(closed)));
     }
 
+    let project = format!("{} ·", gui.app.board.project_name(&task.project));
     let mut body = column![
         top,
         text(&task.title).size(20).font(BOLD),
         status_dropdown(gui, task),
-        label(p, stamps),
-        section_title(p, "Description"),
+        path_label(p, &project, &task.project.display().to_string()),
     ];
+    if gui.app.project_missing(&task.project) {
+        body = body.push(missing_project(gui, &task.project));
+    }
+    body = body.extend([label(p, stamps), section_title(p, "Description")]);
     body = if task.description.trim().is_empty() {
         body.push(label(p, "No description."))
     } else {
@@ -95,6 +107,68 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     let files = task.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
     body = files_editor(gui, body, owner, files);
     side_panel(p, width, body)
+}
+
+/// Says the project at `path` has no folder any more, with ways to point it
+/// at its new folder or to delete it.
+fn missing_project<'a>(gui: &'a Gui, path: &'a std::path::Path) -> El<'a> {
+    let (app, p, ui) = (&gui.app, gui.pal(), &gui.ui);
+    let count = app.board.tasks.iter().filter(|t| t.project == path).count();
+    let tasks = super::widgets::plural(count, "task");
+    let delete = if ui.confirm_delete_project.as_deref() == Some(path) {
+        btn(
+            p,
+            format!("Really delete the project and its {tasks}?"),
+            Style::Danger,
+            Message::App(Action::DeleteProject(path.to_path_buf())),
+        )
+    } else {
+        btn(
+            p,
+            "Delete project…",
+            Style::Quiet,
+            Message::ConfirmDeleteProject(path.to_path_buf()),
+        )
+    };
+    let from = path.to_path_buf();
+    let body = column![
+        row![
+            warning_icon(p, 16.0),
+            text("Project folder is missing").size(14).font(BOLD),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        label(
+            p,
+            format!(
+                "{} isn't there any more. If the project moved, point Taskboard at its new folder; otherwise you can delete the project and its {tasks}.",
+                path.display()
+            )
+        ),
+        row![
+            input(
+                p,
+                "relocate_path",
+                "The project's new folder",
+                &ui.relocate_path,
+                false,
+                Message::RelocatePath
+            )
+            .on_submit(Message::Relocate(from.clone()))
+            .width(Length::Fill),
+            btn(p, "Browse…", Style::Normal, Message::BrowseRelocate(from.clone())),
+            btn(p, "Relocate", Style::Primary, Message::Relocate(from)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        row![delete],
+    ]
+    .spacing(8);
+    container(body)
+        .padding(12)
+        .width(Length::Fill)
+        .style(move |_| theme::boxed(p.panel, p.warning, 8.0))
+        .into()
 }
 
 /// Adds a task's or the draft's links, each removable, and a row to add one.
@@ -363,6 +437,8 @@ pub fn editor<'a>(gui: &'a Gui, width: Length) -> El<'a> {
             Message::EditTitle
         )
         .width(Length::Fill),
+        label(p, "Project"),
+        project_field(gui),
         label(p, "Description (Markdown)"),
         desc,
     ];
@@ -383,4 +459,109 @@ pub fn editor<'a>(gui: &'a Gui, width: Length) -> El<'a> {
         .align_y(Alignment::Center),
     );
     side_panel(p, width, body)
+}
+
+/// The editor's project input, with a list of known projects hanging from it,
+/// a button to pick a folder, and a line saying what the input names.
+fn project_field(gui: &Gui) -> El<'_> {
+    let (app, p, ui) = (&gui.app, gui.pal(), &gui.ui);
+    let face = row![
+        input(
+            p,
+            "edit_project",
+            "Project name, or a folder's path",
+            &ui.edit_project,
+            false,
+            Message::EditProject
+        )
+        .width(Length::Fill),
+        btn(p, "▾", Style::Normal, Message::ToggleProjectMenu),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let menu = ui.project_menu_open.then(|| project_menu(gui));
+    let picker = row![
+        container(popup(face, menu).on_dismiss(Message::CloseProjectMenu)).width(Length::Fill),
+        btn(p, "Browse…", Style::Normal, Message::BrowseProject),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let hint = match app.project_input(&ui.edit_project) {
+        ProjectInput::Empty => label(p, "Pick a project, browse for a folder, or type its path."),
+        ProjectInput::Known(path) => {
+            let name = app.board.project_name(&path);
+            path_label(p, &format!("{name} ·"), &path.display().to_string())
+        }
+        ProjectInput::New(path) => path_label(p, "New project:", &path.display().to_string()),
+        ProjectInput::Missing(path) => path_label(
+            p,
+            "New folder, created on save:",
+            &path.display().to_string(),
+        ),
+    };
+    column![picker, hint].spacing(6).into()
+}
+
+/// The projects on the board, by name; picking one fills the project input.
+fn project_menu(gui: &Gui) -> El<'_> {
+    let p = gui.pal();
+    let items = gui
+        .app
+        .board
+        .project_names()
+        .into_iter()
+        .map(|(project, name)| {
+            let path = project.path.display().to_string();
+            button(
+                column![
+                    text(name).size(13).wrapping(Wrapping::None),
+                    text(shorten_path(&path, PROJECT_MENU_PATH_CHARS))
+                        .size(11)
+                        .color(rgb(p.muted))
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(2),
+            )
+            .width(Length::Fill)
+            .padding([5, 10])
+            .style(move |_, s| {
+                let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: Some(Background::Color(rgb(if hovered {
+                        p.card_hover
+                    } else {
+                        p.panel
+                    }))),
+                    text_color: rgb(p.text),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+            .on_press(Message::ChooseProject(project.path.clone()))
+            .into()
+        });
+    let list: El = if gui.app.board.projects.is_empty() {
+        container(label(
+            p,
+            "No projects yet. Browse for a folder or type its path.",
+        ))
+        .padding(6)
+        .into()
+    } else {
+        scrollable(column(items).spacing(2))
+            .direction(Direction::Vertical(
+                Scrollbar::new().width(4).scroller_width(4),
+            ))
+            .style(move |_, s| theme::scroll_style(p, s))
+            .into()
+    };
+    container(list)
+        .width(PROJECT_MENU_WIDTH)
+        .max_height(PROJECT_MENU_MAX_HEIGHT)
+        .padding(6)
+        .style(move |_| theme::boxed(p.panel, p.border, 8.0))
+        .into()
 }

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -44,6 +45,8 @@ pub struct Filter {
     pub text: String,
     /// Allowed statuses; empty allows all.
     pub statuses: Vec<Status>,
+    /// Only tasks in the project at this directory.
+    pub project: Option<PathBuf>,
     pub date_field: DateField,
     /// Inclusive lower bound on `date_field`.
     pub after: Option<DateTime<Utc>>,
@@ -55,12 +58,16 @@ impl Filter {
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty()
             && self.statuses.is_empty()
+            && self.project.is_none()
             && self.after.is_none()
             && self.before.is_none()
     }
 
     pub fn matches(&self, task: &Task) -> bool {
         if !self.statuses.is_empty() && !self.statuses.contains(&task.status) {
+            return false;
+        }
+        if self.project.as_ref().is_some_and(|p| *p != task.project) {
             return false;
         }
         if self.after.is_some() || self.before.is_some() {
@@ -103,11 +110,12 @@ mod tests {
     use crate::model::{Board, Link, LinkKind};
 
     #[test]
-    fn filters_by_text_status_and_date() {
+    fn filters_by_text_status_project_and_date() {
         let mut b = Board::default();
         let id = b
             .create(NewTask {
                 title: "Fix login".into(),
+                project: "/src/app".into(),
                 status: Some(Status::Backlog),
                 links: vec![Link {
                     url: "https://example.com/issues/42".into(),
@@ -130,6 +138,12 @@ mod tests {
             ..Default::default()
         };
         assert!(!wrong_status.matches(task));
+
+        let other_project = Filter {
+            project: Some("/src/other".into()),
+            ..Default::default()
+        };
+        assert!(!other_project.matches(task));
 
         let future = Filter {
             after: Some(parse_date("2999-01-01").unwrap()),

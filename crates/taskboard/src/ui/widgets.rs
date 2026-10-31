@@ -1,9 +1,14 @@
 //! Small building blocks shared by the views.
 
+use std::path::Path;
+
 use iced::alignment::Vertical;
+use iced::widget::canvas::{self, Frame, Geometry, LineCap, LineJoin, Stroke};
 use iced::widget::text::Wrapping;
 use iced::widget::{Space, button, column, container, mouse_area, row, text, text_input, tooltip};
-use iced::{Alignment, Background, Border, Element, Length, mouse};
+use iced::{
+    Alignment, Background, Border, Element, Length, Point, Rectangle, Renderer, Theme, mouse,
+};
 use taskboard_core::Status;
 
 use super::Message;
@@ -52,7 +57,13 @@ pub fn link<'a>(
 }
 
 /// A toggleable pill; `on` draws it filled with `color`.
-pub fn chip<'a>(p: Pal, label: &'a str, color: u32, on: bool, on_press: Message) -> El<'a> {
+pub fn chip<'a>(
+    p: Pal,
+    label: impl text::IntoFragment<'a>,
+    color: u32,
+    on: bool,
+    on_press: Message,
+) -> El<'a> {
     button(
         text(label)
             .size(12)
@@ -141,6 +152,88 @@ pub fn help_bubble<'a>(p: Pal, paragraphs: &'a [(&'a str, bool)]) -> El<'a> {
     .width(360);
     tooltip(
         mark,
+        container(bubble)
+            .padding(10)
+            .style(move |_| theme::boxed(p.card, p.border, 8.0)),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+/// A yellow triangle with an exclamation mark, `size` pixels across.
+pub fn warning_icon<'a>(p: Pal, size: f32) -> El<'a> {
+    canvas::Canvas::new(WarningIcon(p.warning))
+        .width(size)
+        .height(size)
+        .into()
+}
+
+struct WarningIcon(u32);
+
+impl canvas::Program<Message> for WarningIcon {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let inset = w * 0.08;
+        let triangle = canvas::Path::new(|b| {
+            b.move_to(Point::new(w / 2.0, inset));
+            b.line_to(Point::new(w - inset, h - inset));
+            b.line_to(Point::new(inset, h - inset));
+            b.close();
+        });
+        let color = rgb(self.0);
+        frame.fill(&triangle, color);
+        // Round the corners by stroking the same path in the fill color.
+        frame.stroke(
+            &triangle,
+            Stroke::default()
+                .with_color(color)
+                .with_width(w * 0.12)
+                .with_line_join(LineJoin::Round),
+        );
+        let mark = rgb(0x1D1D1F);
+        frame.stroke(
+            &canvas::Path::line(Point::new(w / 2.0, h * 0.4), Point::new(w / 2.0, h * 0.64)),
+            Stroke::default()
+                .with_color(mark)
+                .with_width(w * 0.13)
+                .with_line_cap(LineCap::Round),
+        );
+        frame.fill(
+            &canvas::Path::circle(Point::new(w / 2.0, h * 0.78), w * 0.07),
+            mark,
+        );
+        vec![frame.into_geometry()]
+    }
+}
+
+/// A [`warning_icon`] that explains, while hovered, that the project at
+/// `path` is missing.
+pub fn missing_project_badge<'a>(p: Pal, path: &Path, size: f32) -> El<'a> {
+    let bubble = column![
+        text("Project folder is missing").size(13).font(BOLD),
+        text(path.display().to_string())
+            .size(12)
+            .font(MONO)
+            .color(rgb(p.muted))
+            .wrapping(Wrapping::WordOrGlyph),
+        text("Open the task to point Taskboard at the project's new folder, or to delete the project.")
+            .size(12),
+    ]
+    .spacing(4)
+    .width(300);
+    tooltip(
+        warning_icon(p, size),
         container(bubble)
             .padding(10)
             .style(move |_| theme::boxed(p.card, p.border, 8.0)),

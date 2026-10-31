@@ -16,7 +16,7 @@ use iced::{Alignment, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, V
 use taskboard_core::{LinkKind, Status, Task, Ulid};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb, status_index};
-use super::widgets::{El, btn, count_badge, dot, grow, plural};
+use super::widgets::{El, btn, count_badge, dot, grow, missing_project_badge, plural};
 use super::{EDGE, Gui, Message, side_width};
 use crate::app::{Action, DRAG_THRESHOLD, EditTarget, View};
 use crate::source_link::{self, Site};
@@ -219,7 +219,12 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     } else {
         (if hovered { p.card_hover } else { p.card }, p.card_edge)
     };
-    let face = container(card_body(p, task))
+    // Cards from several projects say which one they're in.
+    let app = &gui.app;
+    let project = (app.filter.project.is_none() && app.board.projects.len() > 1)
+        .then(|| app.board.project_name(&task.project));
+    let missing = app.project_missing(&task.project);
+    let face = container(card_body(p, task, project, missing))
         .padding(10)
         .width(Length::Fill)
         .style(move |_| theme::boxed(bg, edge, 6.0));
@@ -239,15 +244,23 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
 }
 
 /// A card's contents: title, id, link and file counts, and source link.
-pub fn card_body<'a>(p: Pal, task: &'a Task) -> El<'a> {
-    let mut meta = row![
+/// A card's title, short ID, counts and source link, plus its project's name
+/// if given, and a warning if its project's folder is `missing`.
+pub fn card_body<'a>(p: Pal, task: &'a Task, project: Option<String>, missing: bool) -> El<'a> {
+    let mut meta = row![].spacing(10).align_y(Alignment::Center);
+    if missing {
+        meta = meta.push(missing_project_badge(p, &task.project, 14.0));
+    }
+    meta = meta.push(
         text(task.short_id())
             .size(11)
             .font(MONO)
             .color(rgb(p.muted))
-            .wrapping(Wrapping::None)
-    ]
-    .spacing(10);
+            .wrapping(Wrapping::None),
+    );
+    if let Some(project) = project {
+        meta = meta.push(small(p, project));
+    }
     if !task.links.is_empty() {
         meta = meta.push(small(p, plural(task.links.len(), "link")));
     }

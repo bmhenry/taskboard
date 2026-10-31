@@ -32,6 +32,9 @@ const BASE_FONT_SIZE: f32 = 14.0;
 /// Space between the window's edges and the UI inside it.
 const EDGE: f32 = 18.0;
 
+/// How often to check whether project folders still exist.
+const PROJECT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How long after the last keystroke in a hook command it's saved.
 const HOOK_SAVE_DELAY: Duration = Duration::from_secs(1);
 
@@ -68,7 +71,15 @@ struct UiState {
     filters_open: bool,
     /// The task whose status dropdown in the detail panel is open.
     status_open: Option<Ulid>,
+    /// The new folder typed for the selected task's missing project.
+    relocate_path: String,
+    /// The missing project whose Delete button was pressed once.
+    confirm_delete_project: Option<PathBuf>,
+    /// The editor's list of known projects is open.
+    project_menu_open: bool,
     edit_title: String,
+    /// The editor's project input: a project's name or directory.
+    edit_project: String,
     edit_desc: text_editor::Content,
     /// The add-link and attach-file inputs, shared by the detail panel and
     /// the editor.
@@ -113,7 +124,25 @@ pub enum Message {
     /// The file dialog closed; `None` if it was cancelled.
     Picked(Owner, Option<PathBuf>),
     EditTitle(String),
+    EditProject(String),
+    ToggleProjectMenu,
+    CloseProjectMenu,
+    /// A project was picked from the editor's list, by directory.
+    ChooseProject(PathBuf),
+    /// Opens the native folder dialog to pick the task's project.
+    BrowseProject,
+    /// The folder dialog closed; `None` if it was cancelled.
+    PickedProject(Option<PathBuf>),
     EditDesc(text_editor::Action),
+    RelocatePath(String),
+    /// Points the missing project at the typed folder.
+    Relocate(PathBuf),
+    /// Opens the native folder dialog to pick a missing project's new folder.
+    BrowseRelocate(PathBuf),
+    /// The folder dialog closed: (missing project, new folder if picked).
+    PickedRelocate(PathBuf, Option<PathBuf>),
+    ConfirmDeleteProject(PathBuf),
+    CheckProjects,
     Save,
     HookCommand(usize, String),
     ToggleKeybindings,
@@ -163,6 +192,7 @@ impl Gui {
         let mut subs = vec![
             watch::subscription(store.dir(), &store.tasks_path()).map(Message::Watch),
             keys,
+            iced::time::every(PROJECT_CHECK_INTERVAL).map(|_| Message::CheckProjects),
         ];
         if self.ui.hook_edited_at.is_some() {
             subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick));
@@ -172,6 +202,7 @@ impl Gui {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let was_editing = self.app.editing.is_some();
+        let was_selected = self.app.selected;
         let task = self.handle(message);
         let (app, ui) = (&self.app, &mut self.ui);
         if !app.settings_open {
@@ -180,6 +211,9 @@ impl Gui {
         }
         if app.editing.is_some() || app.selected != ui.status_open {
             ui.status_open = None;
+        }
+        if app.editing.is_none() {
+            ui.project_menu_open = false;
         }
         match app.viewing_file {
             None => ui.file_text = None,
@@ -193,6 +227,11 @@ impl Gui {
                 }
             }
             Some(_) => {}
+        }
+        // A missing project's fix belongs to the task it was started on.
+        if app.selected != was_selected {
+            ui.relocate_path.clear();
+            ui.confirm_delete_project = None;
         }
         // Don't leave a new task's unadded link or file in the detail panel.
         if was_editing && app.editing.is_none() {
@@ -246,11 +285,51 @@ impl Gui {
             Message::Picked(owner, Some(path)) => self.app.apply(Action::Attach { owner, path }),
             Message::Picked(_, None) => {}
             Message::EditTitle(s) => ui.edit_title = s,
+            Message::EditProject(s) => ui.edit_project = s,
+            Message::ToggleProjectMenu => ui.project_menu_open = !ui.project_menu_open,
+            Message::CloseProjectMenu => ui.project_menu_open = false,
+            Message::ChooseProject(path) => {
+                ui.edit_project = self.app.project_text(&path);
+                ui.project_menu_open = false;
+            }
+            Message::BrowseProject => {
+                ui.project_menu_open = false;
+                let title = "Choose the task's project";
+                return Task::perform(pick_folder(title), Message::PickedProject);
+            }
+            Message::PickedProject(Some(path)) => ui.edit_project = self.app.project_text(&path),
+            Message::PickedProject(None) => {}
             Message::EditDesc(action) => ui.edit_desc.perform(action),
+            Message::RelocatePath(s) => ui.relocate_path = s,
+            Message::Relocate(from) => {
+                let to = ui.relocate_path.clone();
+                self.app.apply(Action::RelocateProject {
+                    from: from.clone(),
+                    to,
+                });
+                // Keep the typed folder to fix if relocating failed.
+                if self.app.board.project(&from).is_none() {
+                    self.ui.relocate_path.clear();
+                }
+            }
+            Message::BrowseRelocate(from) => {
+                let title = "Choose the project's new folder";
+                return Task::perform(pick_folder(title), move |to| {
+                    Message::PickedRelocate(from.clone(), to)
+                });
+            }
+            Message::PickedRelocate(from, Some(to)) => {
+                let to = to.display().to_string();
+                self.app.apply(Action::RelocateProject { from, to });
+            }
+            Message::PickedRelocate(_, None) => {}
+            Message::ConfirmDeleteProject(path) => ui.confirm_delete_project = Some(path),
+            Message::CheckProjects => self.app.check_projects(),
             Message::Save => {
                 if self.app.editing.is_some() {
                     self.app.apply(Action::Save {
                         title: ui.edit_title.clone(),
+                        project: ui.edit_project.clone(),
                         description: ui.edit_desc.text(),
                     });
                 }
@@ -263,7 +342,10 @@ impl Gui {
             Message::Key(key, modifiers, status) => return self.key(key, modifiers, status),
             Message::Watch(WatchEvent::Changed) => self.app.reload(),
             Message::Watch(WatchEvent::Failed(e)) => {
-                self.app.error = Some(format!("Live updates are off; couldn't watch .tb/: {e}"));
+                self.app.error = Some(format!(
+                    "Live updates are off; couldn't watch {}: {e}",
+                    self.app.store.dir().display()
+                ));
             }
             Message::Tick => {
                 if ui
@@ -365,17 +447,22 @@ impl Gui {
         let Some(target) = opens_editor else {
             return Task::none();
         };
-        let (title, desc) = match target {
+        let (title, project, desc) = match target {
             EditTarget::Existing(id) => self
                 .app
                 .board
                 .get(id)
-                .map(|t| (t.title.clone(), t.description.clone()))
+                .map(|t| {
+                    let project = self.app.project_text(&t.project);
+                    (t.title.clone(), project, t.description.clone())
+                })
                 .unwrap_or_default(),
-            EditTarget::New(_) => Default::default(),
+            EditTarget::New(_) => (String::new(), self.app.new_task_project(), String::new()),
         };
         let ui = &mut self.ui;
         ui.edit_title = title;
+        ui.edit_project = project;
+        ui.project_menu_open = false;
         ui.edit_desc = text_editor::Content::with_text(&desc);
         ui.link_url.clear();
         ui.attach_path.clear();
@@ -397,6 +484,8 @@ impl Gui {
                     return self.apply(Action::ShowSettings(false));
                 } else if ui.filters_open {
                     ui.filters_open = false;
+                } else if ui.project_menu_open {
+                    ui.project_menu_open = false;
                 } else if ui.status_open.is_some() {
                     ui.status_open = None;
                 } else if app.viewing_file.is_some() {
@@ -494,6 +583,15 @@ async fn pick_file() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_title("Attach a file")
         .pick_file()
+        .await
+        .map(|f| f.path().to_path_buf())
+}
+
+/// Asks for a directory with the system's folder dialog; see [`pick_file`].
+async fn pick_folder(title: &'static str) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .pick_folder()
         .await
         .map(|f| f.path().to_path_buf())
 }

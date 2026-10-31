@@ -1,6 +1,5 @@
-//! User settings. Global settings apply to every project and live in
-//! `$XDG_CONFIG_HOME/tb/settings.json` (falling back to `~/.config`); project
-//! settings live in the project's `.tb/settings.json`.
+//! User settings, which apply to every project and live in
+//! `$XDG_CONFIG_HOME/tb/settings.json` (falling back to `~/.config`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,6 +37,9 @@ pub struct GlobalSettings {
     pub theme: Theme,
     /// Commands run when tasks are created or moved, in every project.
     pub hooks: Vec<Hook>,
+    /// Board columns the user collapsed (`true`) or expanded (`false`) by
+    /// hand. Columns not listed follow `collapse_empty_columns`.
+    pub collapsed_columns: BTreeMap<Status, bool>,
 }
 
 impl Default for GlobalSettings {
@@ -47,6 +49,7 @@ impl Default for GlobalSettings {
             collapse_empty_columns: true,
             theme: Theme::Dark,
             hooks: Vec::new(),
+            collapsed_columns: BTreeMap::new(),
         }
     }
 }
@@ -55,11 +58,7 @@ impl GlobalSettings {
     /// `$XDG_CONFIG_HOME/tb/settings.json`, or `~/.config/tb/settings.json`.
     /// `None` if neither variable is set.
     pub fn default_path() -> Option<PathBuf> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(config.join("tb").join("settings.json"))
+        Some(crate::xdg_dir("XDG_CONFIG_HOME", ".config")?.join("settings.json"))
     }
 
     /// Reads settings from `path`; a missing file gives the defaults.
@@ -76,27 +75,6 @@ impl GlobalSettings {
     pub fn clamped(mut self) -> GlobalSettings {
         self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         self
-    }
-}
-
-/// Settings for one project, kept in its `.tb/settings.json`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProjectSettings {
-    /// Board columns the user collapsed (`true`) or expanded (`false`) by
-    /// hand. Columns not listed follow `GlobalSettings::collapse_empty_columns`.
-    pub collapsed_columns: BTreeMap<Status, bool>,
-}
-
-impl ProjectSettings {
-    /// Reads settings from `path`; a missing file gives the defaults.
-    pub fn load(path: &Path) -> Result<ProjectSettings> {
-        load_json(path)
-    }
-
-    /// Writes settings to `path` atomically.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        save_json(self, path)
     }
 }
 
@@ -143,8 +121,14 @@ mod tests {
                 command: "notify-send moved".into(),
                 pass_task_id: true,
             }],
+            collapsed_columns: BTreeMap::from([(Status::InProgress, true)]),
         };
         s.save(&path).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"in_progress\": true")
+        );
         assert_eq!(GlobalSettings::load(&path).unwrap(), s);
     }
 
@@ -169,20 +153,5 @@ mod tests {
             GlobalSettings::load(&path).unwrap().font_size,
             MAX_FONT_SIZE
         );
-    }
-
-    #[test]
-    fn project_settings_round_trip_with_status_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let mut s = ProjectSettings::default();
-        s.collapsed_columns.insert(Status::InProgress, true);
-        s.save(&path).unwrap();
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\"in_progress\": true")
-        );
-        assert_eq!(ProjectSettings::load(&path).unwrap(), s);
     }
 }

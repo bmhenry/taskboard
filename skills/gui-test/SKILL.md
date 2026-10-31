@@ -31,13 +31,16 @@ Everything goes through `skills/gui-test/scripts/gui.sh` (run `gui.sh help`):
 
 `start` points the app at a fresh project in `$STATE/project` (default
 `$STATE` = `${TMPDIR:-/tmp}/taskboard-gui-$USER`) and sets `XDG_CONFIG_HOME` to
-`$STATE/config`, so tests never touch the real `.tb/` board or the user's global
-settings. Never launch the app against the repo itself for testing.
+`$STATE/config` and `XDG_DATA_HOME` to `$STATE/data`, so tests never touch the
+user's real tasks or settings. Never launch the app or `tb` without those set:
+the real store is shared by every project, and starting in a project that still
+has a `.tb/` folder moves its tasks into the store.
 
-Seed data with `gui.sh tb add ...` / `tb move ...`; the app's file watcher picks it
+Seed data with `gui.sh tb add ...` / `tb move ...` (add `--project DIR` to file a
+task under a second project); the app's file watcher picks it
 up live. Check results the same way — `gui.sh tb list --json` / `tb show ID --json`
-is more reliable than reading state off a screenshot. Saved settings are in
-`$STATE/project/.tb/settings.json` and `$STATE/config/tb/settings.json`. App
+is more reliable than reading state off a screenshot. Tasks are in
+`$STATE/data/tb/tasks.json` and settings in `$STATE/config/tb/settings.json`. App
 stdout/stderr goes to `$STATE/app.log`.
 
 ## Loop

@@ -33,6 +33,8 @@ pub struct Palette {
     pub muted: u32,
     pub accent: u32,
     pub danger: u32,
+    /// Marks problems that need the user's attention, like a missing project.
+    pub warning: u32,
     /// Indexed like [`Status::ALL`].
     pub status: [u32; 6],
     pub primary: u32,
@@ -57,6 +59,7 @@ static DARK: Palette = Palette {
     muted: 0x8F96A3,
     accent: 0x6EA8FE,
     danger: 0xE5534B,
+    warning: 0xE3B341,
     status: [0x8F96A3, 0x6EA8FE, 0xE3B341, 0xD2A8FF, 0xF778BA, 0x56D364],
     primary: 0x2F5FAE,
     primary_hover: 0x3A71CC,
@@ -82,6 +85,7 @@ static LIGHT: Palette = Palette {
     muted: 0x6E6E73,
     accent: 0x0071E3,
     danger: 0xD70015,
+    warning: 0xC98A00,
     status: [0x6E6E73, 0x0071E3, 0xB25F00, 0x8944AB, 0xC4307A, 0x248A3D],
     primary: 0x0071E3,
     primary_hover: 0x0062C4,

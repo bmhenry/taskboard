@@ -1,43 +1,18 @@
-//! The toolbar: title, project path, view switcher, search and filters.
+//! The toolbar: title, view switcher, search and filters.
 
-use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, responsive, row, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Length, Padding};
 use taskboard_core::{DateField, Status, parse_date};
 
 use super::popup::popup;
 use super::theme::{self, BOLD, Pal, Style, rgb};
-use super::widgets::{El, btn, chip, input, label, shorten_path};
+use super::widgets::{El, btn, chip, grow, input, label};
 use super::{EDGE, Gui, Message, SEARCH};
 use crate::app::{Action, EditTarget, View};
 
-/// The longest project path the toolbar shows before collapsing it.
-const MAX_PATH_CHARS: usize = 30;
-/// A generous average glyph width for paths, as a fraction of the font size.
-const PATH_CHAR_WIDTH: f32 = 0.65;
-
 pub fn toolbar(gui: &Gui, window_width: f32) -> El<'_> {
     let (app, p) = (&gui.app, gui.pal());
-    let root = app
-        .store
-        .dir()
-        .parent()
-        .map(|d| d.display().to_string())
-        .unwrap_or_default();
-    // The path gets whatever room the buttons leave.
-    let path = container(responsive(move |size| {
-        let room = (size.width / (12.0 * PATH_CHAR_WIDTH)) as usize;
-        text(shorten_path(&root, room.min(MAX_PATH_CHARS)))
-            .size(12)
-            .color(rgb(p.muted))
-            .wrapping(Wrapping::None)
-            .into()
-    }))
-    .width(Length::Fill)
-    .height(16)
-    .clip(true);
-
-    let mut top = row![text("Taskboard").size(18).font(BOLD), path]
+    let mut top = row![text("Taskboard").size(18).font(BOLD), grow()]
         .spacing(10)
         .align_y(Alignment::Center);
     for (view, name) in [
@@ -96,7 +71,10 @@ pub fn toolbar(gui: &Gui, window_width: f32) -> El<'_> {
 /// The filter button, with the status and date filters in a dropdown below it.
 fn filter_button(gui: &Gui) -> El<'_> {
     let (f, p) = (&gui.app.filter, gui.pal());
-    let active = f.statuses.len() + f.after.is_some() as usize + f.before.is_some() as usize;
+    let active = f.statuses.len()
+        + f.project.is_some() as usize
+        + f.after.is_some() as usize
+        + f.before.is_some() as usize;
     let (label, style) = if active > 0 {
         (format!("Filter ({active}) ▾"), Style::Primary)
     } else {
@@ -120,6 +98,22 @@ fn filter_menu(gui: &Gui) -> El<'_> {
             Message::App(Action::ToggleStatusFilter(status)),
         )
     });
+    // One project at a time; picking the shown one shows them all again.
+    let project_chips = app
+        .board
+        .project_names()
+        .into_iter()
+        .map(|(project, name)| {
+            let on = app.filter.project.as_ref() == Some(&project.path);
+            let pick = (!on).then(|| project.path.clone());
+            chip(
+                p,
+                name,
+                p.accent,
+                on,
+                Message::App(Action::SetProjectFilter(pick)),
+            )
+        });
     let (field_label, next) = match app.filter.date_field {
         DateField::Created => ("Created ▾", DateField::Updated),
         DateField::Updated => ("Updated ▾", DateField::Closed),
@@ -130,6 +124,8 @@ fn filter_menu(gui: &Gui) -> El<'_> {
     let menu = column![
         label(p, "Status"),
         row(chips).spacing(8).wrap().vertical_spacing(8),
+        container(label(p, "Project")).padding(Padding::ZERO.top(6)),
+        row(project_chips).spacing(8).wrap().vertical_spacing(8),
         row![
             container(label(p, "Date")).width(Length::Fill),
             btn(

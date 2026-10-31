@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, Theme};
 use taskboard_core::{
     Board, DateField, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind,
-    NewTask, ProjectSettings, Status, Store, Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date,
+    NewTask, Status, Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks,
+    parse_date, project_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,18 @@ impl Draft {
     }
 }
 
+/// What the editor's project input names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectInput {
+    Empty,
+    /// A project already on the board, by name or directory.
+    Known(PathBuf),
+    /// A directory that exists but has no tasks yet.
+    New(PathBuf),
+    /// A directory that will be created when the task is saved.
+    Missing(PathBuf),
+}
+
 /// Distance in pixels the pointer must travel before a press becomes a drag.
 pub const DRAG_THRESHOLD: f32 = 6.0;
 
@@ -83,6 +96,8 @@ pub enum Action {
     CancelEdit,
     Save {
         title: String,
+        /// A project's name or directory; see [`App::project_input`].
+        project: String,
         description: String,
     },
     Move {
@@ -111,6 +126,16 @@ pub enum Action {
     ViewFile(Option<(Ulid, Ulid)>),
     SetSearch(String),
     ToggleStatusFilter(Status),
+    /// Points a project, and its tasks, at the directory typed or picked in
+    /// `to`, as when the project was moved.
+    RelocateProject {
+        from: PathBuf,
+        to: String,
+    },
+    /// Deletes a project and all its tasks.
+    DeleteProject(PathBuf),
+    /// Show only the project at this directory, or every project.
+    SetProjectFilter(Option<PathBuf>),
     SetDateField(DateField),
     SetDateBounds {
         after: String,
@@ -155,13 +180,15 @@ pub struct App {
     pub settings_open: bool,
     /// Settings were changed without being saved.
     pub settings_dirty: bool,
-    /// Settings for this project, saved in `.tb/settings.json`.
-    pub project_settings: ProjectSettings,
+    /// The project new tasks go in unless the user picks another: the one
+    /// Taskboard was started in, if any.
+    pub default_project: Option<PathBuf>,
+    /// Projects whose directory wasn't there when last checked.
+    pub missing_projects: Vec<PathBuf>,
 }
 
 impl App {
-    /// Opens the board, loads global settings from `settings_path`, and loads
-    /// the project's settings from its `.tb/`.
+    /// Opens the board and loads settings from `settings_path`.
     pub fn new(store: Store, settings_path: Option<PathBuf>) -> App {
         let mut app = App {
             board: Board::default(),
@@ -178,17 +205,14 @@ impl App {
             settings_path,
             settings_open: false,
             settings_dirty: false,
-            project_settings: ProjectSettings::default(),
+            default_project: None,
+            missing_projects: Vec::new(),
         };
         if let Some(path) = &app.settings_path {
             match GlobalSettings::load(path) {
                 Ok(settings) => app.settings = settings,
                 Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
             }
-        }
-        match ProjectSettings::load(&app.store.settings_path()) {
-            Ok(settings) => app.project_settings = settings,
-            Err(e) => app.error = Some(format!("Couldn't read project settings: {e}")),
         }
         app.reload();
         app
@@ -213,9 +237,26 @@ impl App {
                 {
                     self.viewing_file = None;
                 }
+                self.check_projects();
             }
             Err(e) => self.error = Some(format!("Couldn't read tasks: {e}")),
         }
+    }
+
+    /// Notes which projects' directories are gone, such as after being
+    /// moved or deleted outside Taskboard.
+    pub fn check_projects(&mut self) {
+        self.missing_projects = self
+            .board
+            .projects
+            .iter()
+            .filter(|p| !p.path.is_dir())
+            .map(|p| p.path.clone())
+            .collect();
+    }
+
+    pub fn project_missing(&self, path: &Path) -> bool {
+        self.missing_projects.iter().any(|p| p == path)
     }
 
     pub fn selected_task(&self) -> Option<&Task> {
@@ -234,7 +275,7 @@ impl App {
     /// Whether a board column is drawn as a thin strip: as the user last set
     /// it, or by default when it has no tasks and the setting is on.
     pub fn column_collapsed(&self, status: Status) -> bool {
-        self.project_settings
+        self.settings
             .collapsed_columns
             .get(&status)
             .copied()
@@ -252,20 +293,70 @@ impl App {
     }
 
     /// In-progress tasks passing the filter, grouped under their project's
-    /// name. Only the open project is known, so there's at most one group.
+    /// name. Groups are sorted by name; tasks keep their board order.
     pub fn in_progress_groups(&self) -> Vec<(String, Vec<&Task>)> {
-        let tasks = self.visible_column(Status::InProgress);
-        if tasks.is_empty() {
-            return Vec::new();
+        let mut groups: Vec<(String, &Path, Vec<&Task>)> = Vec::new();
+        for task in self.visible_column(Status::InProgress) {
+            match groups.iter_mut().find(|g| g.1 == task.project) {
+                Some(group) => group.2.push(task),
+                None => groups.push((
+                    self.board.project_name(&task.project),
+                    &task.project,
+                    vec![task],
+                )),
+            }
         }
-        // A project opened as "." has no file name until made absolute.
-        let dir = std::fs::canonicalize(self.store.project_dir())
-            .unwrap_or_else(|_| self.store.project_dir().to_path_buf());
-        let name = dir.file_name().map_or_else(
-            || dir.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        vec![(name, tasks)]
+        groups.sort_by(|a, b| (a.0.to_lowercase(), a.1).cmp(&(b.0.to_lowercase(), b.1)));
+        groups
+            .into_iter()
+            .map(|(name, _, tasks)| (name, tasks))
+            .collect()
+    }
+
+    /// Reads the editor's project input: a known project's name or
+    /// directory, or the directory of a new one.
+    pub fn project_input(&self, text: &str) -> ProjectInput {
+        let text = text.trim();
+        if text.is_empty() {
+            return ProjectInput::Empty;
+        }
+        if let Some((p, _)) = self
+            .board
+            .project_names()
+            .into_iter()
+            .find(|(_, n)| n == text)
+        {
+            return ProjectInput::Known(p.path.clone());
+        }
+        let path = project_path(Path::new(text));
+        if self.board.project(&path).is_some() {
+            ProjectInput::Known(path)
+        } else if path.is_dir() {
+            ProjectInput::New(path)
+        } else {
+            ProjectInput::Missing(path)
+        }
+    }
+
+    /// What the editor's project input starts as for a new task: the
+    /// filtered project, or else the default one.
+    pub fn new_task_project(&self) -> String {
+        self.filter
+            .project
+            .as_ref()
+            .or(self.default_project.as_ref())
+            .map(|p| self.project_text(p))
+            .unwrap_or_default()
+    }
+
+    /// How the project input names the project at `path`: by its name if
+    /// it's on the board, else by path.
+    pub fn project_text(&self, path: &Path) -> String {
+        if self.board.project(path).is_some() {
+            self.board.project_name(path)
+        } else {
+            path.display().to_string()
+        }
     }
 
     pub fn apply(&mut self, action: Action) {
@@ -280,6 +371,8 @@ impl App {
             Action::Save { .. }
                 | Action::Move { .. }
                 | Action::Delete(_)
+                | Action::RelocateProject { .. }
+                | Action::DeleteProject(_)
                 | Action::AddLink {
                     owner: Owner::Task(_),
                     ..
@@ -309,9 +402,13 @@ impl App {
                 // Open on a listed task's details rather than an empty pane,
                 // unless that would swap out the task being edited.
                 if view == View::InProgress && self.editing.is_none() {
-                    let listed = self.visible_column(Status::InProgress);
-                    if !listed.iter().any(|t| Some(t.id) == self.selected) {
-                        self.selected = listed.first().map(|t| t.id);
+                    let listed: Vec<Ulid> = self
+                        .in_progress_groups()
+                        .iter()
+                        .flat_map(|(_, tasks)| tasks.iter().map(|t| t.id))
+                        .collect();
+                    if !self.selected.is_some_and(|id| listed.contains(&id)) {
+                        self.selected = listed.first().copied();
                     }
                 }
             }
@@ -326,14 +423,31 @@ impl App {
                 self.editing = None;
                 self.draft = Draft::default();
             }
-            Action::Save { title, description } => {
+            Action::Save {
+                title,
+                project,
+                description,
+            } => {
                 let Some(target) = self.editing else {
                     return Ok(());
+                };
+                // Checked before the project, so a bad title doesn't leave
+                // behind a newly created directory.
+                if title.trim().is_empty() {
+                    return Err(Error::Invalid("title must not be empty".into()));
+                }
+                let project = match self.project_input(&project) {
+                    ProjectInput::Empty => {
+                        return Err(Error::Invalid("choose a project for the task".into()));
+                    }
+                    ProjectInput::Known(path) | ProjectInput::New(path) => path,
+                    ProjectInput::Missing(path) => create_project_dir(&path)?,
                 };
                 match target {
                     EditTarget::Existing(id) => {
                         let patch = TaskPatch {
                             title: Some(title),
+                            project: Some(project),
                             description: Some(description),
                             status: None,
                         };
@@ -343,6 +457,7 @@ impl App {
                     EditTarget::New(status) => {
                         let new = NewTask {
                             title,
+                            project,
                             description,
                             status: Some(status),
                             links: self.draft.links.clone(),
@@ -437,6 +552,35 @@ impl App {
                 }
                 Owner::Draft => self.draft.files.retain(|f| f.id != file),
             },
+            Action::RelocateProject { from, to } => {
+                let to = to.trim();
+                if to.is_empty() {
+                    return Err(Error::Invalid("choose the project's new folder".into()));
+                }
+                let to = project_path(Path::new(to));
+                if !to.is_dir() {
+                    return Err(Error::Invalid(format!("no folder at {}", to.display())));
+                }
+                self.store
+                    .update(|b| b.relocate_project(&from, to.clone()))?;
+                for path in [&mut self.filter.project, &mut self.default_project]
+                    .into_iter()
+                    .flatten()
+                {
+                    if *path == from {
+                        *path = to.clone();
+                    }
+                }
+            }
+            Action::DeleteProject(path) => {
+                self.store.delete_project(&path)?;
+                if self.filter.project.as_ref() == Some(&path) {
+                    self.filter.project = None;
+                }
+                if self.default_project.as_ref() == Some(&path) {
+                    self.default_project = None;
+                }
+            }
             Action::ViewFile(f) => self.viewing_file = f,
             Action::SetSearch(text) => self.filter.text = text,
             Action::ToggleStatusFilter(status) => {
@@ -446,6 +590,7 @@ impl App {
                     self.filter.statuses.push(status);
                 }
             }
+            Action::SetProjectFilter(project) => self.filter.project = project,
             Action::SetDateField(field) => self.filter.date_field = field,
             Action::SetDateBounds { after, before } => {
                 // Unparseable bounds are ignored (and flagged in the UI) rather
@@ -480,10 +625,8 @@ impl App {
             }
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
-                self.project_settings
-                    .collapsed_columns
-                    .insert(status, !collapsed);
-                self.project_settings.save(&self.store.settings_path())?;
+                self.settings.collapsed_columns.insert(status, !collapsed);
+                self.save_settings()?;
             }
             Action::AddHook => {
                 self.settings.hooks.push(Hook::default());
@@ -528,7 +671,7 @@ impl App {
 
     /// Starts the user's hooks for `events`, showing any that fail to start.
     fn run_hooks(&mut self, events: &[TaskEvent]) {
-        let failures = hooks::run(&self.settings.hooks, events, self.store.project_dir());
+        let failures = hooks::run(&self.settings.hooks, events);
         if !failures.is_empty() {
             self.error = Some(failures.join("; "));
         }
@@ -590,18 +733,25 @@ fn open_url(url: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// An app whose store and default project, `app`, are in a temporary directory.
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
-        let app = App::new(Store::open(dir.path()).unwrap(), None);
+        let mut app = App::new(Store::open(&dir.path().join("data")).unwrap(), None);
+        app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
         (dir, app)
+    }
+
+    fn save(app: &mut App, title: &str) {
+        app.apply(Action::Save {
+            title: title.into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
     }
 
     fn add(app: &mut App, title: &str) -> Ulid {
         app.apply(Action::Edit(EditTarget::New(Status::Backlog)));
-        app.apply(Action::Save {
-            title: title.into(),
-            description: String::new(),
-        });
+        save(app, title);
         app.board.column(Status::Backlog).last().unwrap().id
     }
 
@@ -648,10 +798,7 @@ mod tests {
         assert_eq!(app.selected, None);
 
         app.apply(Action::Edit(EditTarget::Existing(a)));
-        app.apply(Action::Save {
-            title: "alpha 2".into(),
-            description: String::new(),
-        });
+        save(&mut app, "alpha 2");
         assert_eq!(app.editing, None);
         assert_eq!(app.selected_task().unwrap().title, "alpha 2");
     }
@@ -681,15 +828,9 @@ mod tests {
         std::fs::remove_file(&gone).unwrap();
 
         // A failed save keeps the draft to try again.
-        app.apply(Action::Save {
-            title: " ".into(),
-            description: String::new(),
-        });
+        save(&mut app, " ");
         assert!(app.error.take().is_some());
-        app.apply(Action::Save {
-            title: "alpha".into(),
-            description: String::new(),
-        });
+        save(&mut app, "alpha");
         assert!(
             app.error
                 .unwrap()
@@ -744,6 +885,97 @@ mod tests {
     }
 
     #[test]
+    fn project_is_picked_by_name_or_directory_and_created_if_missing() {
+        let (dir, mut app) = app();
+        let app_dir = app.default_project.clone().unwrap();
+        // Until it has tasks, the default project is named by its path.
+        assert_eq!(app.new_task_project(), app_dir.display().to_string());
+        let a = add(&mut app, "alpha");
+        assert_eq!(app.new_task_project(), "app");
+        assert_eq!(
+            app.project_input(" app "),
+            ProjectInput::Known(app_dir.clone())
+        );
+        assert_eq!(
+            app.project_input(app_dir.to_str().unwrap()),
+            ProjectInput::Known(app_dir.clone())
+        );
+        assert_eq!(app.project_input(""), ProjectInput::Empty);
+
+        // A project typed as a directory that doesn't exist yet is created on save.
+        let fresh = dir.path().join("new/thing");
+        let typed = fresh.to_str().unwrap();
+        assert_eq!(
+            app.project_input(typed),
+            ProjectInput::Missing(fresh.clone())
+        );
+        app.apply(Action::Edit(EditTarget::Existing(a)));
+        app.apply(Action::Save {
+            title: "alpha".into(),
+            project: typed.into(),
+            description: String::new(),
+        });
+        assert_eq!(app.error, None);
+        assert!(fresh.is_dir());
+        let fresh = fresh.canonicalize().unwrap();
+        assert_eq!(app.board.get(a).unwrap().project, fresh);
+        assert_eq!(app.project_input("thing"), ProjectInput::Known(fresh));
+
+        // Neither a blank project nor a blank title saves, and a blank title
+        // doesn't create the directory.
+        let other = dir.path().join("other");
+        for (title, project) in [("beta", ""), (" ", other.to_str().unwrap())] {
+            app.apply(Action::Edit(EditTarget::New(Status::Open)));
+            app.apply(Action::Save {
+                title: title.into(),
+                project: project.into(),
+                description: String::new(),
+            });
+            assert!(app.error.take().is_some());
+        }
+        assert!(!other.exists());
+        assert!(app.board.column(Status::Open).is_empty());
+    }
+
+    #[test]
+    fn missing_project_can_be_relocated_or_deleted() {
+        let (dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        let old = app.default_project.clone().unwrap();
+        app.apply(Action::SetProjectFilter(Some(old.clone())));
+        std::fs::rename(&old, dir.path().join("moved")).unwrap();
+        app.reload();
+        assert!(app.project_missing(&old));
+
+        // The new folder must exist.
+        let to = dir.path().join("moved");
+        for typed in ["", dir.path().join("nowhere").to_str().unwrap()] {
+            app.apply(Action::RelocateProject {
+                from: old.clone(),
+                to: typed.into(),
+            });
+            assert!(app.error.take().is_some());
+        }
+        app.apply(Action::RelocateProject {
+            from: old.clone(),
+            to: to.to_str().unwrap().into(),
+        });
+        assert_eq!(app.error, None);
+        let to = to.canonicalize().unwrap();
+        assert_eq!(app.board.get(a).unwrap().project, to);
+        assert!(app.missing_projects.is_empty());
+        assert_eq!(app.filter.project.as_ref(), Some(&to));
+        assert_eq!(app.default_project.as_ref(), Some(&to));
+
+        app.apply(Action::Select(Some(a)));
+        app.apply(Action::DeleteProject(to));
+        assert_eq!(app.error, None);
+        assert!(app.board.tasks.is_empty() && app.board.projects.is_empty());
+        assert_eq!(app.selected, None);
+        assert_eq!(app.filter.project, None);
+    }
+
+    #[test]
     fn font_size_is_clamped_and_saved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
@@ -773,6 +1005,8 @@ mod tests {
     #[test]
     fn empty_columns_collapsed_by_default() {
         let (dir, mut app) = app();
+        let settings = dir.path().join("settings.json");
+        app.settings_path = Some(settings.clone());
         let a = add(&mut app, "alpha");
         assert!(!app.column_collapsed(Status::Backlog));
         assert!(app.column_collapsed(Status::Closed));
@@ -785,7 +1019,7 @@ mod tests {
         // A column with tasks collapses too, and stays as set once emptied.
         app.apply(Action::ToggleColumn(Status::Backlog));
         assert!(app.column_collapsed(Status::Backlog));
-        let reopened = App::new(Store::open(dir.path()).unwrap(), None);
+        let reopened = App::new(app.store.clone(), Some(settings));
         assert!(reopened.column_collapsed(Status::Backlog));
         app.apply(Action::Delete(a));
         app.apply(Action::ToggleColumn(Status::Backlog));
@@ -867,9 +1101,13 @@ mod tests {
         let (dir, mut app) = app();
         assert!(app.in_progress_groups().is_empty());
         let a = add(&mut app, "alpha");
+        // Zeta's project sorts last but comes first on the board.
+        app.default_project = Some(create_project_dir(&dir.path().join("Zed")).unwrap());
+        let z = add(&mut app, "zeta");
+        app.default_project = Some(dir.path().join("app").canonicalize().unwrap());
         let b = add(&mut app, "beta");
         let c = add(&mut app, "gamma");
-        for id in [b, c] {
+        for id in [z, b, c] {
             app.apply(Action::Move {
                 id,
                 status: Status::InProgress,
@@ -878,12 +1116,15 @@ mod tests {
         }
         assert_eq!(app.error, None);
 
-        let groups = app.in_progress_groups();
-        let name = dir.path().file_name().unwrap().to_string_lossy();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].0, name);
-        let ids: Vec<Ulid> = groups[0].1.iter().map(|t| t.id).collect();
-        assert_eq!(ids, [b, c]);
+        let groups: Vec<(String, Vec<Ulid>)> = app
+            .in_progress_groups()
+            .into_iter()
+            .map(|(name, tasks)| (name, tasks.iter().map(|t| t.id).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [("app".into(), vec![b, c]), ("Zed".into(), vec![z])]
+        );
 
         // A selection outside the view gives way to its first task...
         app.apply(Action::Select(Some(a)));
@@ -903,7 +1144,9 @@ mod tests {
 
         // The search filter applies here too, so a hidden task gives way.
         app.apply(Action::SetSearch("beta".into()));
-        let ids: Vec<Ulid> = app.in_progress_groups()[0].1.iter().map(|t| t.id).collect();
+        let groups = app.in_progress_groups();
+        assert_eq!(groups.len(), 1);
+        let ids: Vec<Ulid> = groups[0].1.iter().map(|t| t.id).collect();
         assert_eq!(ids, [b]);
         app.apply(Action::Select(Some(c)));
         app.apply(Action::SetView(View::InProgress));

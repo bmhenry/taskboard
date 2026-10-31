@@ -1,20 +1,22 @@
 //! `tb`: add and query Taskboard tasks from the command line.
 
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use taskboard_core::{
     Board, DateField, Error, Filter, GlobalSettings, Hook, Link, LinkKind, NewTask, Status, Store,
-    Task, TaskEvent, TaskPatch, Ulid, hooks, parse_date, short_id,
+    Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path,
+    project_root, short_id,
 };
 
 #[derive(Parser, Debug)]
 #[command(
     name = "tb",
     version,
-    about = "Manage Taskboard tasks for the current project"
+    about = "Manage Taskboard tasks for the current project",
+    long_about = "Manage Taskboard tasks for the current project.\n\nTasks for every project are kept together in $XDG_DATA_HOME/tb (or ~/.local/share/tb). New tasks go in the current project, and `list` shows its tasks; other commands find a task by ID in any project."
 )]
 struct Cli {
     /// Print JSON instead of human-readable output.
@@ -22,6 +24,7 @@ struct Cli {
     json: bool,
 
     /// Project directory (defaults to the current git repo root, or the current directory).
+    /// Created if it doesn't exist when adding a task.
     #[arg(long, global = true, value_name = "DIR")]
     project: Option<PathBuf>,
 
@@ -50,12 +53,12 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         file: Vec<PathBuf>,
     },
-    /// List tasks, grouped by status. Closed tasks are hidden unless asked for.
+    /// List the project's tasks, grouped by status. Closed tasks are hidden unless asked for.
     #[command(alias = "ls")]
     List(ListArgs),
     /// Show one task in full.
     Show { id: String },
-    /// Change a task's title, description, or status.
+    /// Change a task's title, description, status, or project.
     Edit {
         id: String,
         #[arg(short, long)]
@@ -65,6 +68,9 @@ enum Command {
         description: Option<String>,
         #[arg(short, long)]
         status: Option<Status>,
+        /// Move the task to the project in DIR, creating it if needed.
+        #[arg(long, value_name = "DIR")]
+        to_project: Option<PathBuf>,
     },
     /// Move a task to a status and/or position (1 = top of the column).
     #[command(alias = "mv")]
@@ -85,6 +91,22 @@ enum Command {
     /// Manage a task's attached files.
     #[command(subcommand)]
     File(FileCommand),
+    /// List, relocate, or delete projects.
+    #[command(subcommand)]
+    Project(ProjectCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum ProjectCommand {
+    /// List projects, flagging any whose folder is missing.
+    #[command(alias = "ls")]
+    List,
+    /// Point a project and its tasks at its new folder, after it moved.
+    #[command(alias = "mv")]
+    Move { from: PathBuf, to: PathBuf },
+    /// Delete a project with all its tasks and their files.
+    #[command(alias = "rm")]
+    Delete { dir: PathBuf },
 }
 
 #[derive(Args, Debug, Default)]
@@ -95,6 +117,9 @@ struct ListArgs {
     /// Include closed tasks.
     #[arg(short, long)]
     all: bool,
+    /// List tasks from every project, not just the current one.
+    #[arg(short = 'A', long)]
+    all_projects: bool,
     /// Search title, description, and links.
     #[arg(short, long)]
     query: Option<String>,
@@ -137,7 +162,7 @@ enum LinkCommand {
 
 #[derive(Subcommand, Debug)]
 enum FileCommand {
-    /// Copy a file into .tb/ and attach it to a task.
+    /// Copy a file into the task store and attach it to a task.
     Add { id: String, path: PathBuf },
     /// Detach and delete a file, by name or file id suffix.
     Rm { id: String, file: String },
@@ -147,9 +172,11 @@ enum FileCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let start = match cli.project.clone() {
-        Some(p) => p,
-        None => std::env::current_dir().expect("current directory is accessible"),
+    let project = match &cli.project {
+        Some(dir) => project_path(dir),
+        None => project_path(&project_root(
+            &std::env::current_dir().expect("current directory is accessible"),
+        )),
     };
     let json = cli.json;
     // Only commands that create or move tasks can fire hooks.
@@ -164,8 +191,28 @@ fn main() -> ExitCode {
         }),
         None => GlobalSettings::default(),
     };
-    let result = Store::discover(&start)
-        .and_then(|store| run(cli, &store, &settings.hooks, &mut io::stdout().lock()));
+    let result = Store::open_default().and_then(|store| {
+        // Bring over tasks kept in the project from before the store was shared.
+        match store.import_legacy(&project) {
+            Ok(0) => {}
+            Ok(n) => eprintln!(
+                "tb: moved {n} tasks from {} into {}",
+                project.display(),
+                store.dir().display()
+            ),
+            Err(e) => eprintln!(
+                "tb: warning: couldn't import {}/.tb: {e}",
+                project.display()
+            ),
+        }
+        run(
+            cli,
+            &store,
+            &project,
+            &settings.hooks,
+            &mut io::stdout().lock(),
+        )
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -179,10 +226,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<(), Error> {
+/// Runs `cli` against `store`, with `project` as the current project's directory.
+fn run(
+    cli: Cli,
+    store: &Store,
+    project: &Path,
+    hooks: &[Hook],
+    out: &mut impl Write,
+) -> Result<(), Error> {
     let json = cli.json;
     let fire = |events: Vec<TaskEvent>| {
-        for failure in hooks::run(hooks, &events, store.project_dir()) {
+        for failure in hooks::run(hooks, &events) {
             eprintln!("tb: warning: {failure}");
         }
     };
@@ -210,6 +264,7 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
                 .collect();
             let new = NewTask {
                 title,
+                project: create_project_dir(project)?,
                 description: description.map(read_text).transpose()?.unwrap_or_default(),
                 status,
                 links,
@@ -230,7 +285,10 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
             }
         }
         Command::List(args) => {
-            let filter = list_filter(&args)?;
+            let mut filter = list_filter(&args)?;
+            if !args.all_projects {
+                filter.project = Some(project.to_path_buf());
+            }
             let board = store.load()?;
             let tasks: Vec<&Task> = Status::ALL
                 .into_iter()
@@ -240,7 +298,8 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
             if json {
                 print_json(out, &tasks)?;
             } else {
-                write_list(out, &tasks)?;
+                let board = args.all_projects.then_some(&board);
+                write_list(out, &tasks, board)?;
             }
         }
         Command::Show { id } => {
@@ -249,7 +308,7 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
             if json {
                 print_json(out, task)?;
             } else {
-                write_task(out, task)?;
+                write_task(out, task, &board.project_name(&task.project))?;
             }
         }
         Command::Edit {
@@ -257,9 +316,11 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
             title,
             description,
             status,
+            to_project,
         } => {
             let patch = TaskPatch {
                 title,
+                project: to_project.as_deref().map(create_project_dir).transpose()?,
                 description: description.map(read_text).transpose()?,
                 status,
             };
@@ -355,6 +416,66 @@ fn run(cli: Cli, store: &Store, hooks: &[Hook], out: &mut impl Write) -> Result<
             let bytes = std::fs::read(store.file_path(att))?;
             out.write_all(&bytes)?;
         }
+        Command::Project(ProjectCommand::List) => {
+            let board = store.load()?;
+            let projects: Vec<_> = board
+                .project_names()
+                .into_iter()
+                .map(|(p, name)| {
+                    let tasks = board.tasks.iter().filter(|t| t.project == p.path).count();
+                    (p, name, tasks, !p.path.is_dir())
+                })
+                .collect();
+            if json {
+                let rows: Vec<_> = projects
+                    .iter()
+                    .map(|(p, name, tasks, missing)| {
+                        serde_json::json!({
+                            "path": p.path, "name": name, "tasks": tasks, "missing": missing,
+                        })
+                    })
+                    .collect();
+                print_json(out, &rows)?;
+            } else if projects.is_empty() {
+                writeln!(out, "No projects.")?;
+            }
+            for (p, name, tasks, missing) in projects.iter().filter(|_| !json) {
+                let missing = if *missing { "  (folder missing)" } else { "" };
+                writeln!(
+                    out,
+                    "{name}  {}  [{}]{missing}",
+                    p.path.display(),
+                    plural(*tasks, "task")
+                )?;
+            }
+        }
+        Command::Project(ProjectCommand::Move { from, to }) => {
+            let from = project_path(&from);
+            let to = project_path(&to);
+            if !to.is_dir() {
+                return Err(Error::Invalid(format!("no folder at {}", to.display())));
+            }
+            store.update(|b| b.relocate_project(&from, to.clone()))?;
+            if json {
+                print_json(out, &serde_json::json!({ "moved": from, "to": to }))?;
+            } else {
+                writeln!(out, "Moved {} to {}", from.display(), to.display())?;
+            }
+        }
+        Command::Project(ProjectCommand::Delete { dir }) => {
+            let dir = project_path(&dir);
+            let tasks = store.delete_project(&dir)?;
+            if json {
+                print_json(out, &serde_json::json!({ "deleted": dir, "tasks": tasks }))?;
+            } else {
+                writeln!(
+                    out,
+                    "Deleted {} and {}",
+                    dir.display(),
+                    plural(tasks, "task")
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -384,6 +505,7 @@ fn list_filter(args: &ListArgs) -> Result<Filter, Error> {
     Ok(Filter {
         text: args.query.clone().unwrap_or_default(),
         statuses,
+        project: None,
         date_field: args.date.0,
         after: args.after.as_deref().map(parse_date).transpose()?,
         before: args.before.as_deref().map(parse_date).transpose()?,
@@ -436,7 +558,9 @@ fn print_json<T: serde::Serialize + ?Sized>(out: &mut impl Write, value: &T) -> 
     Ok(())
 }
 
-fn write_list(out: &mut impl Write, tasks: &[&Task]) -> io::Result<()> {
+/// Writes `tasks` grouped by status, naming each task's project when given
+/// the `board` they're from.
+fn write_list(out: &mut impl Write, tasks: &[&Task], board: Option<&Board>) -> io::Result<()> {
     if tasks.is_empty() {
         return writeln!(out, "No tasks.");
     }
@@ -461,12 +585,21 @@ fn write_list(out: &mut impl Write, tasks: &[&Task]) -> io::Result<()> {
         } else {
             format!("  ({})", extras.join(", "))
         };
-        writeln!(out, "  {}  {}{}", task.short_id(), task.title, extras)?;
+        let project = board.map_or_else(String::new, |b| {
+            format!("[{}]  ", b.project_name(&task.project))
+        });
+        writeln!(
+            out,
+            "  {}  {project}{}{}",
+            task.short_id(),
+            task.title,
+            extras
+        )?;
     }
     Ok(())
 }
 
-fn write_task(out: &mut impl Write, task: &Task) -> io::Result<()> {
+fn write_task(out: &mut impl Write, task: &Task, project_name: &str) -> io::Result<()> {
     let fmt = |d: chrono::DateTime<chrono::Utc>| {
         d.with_timezone(&chrono::Local)
             .format("%Y-%m-%d %H:%M")
@@ -474,6 +607,7 @@ fn write_task(out: &mut impl Write, task: &Task) -> io::Result<()> {
     };
     writeln!(out, "{}  {}", task.short_id(), task.title)?;
     writeln!(out, "id:       {}", task.id)?;
+    writeln!(out, "project:  {project_name} ({})", task.project.display())?;
     writeln!(out, "status:   {}", task.status)?;
     writeln!(out, "created:  {}", fmt(task.created))?;
     writeln!(out, "updated:  {}", fmt(task.updated))?;
@@ -515,11 +649,17 @@ fn plural(n: usize, word: &str) -> String {
 mod tests {
     use super::*;
 
-    fn tb(store: &Store, args: &[&str]) -> String {
+    /// Runs `tb` with the project `project` under the store's directory.
+    fn tb_in(store: &Store, project: &str, args: &[&str]) -> String {
         let cli = Cli::try_parse_from(std::iter::once("tb").chain(args.iter().copied())).unwrap();
         let mut out = Vec::new();
-        run(cli, store, &[], &mut out).unwrap();
+        let project = store.dir().join(project);
+        run(cli, store, &project, &[], &mut out).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    fn tb(store: &Store, args: &[&str]) -> String {
+        tb_in(store, "app", args)
     }
 
     #[test]
@@ -554,6 +694,50 @@ mod tests {
         tb(&store, &["close", &created.short_id()]);
         assert!(!tb(&store, &["list"]).contains("Write docs"));
         assert!(tb(&store, &["list", "--all"]).contains("Write docs"));
+    }
+
+    #[test]
+    fn list_shows_the_current_project_unless_asked_for_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        tb(&store, &["add", "Mine"]);
+        let theirs: Task =
+            serde_json::from_str(&tb_in(&store, "other", &["--json", "add", "Theirs"])).unwrap();
+        // Adding created the project's directory.
+        assert!(dir.path().join("other").is_dir());
+
+        let listed = tb(&store, &["list"]);
+        assert!(listed.contains("Mine") && !listed.contains("Theirs"));
+        let all = tb(&store, &["list", "-A"]);
+        assert!(all.contains("[other]  Theirs"));
+
+        tb(
+            &store,
+            &[
+                "edit",
+                &theirs.short_id(),
+                "--to-project",
+                dir.path().join("app").to_str().unwrap(),
+            ],
+        );
+        assert!(tb(&store, &["list"]).contains("Theirs"));
+    }
+
+    #[test]
+    fn project_move_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        tb(&store, &["add", "Mine"]);
+        let app = dir.path().join("app");
+        let moved = dir.path().join("moved");
+        std::fs::rename(&app, &moved).unwrap();
+        assert!(tb(&store, &["project", "ls"]).contains("(folder missing)"));
+
+        let (app, moved) = (app.to_str().unwrap(), moved.to_str().unwrap());
+        tb(&store, &["project", "mv", app, moved]);
+        assert!(!tb(&store, &["project", "ls"]).contains("missing"));
+        assert!(tb(&store, &["project", "rm", moved]).contains("1 task"));
+        assert_eq!(tb(&store, &["project", "ls"]), "No projects.\n");
     }
 
     #[test]

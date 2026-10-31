@@ -1,5 +1,6 @@
 //! Shared core for `taskboard` (GUI) and `tb` (CLI): the task model, pure
-//! board operations, search filters, and the on-disk `.tb/` store.
+//! board operations, search filters, and the on-disk store shared by every
+//! project.
 
 pub mod board;
 pub mod filter;
@@ -12,10 +13,10 @@ pub use board::{NewTask, TaskPatch};
 pub use filter::{DateField, Filter, parse_date};
 pub use hooks::{Hook, HookEvent, TaskEvent};
 pub use model::{
-    Attachment, Board, FileKind, Link, LinkKind, Status, Task, default_link_kind, short_id,
+    Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task, default_link_kind, short_id,
 };
-pub use settings::{GlobalSettings, ProjectSettings};
-pub use store::{Store, project_root};
+pub use settings::GlobalSettings;
+pub use store::{Store, create_project_dir, project_path, project_root};
 pub use ulid::Ulid;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,3 +36,13 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// `$<var>/tb`, falling back to `~/<fallback>/tb` as the XDG base directory
+/// spec says. `None` if neither variable is set.
+fn xdg_dir(var: &str, fallback: &str) -> Option<std::path::PathBuf> {
+    let base = std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(fallback)))?;
+    Some(base.join("tb"))
+}

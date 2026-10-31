@@ -24,11 +24,11 @@ wait_for_window() {
 }
 
 launch_app() {
-  # Project and global settings both live in the sandbox, so test runs never
-  # touch the real board or ~/.config/tb. Without WAYLAND_DISPLAY, winit
+  # Tasks and settings both live in the sandbox, so test runs never touch the
+  # real ~/.local/share/tb or ~/.config/tb. Without WAYLAND_DISPLAY, winit
   # can't open the window on the user's desktop instead of Xvfb; Iced's
   # software renderer needs no GPU.
-  DISPLAY=$(cat "$STATE/display") XDG_CONFIG_HOME=$STATE/config ICED_BACKEND=tiny-skia \
+  DISPLAY=$(cat "$STATE/display") XDG_CONFIG_HOME=$STATE/config XDG_DATA_HOME=$STATE/data ICED_BACKEND=tiny-skia \
     nohup env -u WAYLAND_DISPLAY "$BIN" "$STATE/project" >"$STATE/app.log" 2>&1 &
   echo $! >"$STATE/app.pid"
   wait_for_window
@@ -43,7 +43,7 @@ case $cmd in
     running && die "already running (display $(cat "$STATE/display")); use 'gui.sh stop' first"
     size=${1:-1600x950}
     (cd "$REPO" && cargo build -q -p taskboard -p tb)
-    rm -rf "$STATE"; mkdir -p "$STATE/project/.tb" "$STATE/config"
+    rm -rf "$STATE"; mkdir -p "$STATE/project/.git" "$STATE/config" "$STATE/data"
     for n in $(seq 99 140); do [[ -e /tmp/.X11-unix/X$n || -e /tmp/.X$n-lock ]] || break; done
     nohup Xvfb ":$n" -screen 0 "${size}x24" -nolisten tcp >"$STATE/xvfb.log" 2>&1 &
     echo $! >"$STATE/xvfb.pid"
@@ -91,10 +91,12 @@ case $cmd in
     need_running; x xdotool type --delay "${TB_GUI_TYPE_DELAY:-120}" -- "$1" ;;
   key) # key KEY...: xdotool key names, e.g. Return Escape ctrl+a
     need_running; x xdotool key --delay 50 "$@" ;;
-  tb) # tb ARGS...: run the tb CLI against the sandbox project
-    need_running; XDG_CONFIG_HOME=$STATE/config "$REPO/target/debug/tb" --project "$STATE/project" "$@" ;;
+  tb) # tb ARGS...: run the tb CLI against the sandbox store; --project DIR picks another project
+    need_running
+    project=(--project "$STATE/project"); [[ " $* " == *" --project "* ]] && project=()
+    XDG_CONFIG_HOME=$STATE/config XDG_DATA_HOME=$STATE/data "$REPO/target/debug/tb" "${project[@]}" "$@" ;;
   env) # env: print paths
-    echo "state $STATE"; echo "project $STATE/project"; echo "log $STATE/app.log"
+    echo "state $STATE"; echo "project $STATE/project"; echo "data $STATE/data/tb"; echo "log $STATE/app.log"
     running && echo "display $(cat "$STATE/display")" || echo "not running"
     ;;
   *)

@@ -6,12 +6,14 @@ use chrono::Utc;
 use ulid::Ulid;
 
 use crate::hooks::{self, TaskEvent};
-use crate::model::{Attachment, Board, FileKind, SCHEMA_VERSION};
+use crate::model::{Attachment, Board, FileKind, Project, SCHEMA_VERSION};
 use crate::{Error, Result};
 
-pub const TB_DIR: &str = ".tb";
+/// Where projects kept their tasks before the store was shared.
+pub const LEGACY_DIR: &str = ".tb";
+/// What a project's legacy directory is renamed to once imported.
+pub const IMPORTED_DIR: &str = ".tb.imported";
 const TASKS_FILE: &str = "tasks.json";
-const SETTINGS_FILE: &str = "settings.json";
 const LOCK_FILE: &str = "lock";
 const FILES_DIR: &str = "files";
 
@@ -25,7 +27,30 @@ pub fn project_root(start: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// Handle on a project's `.tb/` directory.
+/// The absolute form of a project directory the user named: a leading `~/`
+/// is expanded, a relative path is taken from the current directory, and
+/// symlinks are resolved if the directory exists.
+pub fn project_path(dir: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let dir = match (dir.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => dir.to_path_buf(),
+    };
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
+    fs::canonicalize(&dir).unwrap_or(dir)
+}
+
+/// Like [`project_path`], creating the directory first if it doesn't exist.
+pub fn create_project_dir(dir: &Path) -> Result<PathBuf> {
+    let dir = project_path(dir);
+    if !dir.is_dir() {
+        fs::create_dir_all(&dir)
+            .map_err(|e| Error::Invalid(format!("couldn't create {}: {e}", dir.display())))?;
+    }
+    Ok(fs::canonicalize(&dir)?)
+}
+
+/// Handle on the directory holding every project's tasks.
 ///
 /// Readers never lock: writes replace `tasks.json` with an atomic rename, so a
 /// read always sees a whole file. Writers serialize on an advisory lock so
@@ -36,39 +61,33 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens the store for the project containing `start`, creating `.tb/` if needed.
-    pub fn discover(start: &Path) -> Result<Store> {
-        Store::open(&project_root(start))
+    /// `$XDG_DATA_HOME/tb`, or `~/.local/share/tb`. `None` if neither
+    /// variable is set.
+    pub fn default_dir() -> Option<PathBuf> {
+        crate::xdg_dir("XDG_DATA_HOME", ".local/share")
     }
 
-    /// Opens the store in `project_root/.tb/`, creating it if needed.
-    pub fn open(project_root: &Path) -> Result<Store> {
-        let dir = project_root.join(TB_DIR);
+    /// Opens the store at [`Store::default_dir`].
+    pub fn open_default() -> Result<Store> {
+        let dir = Store::default_dir()
+            .ok_or_else(|| Error::Invalid("neither XDG_DATA_HOME nor HOME is set".into()))?;
+        Store::open(&dir)
+    }
+
+    /// Opens the store in `dir`, creating it if needed.
+    pub fn open(dir: &Path) -> Result<Store> {
         fs::create_dir_all(dir.join(FILES_DIR))?;
-        // Tasks are local planning state, not something to commit.
-        let ignore = dir.join(".gitignore");
-        if !ignore.exists() {
-            fs::write(ignore, "*\n")?;
-        }
-        Ok(Store { dir })
+        Ok(Store {
+            dir: dir.to_path_buf(),
+        })
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// The project directory `.tb/` lives in; hooks run here.
-    pub fn project_dir(&self) -> &Path {
-        self.dir.parent().unwrap_or(&self.dir)
-    }
-
     pub fn tasks_path(&self) -> PathBuf {
         self.dir.join(TASKS_FILE)
-    }
-
-    /// The project's settings file (see [`crate::settings::ProjectSettings`]).
-    pub fn settings_path(&self) -> PathBuf {
-        self.dir.join(SETTINGS_FILE)
     }
 
     pub fn file_path(&self, att: &Attachment) -> PathBuf {
@@ -78,7 +97,7 @@ impl Store {
     /// Reads the board; a missing file is an empty board.
     pub fn load(&self) -> Result<Board> {
         match fs::read_to_string(self.tasks_path()) {
-            Ok(text) => parse_board(&text),
+            Ok(text) => parse_board(&text, None),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Board::default()),
             Err(e) => Err(e.into()),
         }
@@ -127,7 +146,7 @@ impl Store {
         Ok(())
     }
 
-    /// Copies `src` into `.tb/files/` and attaches it to task `id`.
+    /// Copies `src` into the store's `files/` and attaches it to task `id`.
     pub fn attach(&self, id: Ulid, src: &Path) -> Result<Attachment> {
         let name = src
             .file_name()
@@ -188,6 +207,60 @@ impl Store {
         Ok(att)
     }
 
+    /// Moves the tasks and files from `project`'s legacy `.tb/` directory into
+    /// the store, then renames that directory to `.tb.imported`. Tasks already
+    /// in the store are skipped, so an import interrupted before the rename can
+    /// simply run again. Returns how many tasks were imported; 0 if there's
+    /// nothing to import.
+    pub fn import_legacy(&self, project: &Path) -> Result<usize> {
+        let legacy = project.join(LEGACY_DIR);
+        let text = match fs::read_to_string(legacy.join(TASKS_FILE)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let project = project_path(project);
+        let old = parse_board(&text, Some(&project))?;
+        let imported = self.update(|board| {
+            let mut tasks: Vec<_> = old
+                .tasks
+                .into_iter()
+                .filter(|t| board.get(t.id).is_none())
+                .collect();
+            // Imported tasks go below each column's existing ones, in their order.
+            tasks.sort_by_key(|t| (t.status, t.order, t.id));
+            for mut task in tasks.iter().cloned() {
+                for att in &task.files {
+                    // Attachment paths are relative, so they carry over as-is.
+                    let dest = self.file_path(att);
+                    if !dest.exists() {
+                        fs::copy(legacy.join(&att.path), dest)?;
+                    }
+                }
+                task.order = board.column(task.status).len() as u32;
+                board.tasks.push(task);
+            }
+            if !tasks.is_empty() && board.project(&project).is_none() {
+                board.projects.push(Project {
+                    path: project.clone(),
+                });
+            }
+            Ok(tasks.len())
+        })?;
+        fs::rename(&legacy, project.join(IMPORTED_DIR))?;
+        Ok(imported)
+    }
+
+    /// Removes the project at `path` along with its tasks and their files.
+    /// Returns how many tasks were deleted.
+    pub fn delete_project(&self, path: &Path) -> Result<usize> {
+        let tasks = self.update(|b| b.remove_project(path))?;
+        for att in tasks.iter().flat_map(|t| &t.files) {
+            let _ = fs::remove_file(self.file_path(att));
+        }
+        Ok(tasks.len())
+    }
+
     /// Deletes task `id` along with its attached files.
     pub fn delete(&self, id: Ulid) -> Result<()> {
         let task = self.update(|b| b.delete(id))?;
@@ -198,9 +271,10 @@ impl Store {
     }
 }
 
-/// Parses `tasks.json`, migrating older schemas to the current one.
-pub fn parse_board(text: &str) -> Result<Board> {
-    let value: serde_json::Value = serde_json::from_str(text)?;
+/// Parses `tasks.json`, migrating older schemas to the current one. Version 1
+/// boards belonged to a single project, given as `legacy_project`.
+pub fn parse_board(text: &str, legacy_project: Option<&Path>) -> Result<Board> {
+    let mut value: serde_json::Value = serde_json::from_str(text)?;
     let version = value
         .get("schema_version")
         .and_then(|v| v.as_u64())
@@ -209,7 +283,18 @@ pub fn parse_board(text: &str) -> Result<Board> {
     if version > SCHEMA_VERSION {
         return Err(Error::UnsupportedSchema(version));
     }
-    // Migrations from older versions go here, each upgrading `value` by one step.
+    // Each migration upgrades `value` by one version.
+    if version < 2 {
+        let project = legacy_project
+            .ok_or_else(|| Error::Invalid("tasks.json is from a single-project board".into()))?;
+        let project = serde_json::to_value(project)?;
+        if let Some(tasks) = value.get_mut("tasks").and_then(|t| t.as_array_mut()) {
+            for task in tasks.iter_mut().filter_map(|t| t.as_object_mut()) {
+                task.insert("project".into(), project.clone());
+            }
+        }
+        value["schema_version"] = SCHEMA_VERSION.into();
+    }
     Ok(serde_json::from_value(value)?)
 }
 
@@ -217,6 +302,7 @@ pub fn parse_board(text: &str) -> Result<Board> {
 mod tests {
     use super::*;
     use crate::board::NewTask;
+    use crate::model::Status;
 
     #[test]
     fn update_persists_and_attaches_files() {
@@ -226,6 +312,7 @@ mod tests {
             .update(|b| {
                 b.create(NewTask {
                     title: "first".into(),
+                    project: dir.path().to_path_buf(),
                     ..Default::default()
                 })
             })
@@ -257,6 +344,7 @@ mod tests {
                         .update(|b| {
                             b.create(NewTask {
                                 title: format!("t{i}"),
+                                project: "/p".into(),
                                 ..Default::default()
                             })
                         })
@@ -272,7 +360,57 @@ mod tests {
 
     #[test]
     fn rejects_newer_schema() {
-        let err = parse_board(r#"{"schema_version": 999, "tasks": []}"#).unwrap_err();
+        let err = parse_board(r#"{"schema_version": 999, "tasks": []}"#, None).unwrap_err();
         assert!(matches!(err, Error::UnsupportedSchema(999)));
+    }
+
+    #[test]
+    fn imports_a_legacy_project_board_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data")).unwrap();
+        let existing = store
+            .update(|b| {
+                b.create(NewTask {
+                    title: "existing".into(),
+                    project: "/elsewhere".into(),
+                    status: Some(Status::Backlog),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+
+        // A version 1 board, as `.tb/` held it, with one attached file.
+        let project = dir.path().join("app");
+        let legacy = project.join(LEGACY_DIR);
+        fs::create_dir_all(legacy.join("files")).unwrap();
+        fs::write(legacy.join("files/01M5X724HRT6FPK984034NF3M3.md"), "# hi").unwrap();
+        fs::write(
+            legacy.join("tasks.json"),
+            r#"{"schema_version": 1, "tasks": [{
+                "id": "01M5X724HRT6FPK984034NF3M2", "title": "old", "status": "backlog",
+                "order": 0, "created": "2026-10-26T22:59:53Z", "updated": "2026-10-26T22:59:53Z",
+                "files": [{"id": "01M5X724HRT6FPK984034NF3M3", "name": "notes.md",
+                           "path": "files/01M5X724HRT6FPK984034NF3M3.md", "kind": "markdown"}]
+            }]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(store.import_legacy(&project).unwrap(), 1);
+        assert!(!legacy.exists());
+        assert!(project.join(IMPORTED_DIR).join("tasks.json").exists());
+        assert_eq!(store.import_legacy(&project).unwrap(), 0);
+
+        let board = store.load().unwrap();
+        let ids: Vec<Ulid> = board.column(Status::Backlog).iter().map(|t| t.id).collect();
+        let old: Ulid = "01M5X724HRT6FPK984034NF3M2".parse().unwrap();
+        assert_eq!(ids, [existing, old]);
+        let task = board.get(old).unwrap();
+        let project = fs::canonicalize(&project).unwrap();
+        assert_eq!(task.project, project);
+        assert_eq!(board.project_name(&project), "app");
+        assert_eq!(
+            fs::read_to_string(store.file_path(&task.files[0])).unwrap(),
+            "# hi"
+        );
     }
 }

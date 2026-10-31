@@ -1,8 +1,9 @@
 //! User hooks: commands run when a task is created or moved to another
-//! status. Both the GUI and `tb` run them, after the change is saved.
+//! status. Both the GUI and `tb` run them, after the change is saved, in the
+//! task's project directory.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,12 @@ pub struct Hook {
 }
 
 /// Something that happened to a task, for matching against hooks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEvent {
     pub event: HookEvent,
     pub task: Ulid,
+    /// The task's project directory, where its hooks run.
+    pub project: PathBuf,
 }
 
 /// Set in every hook's environment. Hooks don't run while it's set, so a
@@ -56,23 +59,27 @@ pub fn events(before: &Board, after: &Board) -> Vec<TaskEvent> {
                 Some(status) if *status != t.status => HookEvent::Moved,
                 Some(_) => return None,
             };
-            Some(TaskEvent { event, task: t.id })
+            Some(TaskEvent {
+                event,
+                task: t.id,
+                project: t.project.clone(),
+            })
         })
         .collect()
 }
 
-/// Starts every hook matching each event, in `dir`, without waiting for them
-/// to finish. Hooks with a blank command are skipped, and none run from
+/// Starts every hook matching each event, in the event's project directory,
+/// without waiting for them to finish. Hooks with a blank command are skipped, and none run from
 /// inside a hook (see [`IN_HOOK_ENV`]). Returns a message for each hook that
 /// couldn't be started; the rest still run.
-pub fn run(hooks: &[Hook], events: &[TaskEvent], dir: &Path) -> Vec<String> {
+pub fn run(hooks: &[Hook], events: &[TaskEvent]) -> Vec<String> {
     let mut failures = Vec::new();
     if std::env::var_os(IN_HOOK_ENV).is_some() {
         return failures;
     }
     for ev in events {
         for hook in hooks.iter().filter(|h| h.event == ev.event) {
-            if let Err(e) = spawn(hook, ev.task, dir) {
+            if let Err(e) = spawn(hook, ev.task, &ev.project) {
                 failures.push(format!(
                     "Hook `{}` failed to start: {e}",
                     hook.command.trim()
@@ -186,6 +193,7 @@ mod tests {
         let mut before = Board::default();
         let new = |title: &str, status| NewTask {
             title: title.into(),
+            project: "/p".into(),
             status: Some(status),
             ..Default::default()
         };
@@ -201,11 +209,13 @@ mod tests {
             [
                 TaskEvent {
                     event: HookEvent::Moved,
-                    task: a
+                    task: a,
+                    project: "/p".into(),
                 },
                 TaskEvent {
                     event: HookEvent::Created,
-                    task: c
+                    task: c,
+                    project: "/p".into(),
                 },
             ]
         );
@@ -241,8 +251,9 @@ mod tests {
         let ev = TaskEvent {
             event: HookEvent::Moved,
             task,
+            project: dir.path().to_path_buf(),
         };
-        let failures = run(&hooks, &[ev], dir.path());
+        let failures = run(&hooks, &[ev]);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("/no/such/program"));
 

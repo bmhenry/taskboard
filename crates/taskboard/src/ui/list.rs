@@ -1,13 +1,14 @@
 //! The list view, and the In Progress view's sidebar.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Length, Padding};
 use taskboard_core::{Status, Task};
 
 use super::board::card_body;
 use super::theme::{self, BOLD, MONO, Pal, rgb};
-use super::widgets::{El, count_badge, label};
+use super::widgets::{El, count_badge, label, missing_project_badge};
 use super::{Gui, Message, panels};
 use crate::app::Action;
 
@@ -26,13 +27,18 @@ pub fn list(gui: &Gui) -> El<'_> {
             .format("%Y-%m-%d %H:%M")
             .to_string();
         let selected = app.selected == Some(task.id);
+        let missing = app
+            .project_missing(&task.project)
+            .then(|| missing_project_badge(p, &task.project, 14.0));
         let cells = list_row(
             p,
             Some(task.status),
+            missing,
             [
                 task.status.label().to_string(),
                 task.short_id(),
                 task.title.clone(),
+                app.board.project_name(&task.project),
                 updated,
             ],
         );
@@ -64,7 +70,8 @@ pub fn list(gui: &Gui) -> El<'_> {
     let header = list_row(
         p,
         None,
-        ["Status", "ID", "Title", "Updated"].map(String::from),
+        None,
+        ["Status", "ID", "Title", "Project", "Updated"].map(String::from),
     );
     container(column![
         header,
@@ -82,21 +89,41 @@ pub fn list(gui: &Gui) -> El<'_> {
     .into()
 }
 
-/// One row of the list table; `status` is `None` for the header.
-fn list_row<'a>(p: Pal, status: Option<Status>, cells: [String; 4]) -> El<'a> {
+/// One row of the list table; `status` is `None` for the header. `badge` goes
+/// before the title.
+fn list_row<'a>(
+    p: Pal,
+    status: Option<Status>,
+    badge: Option<El<'a>>,
+    cells: [String; 5],
+) -> El<'a> {
     let header = status.is_none();
     let size = if header { 12 } else { 14 };
     let first = status.map_or(p.muted, |s| p.status_color(s));
-    let [status_cell, id, title, updated] = cells;
+    let [status_cell, id, title, project, updated] = cells;
     row![
         container(text(status_cell).size(size).color(rgb(first))).width(120),
         container(text(id).size(size).font(MONO).color(rgb(p.muted))).width(90),
         container(
-            text(title)
-                .size(size)
-                .color(rgb(if header { p.muted } else { p.text }))
+            row![]
+                .push(badge)
+                .push(
+                    text(title)
+                        .size(size)
+                        .color(rgb(if header { p.muted } else { p.text }))
+                )
+                .spacing(6)
+                .align_y(Alignment::Center)
         )
         .width(Length::Fill),
+        container(
+            text(project)
+                .size(size)
+                .color(rgb(p.muted))
+                .wrapping(Wrapping::None)
+        )
+        .width(160)
+        .clip(true),
         container(text(updated).size(size).color(rgb(p.muted))).width(140),
     ]
     .spacing(12)
@@ -162,9 +189,14 @@ fn in_progress_item<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     let selected = gui.app.selected == Some(task.id);
     // The source link pill inside takes its own clicks.
     button(
-        container(card_body(p, task))
-            .padding(10)
-            .width(Length::Fill),
+        container(card_body(
+            p,
+            task,
+            None,
+            gui.app.project_missing(&task.project),
+        ))
+        .padding(10)
+        .width(Length::Fill),
     )
     .padding(0)
     .width(Length::Fill)

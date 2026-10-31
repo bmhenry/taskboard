@@ -1,7 +1,8 @@
-//! `taskboard`: a local Kanban GUI over the project's `.tb/` tasks.
+//! `taskboard`: a local Kanban GUI over every project's tasks.
 //!
-//! Usage: `taskboard [DIR]` — DIR defaults to the current directory; the
-//! project is the enclosing git repo's root if there is one.
+//! Usage: `taskboard [DIR]` — DIR is the project new tasks go in by default.
+//! Without it, that's the git repo the current directory is in, if any (or
+//! the current directory, if it already has tasks).
 
 mod app;
 mod markdown;
@@ -11,26 +12,44 @@ mod watch;
 
 use std::path::PathBuf;
 
-use taskboard_core::{GlobalSettings, Store};
+use taskboard_core::{GlobalSettings, Store, project_path, project_root};
 
 use app::App;
 use ui::Gui;
 use ui::theme;
 
 fn main() -> iced::Result {
-    let start = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
+    let named = std::env::args_os().nth(1).map(PathBuf::from);
+    let start = named
+        .clone()
         .unwrap_or_else(|| std::env::current_dir().expect("current directory is accessible"));
-    let store = match Store::discover(&start) {
+    let project = project_path(&project_root(&start));
+    let store = match Store::open_default() {
         Ok(store) => store,
         Err(e) => {
-            eprintln!("taskboard: couldn't open {}: {e}", start.display());
+            eprintln!("taskboard: couldn't open the task store: {e}");
             std::process::exit(1);
         }
     };
+    // Bring over tasks kept in the project from before the store was shared.
+    let import_error = match store.import_legacy(&project) {
+        Ok(_) => None,
+        Err(e) => Some(format!("Couldn't import {}/.tb: {e}", project.display())),
+    };
     iced::application(
-        move || Gui::new(App::new(store.clone(), GlobalSettings::default_path())),
+        move || {
+            let mut app = App::new(store.clone(), GlobalSettings::default_path());
+            // Started from somewhere that isn't a project (like ~), new
+            // tasks get no project until one is picked.
+            let is_project = named.is_some()
+                || project.join(".git").exists()
+                || app.board.project(&project).is_some();
+            app.default_project = is_project.then(|| project.clone());
+            if let Some(e) = &import_error {
+                app.error = Some(e.clone());
+            }
+            Gui::new(app)
+        },
         Gui::update,
         Gui::view,
     )

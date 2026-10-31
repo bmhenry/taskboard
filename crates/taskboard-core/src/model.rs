@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -9,12 +9,15 @@ use ulid::Ulid;
 use crate::Error;
 
 /// Current version of the on-disk `tasks.json` schema.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The whole contents of `tasks.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     pub schema_version: u32,
+    /// Every project a task has been filed under, in the order first used.
+    #[serde(default)]
+    pub projects: Vec<Project>,
     pub tasks: Vec<Task>,
 }
 
@@ -22,15 +25,26 @@ impl Default for Board {
     fn default() -> Self {
         Board {
             schema_version: SCHEMA_VERSION,
+            projects: Vec::new(),
             tasks: Vec::new(),
         }
     }
+}
+
+/// A directory tasks are filed under, usually a git repository. Its name is
+/// worked out from the other projects' paths; see [`Board::project_name`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    /// Absolute path; it identifies the project.
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Ulid,
     pub title: String,
+    /// The [`Project`] directory the task belongs to.
+    pub project: PathBuf,
     #[serde(default)]
     pub description: String,
     pub status: Status,
@@ -213,13 +227,13 @@ impl FileKind {
     }
 }
 
-/// A file copied into `.tb/files/`, stored under its ULID so names never collide.
+/// A file copied into the store's `files/`, stored under its ULID so names never collide.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: Ulid,
     /// The file's original name, shown in the UI.
     pub name: String,
-    /// Path relative to the `.tb/` directory.
+    /// Path relative to the store's directory.
     pub path: String,
     pub kind: FileKind,
 }
@@ -244,6 +258,7 @@ mod tests {
         let id = board
             .create(crate::NewTask {
                 title: "t".into(),
+                project: "/p".into(),
                 ..Default::default()
             })
             .unwrap();
