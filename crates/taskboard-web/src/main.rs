@@ -10,8 +10,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use taskboard_core::{GlobalSettings, Store, project_path, project_root};
-use taskboard_web::Config;
 use taskboard_web::auth::{self, HostName};
+use taskboard_web::{Config, assets};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -27,7 +27,8 @@ struct Cli {
     /// one is given. Others are refused, to stop DNS rebinding.
     #[arg(long, value_name = "NAME[:PORT]")]
     allow_host: Vec<HostName>,
-    /// Serve the web UI from this directory (trunk's `dist/`).
+    /// Serve the web UI from this directory (trunk's `dist/`), rather than
+    /// the one built into the daemon.
     #[arg(long = "static", value_name = "DIR")]
     static_dir: Option<PathBuf>,
     /// The project new tasks go in by default. Without it, that's the git
@@ -85,6 +86,12 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if cli.static_dir.is_none() && assets::BUILT_IN.is_none() {
+        eprintln!(
+            "taskboard-web: built without the web UI; build it with scripts/build-web.sh, \
+             or pass --static DIR"
+        );
+    }
     eprintln!("taskboard-web: serving http://{addr}/?token={token}");
     let app = taskboard_web::router(Config {
         store,
@@ -92,6 +99,7 @@ async fn main() -> ExitCode {
         project: project_path(&project_root(&start)),
         named,
         static_dir: cli.static_dir,
+        bundle: assets::BUILT_IN,
         token,
         addr,
         allow_hosts: cli.allow_host,
