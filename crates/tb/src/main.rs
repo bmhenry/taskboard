@@ -291,6 +291,7 @@ fn run(
                 position: settings.new_task_position,
                 epic,
                 parent: parent.map(|(id, _)| id),
+                id: None,
             };
             let (id, events) = store.update_with_events(|b| b.create(new))?;
             // Hooks run once the files are attached, so they see the whole task.

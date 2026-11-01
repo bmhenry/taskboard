@@ -68,6 +68,10 @@ pub struct Gui {
     /// How many commands have been started, so a board loaded before the
     /// latest one is dropped.
     commands: u64,
+    /// How many loads of the board have been started, and the latest one
+    /// shown, so loads that finish out of order don't go back in time.
+    loads: u64,
+    shown_load: u64,
     /// The board is to be reloaded once no effects are left.
     stale: bool,
 }
@@ -192,8 +196,8 @@ pub enum Message {
     Ran(Result<Outcome, String>),
     /// The running settings save finished.
     SettingsSaved(Result<(), String>),
-    /// The board, loaded once this many commands had been started.
-    Loaded(u64, Result<Board, String>),
+    /// A board that was loaded.
+    Loaded(LoadStamp, Result<Board, String>),
     Tick,
     HoverCard(Ulid, bool),
     /// A card was dragged to a point; it's as big as the rectangle.
@@ -218,6 +222,8 @@ impl Gui {
             platform: Box::new(platform),
             running: None,
             commands: 0,
+            loads: 0,
+            shown_load: 0,
             stale: false,
         }
     }
@@ -355,9 +361,9 @@ impl Gui {
             };
         }
         if std::mem::take(&mut self.stale) {
-            let commands = self.commands;
+            let stamp = self.load_stamp();
             return Task::perform(self.platform.load_board(), move |board| {
-                Message::Loaded(commands, board)
+                Message::Loaded(stamp, board)
             });
         }
         Task::none()
@@ -558,19 +564,23 @@ impl Gui {
                 // Reloaded even if it failed, to undo its change to the board.
                 self.stale = true;
                 let ok = result.is_ok();
+                let viewing = self.app.viewing_file;
                 self.app.finished(&command, result);
-                return self.ran(command, ok);
+                let opened = self.app.viewing_file != viewing;
+                return self.ran(command, ok, opened);
             }
             Message::SettingsSaved(result) => {
                 self.running = None;
                 self.app.settings_saved(result);
             }
-            Message::Loaded(commands, board) => {
+            Message::Loaded(stamp, board) => {
                 // A board loaded before the latest command started, or
                 // without the changes of those waiting, would undo them until
-                // the reload that follows them.
+                // the reload that follows them. One loaded before the board
+                // shown is older than it.
                 let waiting = self.app.outbox.iter().any(|e| matches!(e, Effect::Run(_)));
-                if commands == self.commands && !waiting {
+                if stamp.commands == self.commands && !waiting && stamp.load > self.shown_load {
+                    self.shown_load = stamp.load;
                     self.app.loaded(board);
                 }
             }
@@ -709,21 +719,35 @@ impl Gui {
         Task::none()
     }
 
-    /// Updates the file viewer for a command that finished, and whether it
-    /// worked.
-    fn ran(&mut self, command: Command, ok: bool) -> Task<Message> {
+    /// Starts a load of the board.
+    fn load_stamp(&mut self) -> LoadStamp {
+        self.loads += 1;
+        LoadStamp {
+            load: self.loads,
+            commands: self.commands,
+        }
+    }
+
+    /// Updates the file viewer for a command that finished: whether it
+    /// worked, and whether the app opened a file it made in the viewer.
+    fn ran(&mut self, command: Command, ok: bool, opened: bool) -> Task<Message> {
         let ui = &mut self.ui;
         match command {
-            // The new file is empty; it opens ready to edit. The popup stays
-            // open with the typed name to fix if creating failed.
-            Command::NewFile { .. } if ok && self.app.viewing_file.is_some() => {
-                ui.new_file_for = None;
-                ui.file_shown = self.app.viewing_file;
-                ui.file_text = Some(String::new());
-                ui.file_editable = true;
-                ui.file_image = None;
-                ui.file_edit = Some(text_editor::Content::new());
-                return iced::widget::operation::focus(FILE_EDITOR);
+            Command::NewFile { task, .. } if ok => {
+                // The popup stays open with the typed name to fix if
+                // creating failed.
+                if ui.new_file_for == Some(task) {
+                    ui.new_file_for = None;
+                }
+                // The new file is empty; it opens ready to edit.
+                if opened {
+                    ui.file_shown = self.app.viewing_file;
+                    ui.file_text = Some(String::new());
+                    ui.file_editable = true;
+                    ui.file_image = None;
+                    ui.file_edit = Some(text_editor::Content::new());
+                    return iced::widget::operation::focus(FILE_EDITOR);
+                }
             }
             // Edit mode is left once the text is saved, unless more was
             // typed meanwhile.
@@ -916,6 +940,14 @@ fn typed_path(text: &str) -> PathBuf {
     }
 }
 
+/// When a load of the board was started: the `load`th, after `commands`
+/// commands; see [`Message::Loaded`].
+#[derive(Debug, Clone, Copy)]
+pub struct LoadStamp {
+    load: u64,
+    commands: u64,
+}
+
 /// `dialog` centered over a scrim that covers the window. A press on the
 /// scrim sends `on_close`.
 fn modal<'a>(dialog: El<'a>, on_close: Message) -> El<'a> {
@@ -995,8 +1027,9 @@ mod tests {
             };
             let _ = gui.update(message);
         }
+        let stamp = gui.load_stamp();
         let board = now(gui.platform.load_board());
-        let _ = gui.update(Message::Loaded(gui.commands, board));
+        let _ = gui.update(Message::Loaded(stamp, board));
         if let Some((task, file)) = gui.ui.file_shown
             && gui.ui.file_text.is_none()
             && gui.ui.file_image.is_none()
@@ -1175,11 +1208,37 @@ mod tests {
     }
 
     #[test]
+    fn a_new_file_doesnt_replace_a_file_opened_meanwhile() {
+        let (_dir, mut gui, file) = gui_with_file("one");
+        let _ = gui.update(Message::ToggleNewFile(file.0));
+        let _ = gui.update(Message::NewFileName("plan".into()));
+        let _ = gui.update(Message::CreateFile(file.0));
+        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        settle(&mut gui);
+        assert_eq!(gui.app.error, None);
+        assert_eq!(gui.app.viewing_file, Some(file));
+        assert_eq!(gui.ui.file_text.as_deref(), Some("one"));
+        assert!(gui.ui.file_edit.is_none());
+        assert_eq!(gui.app.board.get(file.0).unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn loads_that_finish_out_of_order_are_dropped() {
+        let (dir, mut gui, (task, _)) = gui_with_file("");
+        let (first, old) = (gui.load_stamp(), now(gui.platform.load_board()));
+        store(&dir).update(|b| b.promote(task)).unwrap(); // as if `tb promote` ran
+        let (second, new) = (gui.load_stamp(), now(gui.platform.load_board()));
+        let _ = gui.update(Message::Loaded(second, new));
+        let _ = gui.update(Message::Loaded(first, old));
+        assert!(gui.app.board.get(task).unwrap().epic);
+    }
+
+    #[test]
     fn a_board_loaded_before_a_command_started_is_dropped() {
         let (_dir, mut gui, (task, _)) = gui_with_file("");
-        let (loaded_after, old) = (gui.commands, now(gui.platform.load_board()));
+        let (stamp, old) = (gui.load_stamp(), now(gui.platform.load_board()));
         let _ = gui.update(Message::App(Action::Promote(task)));
-        let _ = gui.update(Message::Loaded(loaded_after, old));
+        let _ = gui.update(Message::Loaded(stamp, old));
         assert!(gui.app.board.get(task).unwrap().epic);
         settle(&mut gui);
         assert!(gui.app.board.get(task).unwrap().epic);

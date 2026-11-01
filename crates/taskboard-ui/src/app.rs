@@ -226,6 +226,12 @@ pub struct App {
     pub missing_projects: Vec<PathBuf>,
     /// Effects waiting to be done, oldest first.
     pub(crate) outbox: VecDeque<Effect>,
+    /// The editor's save that's being run, and the task it writes. The
+    /// editor stays open until it's done, so a failure loses nothing.
+    pub(crate) saving: Option<(EditTarget, Ulid)>,
+    /// Where the viewer was when each queued new file was asked for,
+    /// oldest first; see [`App::finished`].
+    new_file_viewer: VecDeque<Option<(Ulid, Ulid)>>,
 }
 
 impl App {
@@ -248,6 +254,8 @@ impl App {
             default_project: None,
             missing_projects: Vec::new(),
             outbox: VecDeque::new(),
+            saving: None,
+            new_file_viewer: VecDeque::new(),
         };
         match settings {
             Ok(settings) => app.settings = settings,
@@ -280,7 +288,15 @@ impl App {
                 }
                 self.check_projects();
             }
-            Err(e) => self.error = Some(format!("Couldn't read tasks: {e}")),
+            // Kept with an earlier error, like the failed command this
+            // load was meant to undo.
+            Err(e) => {
+                let msg = format!("Couldn't read tasks: {e}");
+                self.error = Some(match self.error.take() {
+                    Some(earlier) => format!("{earlier}; {msg}"),
+                    None => msg,
+                });
+            }
         }
     }
 
@@ -409,6 +425,19 @@ impl App {
     /// Shows how running `command` went. If it failed, its change to the
     /// board is undone when the board is next loaded.
     pub fn finished(&mut self, command: &Command, result: Result<Outcome, String>) {
+        let viewer_then = match command {
+            Command::NewFile { .. } => self.new_file_viewer.pop_front().flatten(),
+            _ => None,
+        };
+        let saved = match command {
+            Command::Create { id: Some(id), .. } | Command::Edit { id, .. } => {
+                self.saving.filter(|(_, saving)| saving == id)
+            }
+            _ => None,
+        };
+        if saved.is_some() {
+            self.saving = None;
+        }
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -418,6 +447,15 @@ impl App {
         };
         if let Some(msg) = outcome.message() {
             self.error = Some(msg);
+        }
+        // The editor closes, unless it's been moved on to something else.
+        if let Some((target, _)) = saved
+            && self.editing == Some(target)
+        {
+            self.editing = None;
+            if let EditTarget::New(_) = target {
+                self.draft = Draft::default();
+            }
         }
         // Files only exist once the store has made them, so they're added
         // here rather than when the command was made.
@@ -431,7 +469,8 @@ impl App {
             {
                 t.files.push(file.clone());
             }
-            if matches!(command, Command::NewFile { .. }) {
+            // Opened unless another file was opened meanwhile.
+            if matches!(command, Command::NewFile { .. }) && self.viewing_file == viewer_then {
                 self.viewing_file = Some((*task, file.id));
             }
         }
@@ -483,7 +522,8 @@ impl App {
                 project: typed,
                 description,
             } => {
-                let Some(target) = self.editing else {
+                // Saved once at a time; see `saving`.
+                let (Some(target), None) = (self.editing, self.saving) else {
                     return Ok(());
                 };
                 if title.trim().is_empty() {
@@ -513,11 +553,15 @@ impl App {
                             description: Some(description),
                         };
                         self.change(command, |b| b.edit(id, patch))?;
-                        self.selected = Some(id);
+                        self.saving = Some((target, id));
                     }
                     EditTarget::New(status) => {
                         let position = self.settings.new_task_position;
+                        // Chosen here so the task the board shows now is
+                        // the one the store makes.
+                        let id = Ulid::generate();
                         let new = NewTask {
+                            id: Some(id),
                             title: title.clone(),
                             project,
                             description: description.clone(),
@@ -536,15 +580,14 @@ impl App {
                             position: Some(position),
                             epic: false,
                             parent: None,
+                            id: Some(id),
                         };
-                        // The draft is kept if creating fails, e.g. on an empty title.
                         self.change(command, |b| b.create(new))?;
-                        self.draft = Draft::default();
+                        self.saving = Some((target, id));
                         // A new task closes the panel rather than selecting it.
                         self.selected = None;
                     }
                 }
-                self.editing = None;
             }
             Action::Move {
                 id,
@@ -630,7 +673,10 @@ impl App {
                 Owner::Draft => self.draft.files.retain(|f| f.id != file),
             },
             // Opened in the viewer once it's made; see `finished`.
-            Action::NewFile { task, name } => self.run(Command::NewFile { task, name }),
+            Action::NewFile { task, name } => {
+                self.new_file_viewer.push_back(self.viewing_file);
+                self.run(Command::NewFile { task, name });
+            }
             Action::WriteFile { task, file, text } => {
                 self.run(Command::WriteFile { task, file, text });
             }
@@ -1378,6 +1424,96 @@ mod tests {
         assert!(app.error.take().unwrap().contains("isn't an epic"));
         assert_eq!(app.board.get(child).unwrap().parent, None);
         assert!(!app.board.get(epic).unwrap().epic);
+    }
+
+    #[test]
+    fn a_new_task_can_be_changed_before_the_store_has_it() {
+        let (_dir, mut app) = app();
+        app.app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Save {
+            title: "alpha".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        let id = app.board.column(Status::Open)[0].id;
+        app.app.apply(Action::Move {
+            id,
+            status: Status::Closed,
+            position: None,
+        });
+        app.app.apply(Action::AddLink {
+            owner: Owner::Task(id),
+            url: "https://example.com".into(),
+            kind: LinkKind::Context,
+        });
+        assert_eq!(app.error, None);
+
+        // The store made it with the same id, so the later commands found it.
+        app.settle();
+        assert_eq!(app.error, None);
+        let task = app.board.get(id).unwrap();
+        assert_eq!(task.status, Status::Closed);
+        assert_eq!(task.links.len(), 1);
+    }
+
+    #[test]
+    fn the_editor_stays_open_until_the_store_has_saved() {
+        let (dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        *app.platform.failure.lock().unwrap() = Some("disk full".into());
+
+        // A new task's draft is kept to try again.
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::AddLink {
+            owner: Owner::Draft,
+            url: "https://example.com".into(),
+            kind: LinkKind::Source,
+        });
+        app.apply(Action::Attach {
+            owner: Owner::Draft,
+            source: FileSource::Path { path: src },
+        });
+        let draft = app.draft.clone();
+        app.app.apply(Action::Save {
+            title: "beta".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        // Shown on the board, but still being edited, until saved.
+        assert_eq!(app.board.column(Status::Open).len(), 1);
+        assert_eq!(app.editing, Some(EditTarget::New(Status::Open)));
+        app.settle();
+        assert_eq!(app.error.take().as_deref(), Some("disk full"));
+        assert_eq!(app.editing, Some(EditTarget::New(Status::Open)));
+        assert_eq!(app.draft, draft);
+        assert!(app.board.column(Status::Open).is_empty());
+
+        // So is an edit, which the reload undoes.
+        app.apply(Action::Edit(EditTarget::Existing(a)));
+        save(&mut app, "alpha 2");
+        assert_eq!(app.error.take().as_deref(), Some("disk full"));
+        assert_eq!(app.editing, Some(EditTarget::Existing(a)));
+        assert_eq!(app.board.get(a).unwrap().title, "alpha");
+
+        *app.platform.failure.lock().unwrap() = None;
+        save(&mut app, "alpha 2");
+        assert_eq!(app.error, None);
+        assert_eq!(app.editing, None);
+        assert_eq!(app.selected, Some(a));
+        assert_eq!(app.board.get(a).unwrap().title, "alpha 2");
+    }
+
+    #[test]
+    fn a_failed_load_keeps_the_error_before_it() {
+        let (_dir, mut app) = app();
+        app.error = Some("disk full".into());
+        app.loaded(Err("no access".into()));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("disk full; Couldn't read tasks: no access")
+        );
     }
 
     #[test]

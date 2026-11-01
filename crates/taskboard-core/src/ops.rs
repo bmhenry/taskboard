@@ -50,6 +50,9 @@ pub enum Command {
         #[serde(default)]
         epic: bool,
         parent: Option<Ulid>,
+        /// The new task's id, chosen by the caller so it can show the task
+        /// before this runs; a new one if `None`. It must be unused.
+        id: Option<Ulid>,
     },
     /// Changes a task's title, project or description; `None` leaves one alone.
     Edit {
@@ -254,6 +257,7 @@ pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Re
             position,
             epic,
             parent,
+            id,
         } => {
             let position = position.unwrap_or(settings.new_task_position);
             let mut made = MadeDirs::default();
@@ -271,6 +275,7 @@ pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Re
                     position,
                     epic,
                     parent,
+                    id,
                 })
             });
             let (id, events) = made.keep_if(res)?;
@@ -527,6 +532,7 @@ mod tests {
             position: None,
             epic: false,
             parent: None,
+            id: None,
         }
     }
 
@@ -574,6 +580,7 @@ mod tests {
                 position: None,
                 epic: false,
                 parent: None,
+                id: None,
             })
             .unwrap();
         let Output::Created { id } = out.output else {
@@ -598,6 +605,26 @@ mod tests {
             fs::read(f.store.file_path(&task.files[1])).unwrap(),
             [1, 2, 3]
         );
+    }
+
+    #[test]
+    fn create_uses_the_id_given_unless_taken() {
+        let f = fixture();
+        let project = f.project.display().to_string();
+        let chosen = Ulid::generate();
+        let mut cmd = create("chosen", &project);
+        if let Command::Create { id, .. } = &mut cmd {
+            *id = Some(chosen);
+        }
+        let out = f.run(cmd.clone()).unwrap();
+        assert_eq!(out.output, Output::Created { id: chosen });
+        assert_eq!(f.board().get(chosen).unwrap().title, "chosen");
+
+        // Taken: refused, leaving the store as it was.
+        let before = f.board();
+        let err = f.run(cmd).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(f.board(), before);
     }
 
     #[test]
@@ -1235,6 +1262,7 @@ mod tests {
                 position: Some(NewTaskPosition::Bottom),
                 epic: true,
                 parent: Some(file),
+                id: Some(id),
             },
             json!({
                 "type": "create", "title": "t", "project": "~/p", "description": "d",
@@ -1244,7 +1272,7 @@ mod tests {
                     {"type": "path", "path": "/tmp/a.md"},
                     {"type": "bytes", "name": "b.png", "bytes": "AP8B"},
                 ],
-                "position": "bottom", "epic": true, "parent": f,
+                "position": "bottom", "epic": true, "parent": f, "id": i,
             }),
         );
         golden(

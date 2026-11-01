@@ -20,6 +20,9 @@ pub struct TestPlatform {
     pub settings_path: Option<PathBuf>,
     /// The settings last saved, which commands run hooks from.
     settings: Arc<Mutex<GlobalSettings>>,
+    /// While set, every command fails with this error without running, as
+    /// when the store can't be written or a web request is refused.
+    pub failure: Arc<Mutex<Option<String>>>,
 }
 
 impl TestPlatform {
@@ -28,6 +31,7 @@ impl TestPlatform {
             store,
             settings_path,
             settings: Arc::default(),
+            failure: Arc::default(),
         }
     }
 }
@@ -36,7 +40,13 @@ impl Platform for TestPlatform {
     fn run(&self, command: Command) -> BoxFuture<Result<Outcome, String>> {
         let store = self.store.clone();
         let settings = self.settings.lock().unwrap().clone();
-        Box::pin(async move { ops::execute(&store, &settings, command).map_err(|e| e.to_string()) })
+        let failure = self.failure.lock().unwrap().clone();
+        Box::pin(async move {
+            match failure {
+                Some(e) => Err(e),
+                None => ops::execute(&store, &settings, command).map_err(|e| e.to_string()),
+            }
+        })
     }
 
     fn load_board(&self) -> BoxFuture<Result<Board, String>> {
