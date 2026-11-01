@@ -1,13 +1,18 @@
 //! GUI state and the actions that change it. Kept free of rendering code so
 //! it can be tested without a window.
+//!
+//! Actions that change the store are optimistic: [`App::apply`] makes the
+//! change to its own [`Board`] at once, and leaves a [`Command`] in its
+//! outbox for the [`crate::Platform`] to run; see [`Effect`].
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use taskboard_core::ops::{Command, FileSource, Outcome, Output};
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, NewTaskPosition, Theme};
 use taskboard_core::{
     Board, DateField, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind,
-    NewTask, Status, Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks,
-    parse_date, project_path,
+    NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,26 +52,31 @@ pub struct DraftFile {
     pub id: Ulid,
     pub name: String,
     pub kind: FileKind,
-    pub source: PathBuf,
+    pub source: FileSource,
 }
 
 impl Draft {
-    /// Adds the file at `source`, checking it exists now rather than when the
-    /// task is saved.
-    fn attach(&mut self, source: &Path) -> taskboard_core::Result<()> {
-        if !source.is_file() {
-            return Err(Error::Invalid(format!("not a file: {}", source.display())));
-        }
-        let name = source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| Error::Invalid(format!("bad file name: {}", source.display())))?
-            .to_string();
+    /// Adds the file from `source`, checking a path names a file now rather
+    /// than when the task is saved.
+    fn attach(&mut self, source: FileSource) -> taskboard_core::Result<()> {
+        let name = match &source {
+            FileSource::Path { path } => {
+                // TODO(Platform): asks `Platform::path_kind` instead.
+                if !path.is_file() {
+                    return Err(Error::Invalid(format!("not a file: {}", path.display())));
+                }
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| Error::Invalid(format!("bad file name: {}", path.display())))?
+                    .to_string()
+            }
+            FileSource::Bytes { name, .. } => name.clone(),
+        };
         self.files.push(DraftFile {
             id: Ulid::generate(),
             kind: FileKind::from_name(&name),
             name,
-            source: source.to_path_buf(),
+            source,
         });
         Ok(())
     }
@@ -126,7 +136,7 @@ pub enum Action {
     },
     Attach {
         owner: Owner,
-        path: PathBuf,
+        source: FileSource,
     },
     Detach {
         owner: Owner,
@@ -163,7 +173,6 @@ pub enum Action {
         before: String,
     },
     ClearFilters,
-    OpenUrl(String),
     DismissError,
     ShowSettings(bool),
     SetFontSize(u16),
@@ -182,8 +191,18 @@ pub enum Action {
     SaveSettings,
 }
 
+/// Work [`App::apply`] leaves for the [`crate::Platform`], to be done one
+/// at a time, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    /// A change already made to [`App::board`], to make in the store too.
+    /// Its result goes to [`App::finished`], and then the board is reloaded.
+    Run(Command),
+    /// Its result goes to [`App::settings_saved`].
+    SaveSettings(GlobalSettings),
+}
+
 pub struct App {
-    pub store: Store,
     pub board: Board,
     pub view: View,
     pub filter: Filter,
@@ -197,8 +216,6 @@ pub struct App {
     pub date_inputs: (String, String),
     pub error: Option<String>,
     pub settings: GlobalSettings,
-    /// Where global settings are saved; `None` keeps changes in memory only.
-    pub settings_path: Option<PathBuf>,
     pub settings_open: bool,
     /// Settings were changed without being saved.
     pub settings_dirty: bool,
@@ -207,14 +224,16 @@ pub struct App {
     pub default_project: Option<PathBuf>,
     /// Projects whose directory wasn't there when last checked.
     pub missing_projects: Vec<PathBuf>,
+    /// Effects waiting to be done, oldest first.
+    pub(crate) outbox: VecDeque<Effect>,
 }
 
 impl App {
-    /// Opens the board and loads settings from `settings_path`.
-    pub fn new(store: Store, settings_path: Option<PathBuf>) -> App {
+    /// Starts with settings and a board loaded by the platform, showing
+    /// why either couldn't be.
+    pub fn new(settings: Result<GlobalSettings, String>, board: Result<Board, String>) -> App {
         let mut app = App {
             board: Board::default(),
-            store,
             view: View::Board,
             filter: Filter::default(),
             selected: None,
@@ -224,24 +243,23 @@ impl App {
             date_inputs: (String::new(), String::new()),
             error: None,
             settings: GlobalSettings::default(),
-            settings_path,
             settings_open: false,
             settings_dirty: false,
             default_project: None,
             missing_projects: Vec::new(),
+            outbox: VecDeque::new(),
         };
-        if let Some(path) = &app.settings_path {
-            match GlobalSettings::load(path) {
-                Ok(settings) => app.settings = settings,
-                Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
-            }
+        match settings {
+            Ok(settings) => app.settings = settings,
+            Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
         }
-        app.reload();
+        app.loaded(board);
         app
     }
 
-    pub fn reload(&mut self) {
-        match self.store.load() {
+    /// Shows a board freshly loaded from the store.
+    pub fn loaded(&mut self, board: Result<Board, String>) {
+        match board {
             Ok(board) => {
                 self.board = board;
                 // Drop references to tasks deleted elsewhere (e.g. by the CLI).
@@ -388,36 +406,45 @@ impl App {
         }
     }
 
+    /// Shows how running `command` went. If it failed, its change to the
+    /// board is undone when the board is next loaded.
+    pub fn finished(&mut self, command: &Command, result: Result<Outcome, String>) {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.error = Some(e);
+                return;
+            }
+        };
+        if let Some(msg) = outcome.message() {
+            self.error = Some(msg);
+        }
+        // Files only exist once the store has made them, so they're added
+        // here rather than when the command was made.
+        if let (
+            Command::Attach { task, .. } | Command::NewFile { task, .. },
+            Output::File { file },
+        ) = (command, outcome.output)
+        {
+            if let Some(t) = self.board.tasks.iter_mut().find(|t| t.id == *task)
+                && t.files.iter().all(|f| f.id != file.id)
+            {
+                t.files.push(file.clone());
+            }
+            if matches!(command, Command::NewFile { .. }) {
+                self.viewing_file = Some((*task, file.id));
+            }
+        }
+    }
+
+    /// Shows whether saving settings worked.
+    pub fn settings_saved(&mut self, result: Result<(), String>) {
+        if let Err(e) = result {
+            self.error = Some(e);
+        }
+    }
+
     fn try_apply(&mut self, action: Action) -> taskboard_core::Result<()> {
-        let writes = matches!(
-            action,
-            Action::Save { .. }
-                | Action::Move { .. }
-                | Action::Delete(_)
-                | Action::Promote(_)
-                | Action::Demote(_)
-                | Action::SetParent { .. }
-                | Action::RelocateProject { .. }
-                | Action::DeleteProject(_)
-                | Action::AddLink {
-                    owner: Owner::Task(_),
-                    ..
-                }
-                | Action::RemoveLink {
-                    owner: Owner::Task(_),
-                    ..
-                }
-                | Action::Attach {
-                    owner: Owner::Task(_),
-                    ..
-                }
-                | Action::Detach {
-                    owner: Owner::Task(_),
-                    ..
-                }
-                | Action::NewFile { .. }
-                | Action::WriteFile { .. }
-        );
         match action {
             Action::Select(id) => {
                 self.selected = id;
@@ -453,65 +480,66 @@ impl App {
             }
             Action::Save {
                 title,
-                project,
+                project: typed,
                 description,
             } => {
                 let Some(target) = self.editing else {
                     return Ok(());
                 };
-                // Checked before the project, so a bad title doesn't leave
-                // behind a newly created directory.
                 if title.trim().is_empty() {
                     return Err(Error::Invalid("title must not be empty".into()));
                 }
-                let project = match self.project_input(&project) {
+                // A missing directory is created when the command runs.
+                let project = match self.project_input(&typed) {
                     ProjectInput::Empty => {
                         return Err(Error::Invalid("choose a project for the task".into()));
                     }
-                    ProjectInput::Known(path) | ProjectInput::New(path) => path,
-                    ProjectInput::Missing(path) => create_project_dir(&path)?,
+                    ProjectInput::Known(path)
+                    | ProjectInput::New(path)
+                    | ProjectInput::Missing(path) => path,
                 };
                 match target {
                     EditTarget::Existing(id) => {
                         let patch = TaskPatch {
-                            title: Some(title),
+                            title: Some(title.clone()),
                             project: Some(project),
-                            description: Some(description),
+                            description: Some(description.clone()),
                             ..Default::default()
                         };
-                        self.store.update(|b| b.edit(id, patch))?;
+                        let command = Command::Edit {
+                            id,
+                            title: Some(title),
+                            project: Some(typed),
+                            description: Some(description),
+                        };
+                        self.change(command, |b| b.edit(id, patch))?;
                         self.selected = Some(id);
                     }
                     EditTarget::New(status) => {
+                        let position = self.settings.new_task_position;
                         let new = NewTask {
-                            title,
+                            title: title.clone(),
                             project,
+                            description: description.clone(),
+                            status: Some(status),
+                            links: self.draft.links.clone(),
+                            position,
+                            ..Default::default()
+                        };
+                        let command = Command::Create {
+                            title,
+                            project: typed,
                             description,
                             status: Some(status),
                             links: self.draft.links.clone(),
-                            position: self.settings.new_task_position,
-                            ..Default::default()
+                            files: self.draft.files.iter().map(|f| f.source.clone()).collect(),
+                            position: Some(position),
+                            epic: false,
+                            parent: None,
                         };
                         // The draft is kept if creating fails, e.g. on an empty title.
-                        let (id, events) = self.store.update_with_events(|b| b.create(new))?;
-                        let draft = std::mem::take(&mut self.draft);
-                        // Hooks run once the files are attached, so they see the whole task.
-                        let failed: Vec<String> = draft
-                            .files
-                            .iter()
-                            .filter_map(|f| {
-                                let e = self.store.attach(id, &f.source).err()?;
-                                Some(format!("{} ({e})", f.name))
-                            })
-                            .collect();
-                        self.run_hooks(&events);
-                        if !failed.is_empty() {
-                            let msg = format!("Couldn't attach: {}", failed.join(", "));
-                            self.error = Some(match self.error.take() {
-                                Some(hooks) => format!("{hooks}; {msg}"),
-                                None => msg,
-                            });
-                        }
+                        self.change(command, |b| b.create(new))?;
+                        self.draft = Draft::default();
                         // A new task closes the panel rather than selecting it.
                         self.selected = None;
                     }
@@ -523,40 +551,47 @@ impl App {
                 status,
                 position,
             } => {
-                let ((), events) = self
-                    .store
-                    .update_with_events(|b| b.move_to(id, status, position))?;
-                self.run_hooks(&events);
+                let command = Command::Move {
+                    id,
+                    status,
+                    position,
+                };
+                self.change(command, |b| b.move_to(id, status, position))?;
             }
             Action::Delete(id) => {
-                self.store.delete(id)?;
+                self.change(Command::Delete { id }, |b| b.delete(id))?;
                 if self.selected == Some(id) {
                     self.selected = None;
                     self.editing = None;
                 }
             }
-            Action::Promote(id) => self.store.update(|b| b.promote(id))?,
-            Action::Demote(id) => self.store.update(|b| b.demote(id))?,
+            Action::Promote(id) => self.change(Command::Promote { id }, |b| b.promote(id))?,
+            Action::Demote(id) => self.change(Command::Demote { id }, |b| b.demote(id))?,
             Action::SetParent { id, parent } => {
-                self.store.update(|b| b.set_parent(id, parent))?;
+                let command = Command::SetParent { id, parent };
+                self.change(command, |b| b.set_parent(id, parent))?;
             }
             Action::AddLink { owner, url, kind } => {
                 let url = url.trim().to_string();
                 if !url.is_empty() {
                     let link = Link {
-                        url,
+                        url: url.clone(),
                         label: None,
                         kind,
                     };
                     match owner {
-                        Owner::Task(id) => self.store.update(|b| b.add_link(id, link))?,
+                        Owner::Task(task) => {
+                            let command = Command::AddLink { task, url, kind };
+                            self.change(command, |b| b.add_link(task, link))?;
+                        }
                         Owner::Draft => self.draft.links.push(link),
                     }
                 }
             }
             Action::RemoveLink { owner, index } => match owner {
-                Owner::Task(id) => {
-                    self.store.update(|b| b.remove_link(id, index))?;
+                Owner::Task(task) => {
+                    let command = Command::RemoveLink { task, index };
+                    self.change(command, |b| b.remove_link(task, index))?;
                 }
                 Owner::Draft => {
                     if index < self.draft.links.len() {
@@ -564,47 +599,56 @@ impl App {
                     }
                 }
             },
-            Action::Attach { owner, path } => {
+            Action::Attach { owner, source } => {
                 match owner {
-                    Owner::Task(id) => {
-                        self.store.attach(id, &path)?;
-                    }
+                    // Shown once attached; see `finished`.
+                    Owner::Task(task) => self.run(Command::Attach { task, source }),
                     // A file dialog can close after the new task was saved
                     // or cancelled; don't slip its file into the next unsaved
                     // draft.
                     Owner::Draft if matches!(self.editing, Some(EditTarget::New(_))) => {
-                        self.draft.attach(&path)?
+                        self.draft.attach(source)?
                     }
                     Owner::Draft => {}
                 }
             }
             Action::Detach { owner, file } => match owner {
-                Owner::Task(id) => {
-                    self.store.detach(id, file)?;
-                    if self.viewing_file == Some((id, file)) {
+                Owner::Task(task) => {
+                    self.change(Command::Detach { task, file }, |b| {
+                        let t = b
+                            .tasks
+                            .iter_mut()
+                            .find(|t| t.id == task)
+                            .ok_or_else(|| Error::NotFound(task.to_string()))?;
+                        t.files.retain(|f| f.id != file);
+                        Ok(())
+                    })?;
+                    if self.viewing_file == Some((task, file)) {
                         self.viewing_file = None;
                     }
                 }
                 Owner::Draft => self.draft.files.retain(|f| f.id != file),
             },
-            Action::NewFile { task, name } => {
-                let att = self.store.create_file(task, &name)?;
-                self.viewing_file = Some((task, att.id));
-            }
+            // Opened in the viewer once it's made; see `finished`.
+            Action::NewFile { task, name } => self.run(Command::NewFile { task, name }),
             Action::WriteFile { task, file, text } => {
-                self.store.write_file(task, file, text.as_bytes())?;
+                self.run(Command::WriteFile { task, file, text });
             }
             Action::RelocateProject { from, to } => {
-                let to = to.trim();
-                if to.is_empty() {
+                let typed = to.trim();
+                if typed.is_empty() {
                     return Err(Error::Invalid("choose the project's new folder".into()));
                 }
-                let to = project_path(Path::new(to));
+                let to = project_path(Path::new(typed));
+                // TODO(Platform): asks `Platform::path_kind` instead.
                 if !to.is_dir() {
                     return Err(Error::Invalid(format!("no folder at {}", to.display())));
                 }
-                self.store
-                    .update(|b| b.relocate_project(&from, to.clone()))?;
+                let command = Command::RelocateProject {
+                    from: from.clone(),
+                    to: typed.to_string(),
+                };
+                self.change(command, |b| b.relocate_project(&from, to.clone()))?;
                 for path in [&mut self.filter.project, &mut self.default_project]
                     .into_iter()
                     .flatten()
@@ -615,7 +659,8 @@ impl App {
                 }
             }
             Action::DeleteProject(path) => {
-                self.store.delete_project(&path)?;
+                let command = Command::DeleteProject { path: path.clone() };
+                self.change(command, |b| b.remove_project(&path))?;
                 if self.filter.project.as_ref() == Some(&path) {
                     self.filter.project = None;
                 }
@@ -645,49 +690,48 @@ impl App {
                 self.filter = Filter::default();
                 self.date_inputs = (String::new(), String::new());
             }
-            Action::OpenUrl(url) => open_url(&url)?,
             Action::DismissError => self.error = None,
             Action::ShowSettings(open) => {
                 self.settings_open = open;
                 if !open && self.settings_dirty {
-                    self.save_settings()?;
+                    self.save_settings();
                 }
             }
             Action::SetFontSize(size) => {
                 self.settings.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::SetCollapseEmptyColumns(collapse) => {
                 self.settings.collapse_empty_columns = collapse;
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::SetTheme(theme) => {
                 self.settings.theme = theme;
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::SetNewTaskPosition(position) => {
                 self.settings.new_task_position = position;
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
                 self.settings.collapsed_columns.insert(status, !collapsed);
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::AddHook => {
                 self.settings.hooks.push(Hook::default());
-                self.save_settings()?;
+                self.save_settings();
             }
             Action::RemoveHook(i) => {
                 if i < self.settings.hooks.len() {
                     self.settings.hooks.remove(i);
-                    self.save_settings()?;
+                    self.save_settings();
                 }
             }
             Action::SetHookEvent(i, event) => {
                 if let Some(hook) = self.settings.hooks.get_mut(i) {
                     hook.event = event;
-                    self.save_settings()?;
+                    self.save_settings();
                 }
             }
             Action::SetHookCommand(i, command) => {
@@ -698,37 +742,47 @@ impl App {
             }
             Action::SaveSettings => {
                 if self.settings_dirty {
-                    self.save_settings()?;
+                    self.save_settings();
                 }
             }
             Action::SetHookPassTaskId(i, pass) => {
                 if let Some(hook) = self.settings.hooks.get_mut(i) {
                     hook.pass_task_id = pass;
-                    self.save_settings()?;
+                    self.save_settings();
                 }
             }
         }
-        // Show our own write right away rather than waiting for the watcher.
-        if writes {
-            self.reload();
-        }
         Ok(())
     }
 
-    /// Starts the user's hooks for `events`, showing any that fail to start.
-    fn run_hooks(&mut self, events: &[TaskEvent]) {
-        let failures = hooks::run(&self.settings.hooks, events);
-        if !failures.is_empty() {
-            self.error = Some(failures.join("; "));
-        }
+    /// Makes a change to the board with `f`, then queues `command` to make
+    /// it in the store. If `f` fails, the board is left as it was and nothing
+    /// is queued.
+    fn change<T>(
+        &mut self,
+        command: Command,
+        f: impl FnOnce(&mut Board) -> taskboard_core::Result<T>,
+    ) -> taskboard_core::Result<T> {
+        let mut board = self.board.clone();
+        let out = f(&mut board)?;
+        self.board = board;
+        self.run(command);
+        Ok(out)
     }
 
-    fn save_settings(&mut self) -> taskboard_core::Result<()> {
-        if let Some(path) = &self.settings_path {
-            self.settings.save(path)?;
+    /// Queues `command` for the platform to run.
+    fn run(&mut self, command: Command) {
+        // Hooks run with the settings as shown, typed commands included.
+        if self.settings_dirty {
+            self.save_settings();
         }
+        self.outbox.push_back(Effect::Run(command));
+    }
+
+    fn save_settings(&mut self) {
+        self.outbox
+            .push_back(Effect::SaveSettings(self.settings.clone()));
         self.settings_dirty = false;
-        Ok(())
     }
 }
 
@@ -761,21 +815,6 @@ pub fn drop_index(card_midpoints: &[f32], y: f32) -> usize {
     card_midpoints.iter().filter(|mid| **mid < y).count()
 }
 
-// TODO(Platform): becomes `Platform::open_url` (`window.open` on the web).
-fn open_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        c
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut cmd = std::process::Command::new("xdg-open");
-    cmd.arg(url).spawn().map(|_| ())
-}
-
 /// Whether a project's directory is gone.
 // TODO(Platform): asks the backend instead of the local filesystem.
 #[cfg(not(target_arch = "wasm32"))]
@@ -791,19 +830,23 @@ fn dir_missing(_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use taskboard_core::{Store, create_project_dir};
+
     use super::*;
+    use crate::testing::{Harness, TestPlatform};
 
     /// An app whose store and default project, `app`, are in a temporary
     /// directory. New tasks go at the bottom, so columns read in creation order.
-    fn app() -> (tempfile::TempDir, App) {
+    fn app() -> (tempfile::TempDir, Harness) {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Store::open(&dir.path().join("data")).unwrap(), None);
+        let store = Store::open(&dir.path().join("data")).unwrap();
+        let mut app = Harness::new(TestPlatform::new(store, None));
         app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
         app.settings.new_task_position = NewTaskPosition::Bottom;
         (dir, app)
     }
 
-    fn save(app: &mut App, title: &str) {
+    fn save(app: &mut Harness, title: &str) {
         app.apply(Action::Save {
             title: title.into(),
             project: app.new_task_project(),
@@ -811,10 +854,16 @@ mod tests {
         });
     }
 
-    fn add(app: &mut App, title: &str) -> Ulid {
+    fn add(app: &mut Harness, title: &str) -> Ulid {
         app.apply(Action::Edit(EditTarget::New(Status::Backlog)));
         save(app, title);
         app.board.column(Status::Backlog).last().unwrap().id
+    }
+
+    /// An app with its store in `store_dir` and settings saved at `path`.
+    fn settings_app(store_dir: &Path, path: &Path) -> Harness {
+        let store = Store::open(store_dir).unwrap();
+        Harness::new(TestPlatform::new(store, Some(path.to_path_buf())))
     }
 
     #[test]
@@ -881,7 +930,7 @@ mod tests {
         for path in [gone.clone(), src, "missing.md".into()] {
             app.apply(Action::Attach {
                 owner: Owner::Draft,
-                path,
+                source: FileSource::Path { path },
             });
         }
         assert!(app.error.take().unwrap().contains("missing.md"));
@@ -895,6 +944,7 @@ mod tests {
         save(&mut app, "alpha");
         assert!(
             app.error
+                .take()
                 .unwrap()
                 .starts_with("Couldn't attach: gone.txt (")
         );
@@ -956,7 +1006,7 @@ mod tests {
         app.apply(Action::CancelEdit);
         app.apply(Action::Attach {
             owner: Owner::Draft,
-            path: src,
+            source: FileSource::Path { path: src },
         });
         assert_eq!(app.error, None);
         assert_eq!(app.draft, Draft::default());
@@ -989,12 +1039,12 @@ mod tests {
             text: "# Plan\n".into(),
         });
         assert_eq!(app.error, None);
-        let path = app.store.file_path(&att);
+        let path = app.platform.store.file_path(&att);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "# Plan\n");
         assert!(app.board.get(a).unwrap().updated >= updated);
 
         // The viewer closes when its file is detached elsewhere.
-        app.store.detach(a, att.id).unwrap(); // as if `tb file rm` ran
+        app.platform.store.detach(a, att.id).unwrap(); // as if `tb file rm` ran
         app.reload();
         assert_eq!(app.viewing_file, None);
         assert!(app.board.get(a).is_some());
@@ -1005,7 +1055,7 @@ mod tests {
         let (_dir, mut app) = app();
         let a = add(&mut app, "alpha");
         app.apply(Action::Select(Some(a)));
-        app.store.delete(a).unwrap(); // as if `tb rm` ran
+        app.platform.store.delete(a).unwrap(); // as if `tb rm` ran
         app.reload();
         assert_eq!(app.selected, None);
     }
@@ -1105,13 +1155,13 @@ mod tests {
     fn font_size_is_clamped_and_saved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
-        let mut app = App::new(Store::open(dir.path()).unwrap(), Some(path.clone()));
+        let mut app = settings_app(dir.path(), &path);
         app.apply(Action::SetFontSize(MAX_FONT_SIZE + 10));
         assert_eq!(app.error, None);
         assert_eq!(app.settings.font_size, MAX_FONT_SIZE);
         assert_eq!(GlobalSettings::load(&path).unwrap(), app.settings);
 
-        let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
+        let reopened = settings_app(dir.path(), &path);
         assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
     }
 
@@ -1119,10 +1169,7 @@ mod tests {
     fn new_tasks_go_to_the_top_unless_set_to_bottom() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
-        let mut app = App::new(
-            Store::open(&dir.path().join("data")).unwrap(),
-            Some(path.clone()),
-        );
+        let mut app = settings_app(&dir.path().join("data"), &path);
         app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
         assert_eq!(app.settings.new_task_position, NewTaskPosition::Top);
         for title in ["a", "b"] {
@@ -1141,7 +1188,7 @@ mod tests {
             .collect();
         assert_eq!(order, ["b", "a", "c"]);
 
-        let reopened = App::new(Store::open(&dir.path().join("data")).unwrap(), Some(path));
+        let reopened = settings_app(&dir.path().join("data"), &path);
         assert_eq!(reopened.settings.new_task_position, NewTaskPosition::Bottom);
     }
 
@@ -1149,12 +1196,12 @@ mod tests {
     fn theme_defaults_to_dark_and_is_saved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
-        let mut app = App::new(Store::open(dir.path()).unwrap(), Some(path.clone()));
+        let mut app = settings_app(dir.path(), &path);
         assert_eq!(app.settings.theme, Theme::Dark);
         app.apply(Action::SetTheme(Theme::Light));
         assert_eq!(app.error, None);
 
-        let reopened = App::new(Store::open(dir.path()).unwrap(), Some(path));
+        let reopened = settings_app(dir.path(), &path);
         assert_eq!(reopened.settings.theme, Theme::Light);
     }
 
@@ -1162,7 +1209,7 @@ mod tests {
     fn empty_columns_collapsed_by_default() {
         let (dir, mut app) = app();
         let settings = dir.path().join("settings.json");
-        app.settings_path = Some(settings.clone());
+        app.platform.settings_path = Some(settings.clone());
         let a = add(&mut app, "alpha");
         assert!(!app.column_collapsed(Status::Backlog));
         assert!(app.column_collapsed(Status::Closed));
@@ -1175,7 +1222,7 @@ mod tests {
         // A column with tasks collapses too, and stays as set once emptied.
         app.apply(Action::ToggleColumn(Status::Backlog));
         assert!(app.column_collapsed(Status::Backlog));
-        let reopened = App::new(app.store.clone(), Some(settings));
+        let reopened = settings_app(app.platform.store.dir(), &settings);
         assert!(reopened.column_collapsed(Status::Backlog));
         app.apply(Action::Delete(a));
         app.apply(Action::ToggleColumn(Status::Backlog));
@@ -1238,7 +1285,7 @@ mod tests {
 
         // Typed commands are saved once editing is done.
         let path = dir.path().join("settings.json");
-        app.settings_path = Some(path.clone());
+        app.platform.settings_path = Some(path.clone());
         app.apply(Action::SetHookCommand(1, "true".into()));
         assert!(!path.exists());
         app.apply(Action::SaveSettings);
@@ -1307,6 +1354,30 @@ mod tests {
         app.apply(Action::Select(Some(c)));
         app.apply(Action::SetView(View::InProgress));
         assert_eq!(app.selected, Some(b));
+    }
+
+    #[test]
+    fn changes_show_before_their_command_runs_and_are_undone_if_it_fails() {
+        let (_dir, mut app) = app();
+        let epic = add(&mut app, "epic");
+        let child = add(&mut app, "child");
+        app.apply(Action::Promote(epic));
+
+        // Applied without running its command yet.
+        app.app.apply(Action::SetParent {
+            id: child,
+            parent: Some(epic),
+        });
+        assert_eq!(app.board.get(child).unwrap().parent, Some(epic));
+        let stored = app.platform.store.load().unwrap();
+        assert_eq!(stored.get(child).unwrap().parent, None);
+
+        // Changed elsewhere meanwhile, so the command fails.
+        app.platform.store.update(|b| b.demote(epic)).unwrap(); // as if `tb demote` ran
+        app.settle();
+        assert!(app.error.take().unwrap().contains("isn't an epic"));
+        assert_eq!(app.board.get(child).unwrap().parent, None);
+        assert!(!app.board.get(epic).unwrap().epic);
     }
 
     #[test]

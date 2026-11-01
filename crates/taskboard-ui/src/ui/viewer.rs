@@ -68,8 +68,7 @@ pub fn markdown<'a>(p: Pal, src: &str) -> El<'a> {
 }
 
 pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a> {
-    let (app, p) = (&gui.app, gui.pal());
-    let path = app.store.file_path(att);
+    let p = gui.pal();
     let mut header = row![text(&att.name).size(16).font(BOLD), grow()]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -102,8 +101,11 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
         Message::App(Action::ViewFile(None)),
     ));
     let body: El = match att.kind {
-        FileKind::Image if path.is_file() => image(image::Handle::from_path(path)).into(),
-        FileKind::Image => label(p, "Couldn't load this image."),
+        // Until it's read, or why it couldn't be.
+        FileKind::Image => match &gui.ui.file_image {
+            Some(handle) => image(handle.clone()).into(),
+            None => label(p, gui.ui.file_text.as_deref().unwrap_or_default()),
+        },
         kind => {
             let content = gui.ui.file_text.as_deref().unwrap_or_default();
             if kind == FileKind::Markdown {
@@ -153,15 +155,28 @@ fn dialog<'a>(p: Pal, content: iced::widget::Column<'a, Message>, window: Size) 
         .into()
 }
 
-/// Reads a text file for the viewer, or says why it couldn't, and whether
-/// the text can be edited: only UTF-8 survives being saved back unchanged.
-// TODO(Platform): becomes `Platform::read_file`.
-pub fn read_text(path: &std::path::Path) -> (String, bool) {
-    match std::fs::read(path) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => (text, true),
-            Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
+/// A viewed file's contents, as read by the platform.
+#[derive(Debug, Clone)]
+pub enum Contents {
+    /// Text, or why the file couldn't be read. Only UTF-8 is `editable`,
+    /// since only it survives being saved back unchanged.
+    Text {
+        text: String,
+        editable: bool,
+    },
+    Image(image::Handle),
+}
+
+/// What the viewer shows for a file of `kind` that was `read`.
+pub fn contents(kind: FileKind, read: Result<Vec<u8>, String>) -> Contents {
+    let text = |text, editable| Contents::Text { text, editable };
+    match (kind, read) {
+        (FileKind::Image, Ok(bytes)) => Contents::Image(image::Handle::from_bytes(bytes)),
+        (FileKind::Image, Err(_)) => text("Couldn't load this image.".into(), false),
+        (_, Ok(bytes)) => match String::from_utf8(bytes) {
+            Ok(utf8) => text(utf8, true),
+            Err(e) => text(String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
         },
-        Err(e) => (format!("Couldn't read file: {e}"), false),
+        (_, Err(e)) => text(format!("Couldn't read file: {e}"), false),
     }
 }

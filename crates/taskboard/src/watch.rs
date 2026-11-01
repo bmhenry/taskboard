@@ -42,7 +42,8 @@ fn watch(store_dir: PathBuf, tasks_file: PathBuf) -> impl Stream<Item = WatchEve
                 std::future::pending::<()>().await
             }
             Err(e) => {
-                let _ = out.send(WatchEvent::Failed(e.to_string())).await;
+                let why = format!("couldn't watch {}: {e}", store_dir.display());
+                let _ = out.send(WatchEvent::Failed(why)).await;
             }
         }
     })

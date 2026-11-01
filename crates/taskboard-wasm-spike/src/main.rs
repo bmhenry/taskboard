@@ -1,20 +1,20 @@
 //! Phase 0 spike (task 0DC4FM): the desktop GUI's own source, compiled for
 //! `wasm32-unknown-unknown` against an in-memory store seeded from
 //! `fixture/tasks.json`. See SPIKE.md. The UI is the `taskboard-ui` crate,
-//! built without its `desktop` feature.
+//! run with the spike's own `Platform` (`platform.rs`).
 
 #[cfg(target_arch = "wasm32")]
 mod keyboard;
+#[cfg(target_arch = "wasm32")]
+mod platform;
 #[cfg(any(target_arch = "wasm32", test))]
 mod text_diff;
-#[cfg(target_arch = "wasm32")]
-mod watch;
 
 #[cfg(target_arch = "wasm32")]
 fn main() -> iced::Result {
     use std::path::{Path, PathBuf};
 
-    use taskboard_core::Store;
+    use taskboard_core::{GlobalSettings, Store};
 
     use taskboard_ui::{App, Gui, theme};
 
@@ -27,9 +27,10 @@ fn main() -> iced::Result {
         || {
             // The in-memory store ignores its directory.
             let store = Store::open(Path::new("/tb")).expect("in-memory store opens");
-            let mut app = App::new(store, None);
+            let board = store.load().map_err(|e| e.to_string());
+            let mut app = App::new(Ok(GlobalSettings::default()), board);
             app.default_project = Some(PathBuf::from("/home/demo/webshop"));
-            Gui::new(app).watching(watch::subscription)
+            Gui::new(app, platform::Spike::new(store))
         },
         update,
         view,

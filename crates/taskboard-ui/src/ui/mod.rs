@@ -14,7 +14,7 @@ mod viewer;
 mod widgets;
 mod zones;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::time::Instant;
@@ -22,9 +22,11 @@ use iced::time::Instant;
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{column, container, mouse_area, opaque, row, stack, text_editor};
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Subscription, Task, event};
-use taskboard_core::{FileKind, LinkKind, Status, Ulid};
+use taskboard_core::ops::{Command, FileSource, Outcome};
+use taskboard_core::{Board, LinkKind, Status, Ulid};
 
-use crate::app::{Action, App, EditTarget, Owner, View, drop_index, drop_position};
+use crate::app::{Action, App, EditTarget, Effect, Owner, View, drop_index, drop_position};
+use crate::platform::{Platform, WatchEvent};
 use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
 use widgets::El;
@@ -57,25 +59,17 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("Esc", "Close a dialog or menu, cancel editing, or deselect"),
 ];
 
-/// What a [`BoardWatcher`] reports to the UI.
-#[derive(Debug, Clone)]
-pub enum WatchEvent {
-    /// `tasks.json` changed.
-    Changed,
-    /// The watcher couldn't start; live updates are off.
-    Failed(String),
-}
-
-/// Reports changes to the store's `tasks.json` (the second path), which
-/// lives in the store's directory (the first), so edits from other processes
-/// (like `tb`) show up live. The desktop app watches the file with `notify`.
-// TODO(Platform): becomes `Platform::board_changes`.
-pub type BoardWatcher = fn(&Path, &Path) -> Subscription<WatchEvent>;
-
 pub struct Gui {
     app: App,
     ui: UiState,
-    watcher: Option<BoardWatcher>,
+    platform: Box<dyn Platform>,
+    /// The effect the platform is doing; the rest wait in the app's outbox.
+    running: Option<Effect>,
+    /// How many commands have been started, so a board loaded before the
+    /// latest one is dropped.
+    commands: u64,
+    /// The board is to be reloaded once no effects are left.
+    stale: bool,
 }
 
 /// UI-only state that doesn't belong in [`App`].
@@ -91,6 +85,8 @@ struct UiState {
     file_text: Option<String>,
     /// The viewed file is UTF-8 text, so it can be edited without loss.
     file_editable: bool,
+    /// The viewed image, once read.
+    file_image: Option<iced::widget::image::Handle>,
     /// The viewed file's text being edited, while the viewer is in edit mode.
     file_edit: Option<text_editor::Content>,
     /// The task whose new-file popup is open.
@@ -146,10 +142,10 @@ pub enum Message {
     AttachPath(String),
     AddLink(Owner, LinkKind),
     Attach(Owner),
-    /// Opens the native file dialog to pick a file to attach.
+    /// Opens the platform's file dialog to pick a file to attach.
     Browse(Owner),
     /// The file dialog closed; `None` if it was cancelled.
-    Picked(Owner, Option<PathBuf>),
+    Picked(Owner, Option<FileSource>),
     /// Opens or closes the popup asking for a new file's name.
     ToggleNewFile(Ulid),
     CloseNewFile,
@@ -164,6 +160,8 @@ pub enum Message {
     CancelFileEdit,
     /// Closes the file viewer, unless it has unsaved changes.
     CloseViewer,
+    /// The viewed (task, file) was read.
+    FileRead((Ulid, Ulid), viewer::Contents),
     EditTitle(String),
     EditProject(String),
     ToggleProjectMenu,
@@ -188,7 +186,14 @@ pub enum Message {
     HookCommand(usize, String),
     ToggleKeybindings,
     Key(Key, Modifiers, event::Status),
+    OpenUrl(String),
     Watch(WatchEvent),
+    /// The running command finished.
+    Ran(Result<Outcome, String>),
+    /// The running settings save finished.
+    SettingsSaved(Result<(), String>),
+    /// The board, loaded once this many commands had been started.
+    Loaded(u64, Result<Board, String>),
     Tick,
     HoverCard(Ulid, bool),
     /// A card was dragged to a point; it's as big as the rectangle.
@@ -204,19 +209,16 @@ pub enum Message {
 }
 
 impl Gui {
-    pub fn new(app: App) -> Gui {
+    /// Shows `app`, doing what it can't do itself (like changing the store)
+    /// through `platform`.
+    pub fn new(app: App, platform: impl Platform + 'static) -> Gui {
         Gui {
             app,
             ui: UiState::default(),
-            watcher: None,
-        }
-    }
-
-    /// Reloads the board when `watcher` reports a change.
-    pub fn watching(self, watcher: BoardWatcher) -> Gui {
-        Gui {
-            watcher: Some(watcher),
-            ..self
+            platform: Box::new(platform),
+            running: None,
+            commands: 0,
+            stale: false,
         }
     }
 
@@ -237,7 +239,6 @@ impl Gui {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let store = &self.app.store;
         let keys = event::listen_with(|event, status, _| match event {
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::Key(key, modifiers, status))
@@ -247,10 +248,8 @@ impl Gui {
         let mut subs = vec![
             keys,
             iced::time::every(PROJECT_CHECK_INTERVAL).map(|_| Message::CheckProjects),
+            self.platform.board_changes().map(Message::Watch),
         ];
-        if let Some(watch) = self.watcher {
-            subs.push(watch(store.dir(), &store.tasks_path()).map(Message::Watch));
-        }
         if self.ui.hook_edited_at.is_some() {
             subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick));
         }
@@ -301,22 +300,26 @@ impl Gui {
         if ui.new_file_for.is_none() {
             ui.new_file_name.clear();
         }
-        // The text is read once per file shown, so reloads (like the
+        // The file is read once per file shown, so reloads (like the
         // watcher's after a save) don't disturb the viewer or an edit in
         // progress.
         if app.viewing_file != ui.file_shown {
             ui.file_shown = app.viewing_file;
             ui.file_text = None;
             ui.file_editable = false;
+            ui.file_image = None;
             ui.file_edit = None;
-            let att = app.viewing_file.and_then(|(task, file)| {
-                let task = app.board.get(task)?;
-                task.files.iter().find(|f| f.id == file)
-            });
-            if let Some(att) = att.filter(|a| a.kind != FileKind::Image) {
-                let (text, editable) = viewer::read_text(&app.store.file_path(att));
-                ui.file_text = Some(text);
-                ui.file_editable = editable;
+            if let Some((task_id, file)) = app.viewing_file
+                && let Some(att) = app
+                    .board
+                    .get(task_id)
+                    .and_then(|t| t.files.iter().find(|f| f.id == file))
+            {
+                let kind = att.kind;
+                let read = Task::perform(self.platform.read_file(task_id, att), move |bytes| {
+                    Message::FileRead((task_id, file), viewer::contents(kind, bytes))
+                });
+                task = Task::batch([task, read]);
             }
         }
         // A missing project's fix belongs to the task it was started on.
@@ -329,7 +332,35 @@ impl Gui {
             ui.link_url.clear();
             ui.attach_path.clear();
         }
-        task
+        Task::batch([task, self.next_effect()])
+    }
+
+    /// Starts the next effect in the app's outbox unless one is running, or,
+    /// with none left, reloads the board if it's stale.
+    fn next_effect(&mut self) -> Task<Message> {
+        if self.running.is_some() {
+            return Task::none();
+        }
+        if let Some(effect) = self.app.outbox.pop_front() {
+            self.running = Some(effect.clone());
+            return match effect {
+                Effect::Run(command) => {
+                    self.commands += 1;
+                    Task::perform(self.platform.run(command), Message::Ran)
+                }
+                Effect::SaveSettings(settings) => Task::perform(
+                    self.platform.save_settings(settings),
+                    Message::SettingsSaved,
+                ),
+            };
+        }
+        if std::mem::take(&mut self.stale) {
+            let commands = self.commands;
+            return Task::perform(self.platform.load_board(), move |board| {
+                Message::Loaded(commands, board)
+            });
+        }
+        Task::none()
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -381,13 +412,18 @@ impl Gui {
             Message::Attach(owner) => {
                 if !ui.attach_path.trim().is_empty() {
                     let path = typed_path(&std::mem::take(&mut ui.attach_path));
-                    self.app.apply(Action::Attach { owner, path });
+                    let source = FileSource::Path { path };
+                    self.app.apply(Action::Attach { owner, source });
                 }
             }
             Message::Browse(owner) => {
-                return Task::perform(pick_file(), move |path| Message::Picked(owner, path));
+                return Task::perform(self.platform.pick_file(), move |source| {
+                    Message::Picked(owner, source)
+                });
             }
-            Message::Picked(owner, Some(path)) => self.app.apply(Action::Attach { owner, path }),
+            Message::Picked(owner, Some(source)) => {
+                self.app.apply(Action::Attach { owner, source });
+            }
             Message::Picked(_, None) => {}
             Message::ToggleNewFile(task) => {
                 ui.new_file_for = match ui.new_file_for {
@@ -404,18 +440,8 @@ impl Gui {
                 let name = ui.new_file_name.clone();
                 // Any earlier error is cleared so a failed create shows.
                 self.app.error = None;
+                // Opened once made; see `Gui::ran`.
                 self.app.apply(Action::NewFile { task, name });
-                // Kept open with the typed name to fix if creating failed.
-                if self.app.error.is_none() {
-                    // The new file is empty; it opens ready to edit.
-                    let ui = &mut self.ui;
-                    ui.new_file_for = None;
-                    ui.file_shown = self.app.viewing_file;
-                    ui.file_text = Some(String::new());
-                    ui.file_editable = true;
-                    ui.file_edit = Some(text_editor::Content::new());
-                    return iced::widget::operation::focus(FILE_EDITOR);
-                }
             }
             Message::EditFile => {
                 if ui.file_editable
@@ -436,18 +462,22 @@ impl Gui {
                     let text = content.text();
                     // Any earlier error is cleared so a failed save shows.
                     self.app.error = None;
-                    self.app.apply(Action::WriteFile {
-                        task,
-                        file,
-                        text: text.clone(),
-                    });
-                    if self.app.error.is_none() {
-                        self.ui.file_text = Some(text);
-                        self.ui.file_edit = None;
-                    }
+                    // Leaves edit mode once saved; see `Gui::ran`.
+                    self.app.apply(Action::WriteFile { task, file, text });
                 }
             }
             Message::CancelFileEdit => ui.file_edit = None,
+            Message::FileRead(shown, contents) => {
+                if ui.file_shown == Some(shown) {
+                    match contents {
+                        viewer::Contents::Text { text, editable } => {
+                            ui.file_text = Some(text);
+                            ui.file_editable = editable;
+                        }
+                        viewer::Contents::Image(handle) => ui.file_image = Some(handle),
+                    }
+                }
+            }
             Message::CloseViewer => {
                 if !self.file_edit_dirty() {
                     return self.apply(Action::ViewFile(None));
@@ -464,7 +494,7 @@ impl Gui {
             Message::BrowseProject => {
                 ui.project_menu_open = false;
                 let title = "Choose the task's project";
-                return Task::perform(pick_folder(title), Message::PickedProject);
+                return Task::perform(self.platform.pick_folder(title), Message::PickedProject);
             }
             Message::PickedProject(Some(path)) => ui.edit_project = self.app.project_text(&path),
             Message::PickedProject(None) => {}
@@ -483,7 +513,7 @@ impl Gui {
             }
             Message::BrowseRelocate(from) => {
                 let title = "Choose the project's new folder";
-                return Task::perform(pick_folder(title), move |to| {
+                return Task::perform(self.platform.pick_folder(title), move |to| {
                     Message::PickedRelocate(from.clone(), to)
                 });
             }
@@ -512,12 +542,37 @@ impl Gui {
             }
             Message::ToggleKeybindings => ui.show_keybindings = !ui.show_keybindings,
             Message::Key(key, modifiers, status) => return self.key(key, modifiers, status),
-            Message::Watch(WatchEvent::Changed) => self.app.reload(),
+            Message::OpenUrl(url) => {
+                if let Err(e) = self.platform.open_url(&url) {
+                    self.app.error = Some(e);
+                }
+            }
+            Message::Watch(WatchEvent::Changed) => self.stale = true,
             Message::Watch(WatchEvent::Failed(e)) => {
-                self.app.error = Some(format!(
-                    "Live updates are off; couldn't watch {}: {e}",
-                    self.app.store.dir().display()
-                ));
+                self.app.error = Some(format!("Live updates are off; {e}"));
+            }
+            Message::Ran(result) => {
+                let Some(Effect::Run(command)) = self.running.take() else {
+                    return Task::none();
+                };
+                // Reloaded even if it failed, to undo its change to the board.
+                self.stale = true;
+                let ok = result.is_ok();
+                self.app.finished(&command, result);
+                return self.ran(command, ok);
+            }
+            Message::SettingsSaved(result) => {
+                self.running = None;
+                self.app.settings_saved(result);
+            }
+            Message::Loaded(commands, board) => {
+                // A board loaded before the latest command started, or
+                // without the changes of those waiting, would undo them until
+                // the reload that follows them.
+                let waiting = self.app.outbox.iter().any(|e| matches!(e, Effect::Run(_)));
+                if commands == self.commands && !waiting {
+                    self.app.loaded(board);
+                }
             }
             Message::Tick => {
                 if ui
@@ -650,6 +705,37 @@ impl Gui {
                     .collect();
                 self.drop_at(id, status, &visible, drop_index(&mids, y));
             }
+        }
+        Task::none()
+    }
+
+    /// Updates the file viewer for a command that finished, and whether it
+    /// worked.
+    fn ran(&mut self, command: Command, ok: bool) -> Task<Message> {
+        let ui = &mut self.ui;
+        match command {
+            // The new file is empty; it opens ready to edit. The popup stays
+            // open with the typed name to fix if creating failed.
+            Command::NewFile { .. } if ok && self.app.viewing_file.is_some() => {
+                ui.new_file_for = None;
+                ui.file_shown = self.app.viewing_file;
+                ui.file_text = Some(String::new());
+                ui.file_editable = true;
+                ui.file_image = None;
+                ui.file_edit = Some(text_editor::Content::new());
+                return iced::widget::operation::focus(FILE_EDITOR);
+            }
+            // Edit mode is left once the text is saved, unless more was
+            // typed meanwhile.
+            Command::WriteFile { task, file, text }
+                if ok && ui.file_shown == Some((task, file)) =>
+            {
+                if ui.file_edit.as_ref().is_some_and(|c| c.text() == text) {
+                    ui.file_edit = None;
+                }
+                ui.file_text = Some(text);
+            }
+            _ => {}
         }
         Task::none()
     }
@@ -830,38 +916,6 @@ fn typed_path(text: &str) -> PathBuf {
     }
 }
 
-/// Asks for a file with the system's file dialog, without blocking the UI.
-/// rfd gives `None` both when cancelled and when there's no portal (or
-/// zenity) to show a dialog, so the latter fails silently.
-async fn pick_file() -> Option<PathBuf> {
-    // No paths in a browser; the web client will upload bytes instead.
-    // TODO(Platform): becomes `Platform::pick_file`.
-    #[cfg(not(feature = "desktop"))]
-    return None;
-    #[cfg(feature = "desktop")]
-    rfd::AsyncFileDialog::new()
-        .set_title("Attach a file")
-        .pick_file()
-        .await
-        .map(|f| f.path().to_path_buf())
-}
-
-/// Asks for a directory with the system's folder dialog; see [`pick_file`].
-async fn pick_folder(title: &'static str) -> Option<PathBuf> {
-    // TODO(Platform): becomes `Platform::pick_folder`.
-    #[cfg(not(feature = "desktop"))]
-    return {
-        let _ = title;
-        None
-    };
-    #[cfg(feature = "desktop")]
-    rfd::AsyncFileDialog::new()
-        .set_title(title)
-        .pick_folder()
-        .await
-        .map(|f| f.path().to_path_buf())
-}
-
 /// `dialog` centered over a scrim that covers the window. A press on the
 /// scrim sends `on_close`.
 fn modal<'a>(dialog: El<'a>, on_close: Message) -> El<'a> {
@@ -891,12 +945,13 @@ mod tests {
     use text_editor::Edit;
 
     use super::*;
+    use crate::testing::{Harness, TestPlatform, now};
 
     /// A GUI with one task, `(task, file)`, whose attached text file holds
     /// `text`, not yet open in the viewer.
     fn gui_with_file(text: &str) -> (tempfile::TempDir, Gui, (Ulid, Ulid)) {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Store::open(&dir.path().join("data")).unwrap(), None);
+        let mut app = Harness::new(TestPlatform::new(store(&dir), None));
         app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
         app.apply(Action::Edit(EditTarget::New(Status::Open)));
         app.apply(Action::Save {
@@ -918,7 +973,53 @@ mod tests {
         app.apply(Action::ViewFile(None));
         app.apply(Action::Select(Some(task)));
         assert_eq!(app.error, None);
-        (dir, Gui::new(app), (task, file))
+        let Harness { app, platform } = app;
+        (dir, Gui::new(app, platform), (task, file))
+    }
+
+    /// The store [`gui_with_file`] made in `dir`, to change as `tb` would.
+    fn store(dir: &tempfile::TempDir) -> Store {
+        Store::open(&dir.path().join("data")).unwrap()
+    }
+
+    /// Does what `gui` left for the platform, as iced would by running the
+    /// tasks its updates returned: its effects, a reload of the board, and
+    /// reading the file in the viewer.
+    fn settle(gui: &mut Gui) {
+        while let Some(effect) = gui.running.clone() {
+            let message = match effect {
+                Effect::Run(command) => Message::Ran(now(gui.platform.run(command))),
+                Effect::SaveSettings(settings) => {
+                    Message::SettingsSaved(now(gui.platform.save_settings(settings)))
+                }
+            };
+            let _ = gui.update(message);
+        }
+        let board = now(gui.platform.load_board());
+        let _ = gui.update(Message::Loaded(gui.commands, board));
+        if let Some((task, file)) = gui.ui.file_shown
+            && gui.ui.file_text.is_none()
+            && gui.ui.file_image.is_none()
+            && let Some(att) = gui
+                .app
+                .board
+                .get(task)
+                .and_then(|t| t.files.iter().find(|f| f.id == file))
+        {
+            let contents = viewer::contents(att.kind, now(gui.platform.read_file(task, att)));
+            let _ = gui.update(Message::FileRead((task, file), contents));
+        }
+    }
+
+    fn view_file(gui: &mut Gui, file: (Ulid, Ulid)) {
+        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        settle(gui);
+    }
+
+    fn type_x(gui: &mut Gui) {
+        let _ = gui.update(Message::EditFileText(text_editor::Action::Edit(
+            Edit::Insert('x'),
+        )));
     }
 
     fn esc(gui: &mut Gui) {
@@ -942,7 +1043,7 @@ mod tests {
             "a\r\nb",
         ] {
             let (_dir, mut gui, file) = gui_with_file(text);
-            let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+            view_file(&mut gui, file);
             let _ = gui.update(Message::EditFile);
             assert!(gui.ui.file_edit.is_some(), "{text:?}");
             assert!(!gui.file_edit_dirty(), "{text:?}");
@@ -957,7 +1058,7 @@ mod tests {
     #[test]
     fn esc_leaves_a_clean_edit_then_closes_the_viewer() {
         let (_dir, mut gui, file) = gui_with_file("one\ntwo\n");
-        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        view_file(&mut gui, file);
         let _ = gui.update(Message::EditFile);
 
         esc(&mut gui);
@@ -972,7 +1073,7 @@ mod tests {
     #[test]
     fn only_cancel_drops_unsaved_changes() {
         let (_dir, mut gui, file) = gui_with_file("one\n");
-        let _ = gui.update(Message::App(Action::ViewFile(Some(file))));
+        view_file(&mut gui, file);
         let _ = gui.update(Message::EditFile);
         let _ = gui.update(Message::EditFileText(text_editor::Action::Edit(
             Edit::Insert('x'),
@@ -1000,8 +1101,8 @@ mod tests {
 
     #[test]
     fn epic_menu_closes_on_esc_and_on_choosing() {
-        let (_dir, mut gui, (task, _)) = gui_with_file("");
-        let epic = gui.app.store.update(|b| {
+        let (dir, mut gui, (task, _)) = gui_with_file("");
+        let epic = store(&dir).update(|b| {
             let epic = b.create(taskboard_core::NewTask {
                 title: "epic".into(),
                 project: b.get(task).unwrap().project.clone(),
@@ -1010,7 +1111,7 @@ mod tests {
             })?;
             Ok(epic)
         });
-        gui.app.reload();
+        settle(&mut gui);
         let _ = gui.update(Message::ToggleEpicMenu(task));
         esc(&mut gui);
         assert_eq!(gui.ui.epic_open, None);
@@ -1025,15 +1126,18 @@ mod tests {
 
     #[test]
     fn epic_menu_closes_when_its_task_is_promoted_elsewhere() {
-        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let (dir, mut gui, (task, _)) = gui_with_file("");
         let _ = gui.update(Message::ToggleEpicMenu(task));
-        gui.app.store.update(|b| b.promote(task)).unwrap(); // as if `tb promote` ran
+        store(&dir).update(|b| b.promote(task)).unwrap(); // as if `tb promote` ran
         let _ = gui.update(Message::Watch(WatchEvent::Changed));
+        settle(&mut gui);
+        assert!(gui.app.board.get(task).unwrap().epic);
         assert_eq!(gui.ui.epic_open, None);
 
         // Demoted again, it doesn't reopen by itself.
-        gui.app.store.update(|b| b.demote(task)).unwrap();
+        store(&dir).update(|b| b.demote(task)).unwrap();
         let _ = gui.update(Message::Watch(WatchEvent::Changed));
+        settle(&mut gui);
         assert_eq!(gui.ui.epic_open, None);
     }
 
@@ -1044,5 +1148,41 @@ mod tests {
         let _ = gui.update(Message::DragMoved(task, Point::new(10.0, 10.0), bounds));
         esc(&mut gui);
         assert!(gui.ui.drag.as_ref().is_some_and(|d| d.cancelled));
+    }
+
+    #[test]
+    fn new_file_opens_once_made_and_leaves_edit_mode_once_saved() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::ToggleNewFile(task));
+        let _ = gui.update(Message::NewFileName("plan".into()));
+        let _ = gui.update(Message::CreateFile(task));
+        assert_eq!(gui.ui.new_file_for, Some(task));
+        assert_eq!(gui.app.viewing_file, None);
+        settle(&mut gui);
+        assert_eq!(gui.ui.new_file_for, None);
+        let (_, file) = gui.app.viewing_file.unwrap();
+        assert!(gui.ui.file_edit.is_some());
+
+        type_x(&mut gui);
+        let _ = gui.update(Message::SaveFile);
+        assert!(gui.ui.file_edit.is_some());
+        settle(&mut gui);
+        assert!(gui.ui.file_edit.is_none());
+        assert_eq!(gui.ui.file_text.as_deref(), Some("x"));
+        let task = gui.app.board.get(task).unwrap();
+        let att = task.files.iter().find(|f| f.id == file).unwrap();
+        assert_eq!(now(gui.platform.read_file(task.id, att)).unwrap(), b"x");
+    }
+
+    #[test]
+    fn a_board_loaded_before_a_command_started_is_dropped() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let (loaded_after, old) = (gui.commands, now(gui.platform.load_board()));
+        let _ = gui.update(Message::App(Action::Promote(task)));
+        let _ = gui.update(Message::Loaded(loaded_after, old));
+        assert!(gui.app.board.get(task).unwrap().epic);
+        settle(&mut gui);
+        assert!(gui.app.board.get(task).unwrap().epic);
+        assert_eq!(gui.app.error, None);
     }
 }

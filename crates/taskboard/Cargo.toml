@@ -6,9 +6,10 @@ description = "Local Kanban GUI for Taskboard"
 
 [dependencies]
 taskboard-core.workspace = true
-taskboard-ui = { workspace = true, features = ["desktop"] }
+taskboard-ui.workspace = true
 iced = { version = "0.14", features = ["tokio"] }
 notify = "8"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
 tempfile.workspace = true

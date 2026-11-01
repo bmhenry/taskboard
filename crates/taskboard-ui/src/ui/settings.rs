@@ -156,8 +156,8 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
                 "Where a new task lands in its column, whether made here or with tb add.",
             ));
         body = hooks_settings(gui, body);
-        body = body.push(match &app.settings_path {
-            Some(path) => path_label(p, "Saved to", &path.display().to_string()),
+        body = body.push(match gui.platform.settings_location() {
+            Some(path) => path_label(p, "Saved to", &path),
             None => label(p, "Not saved: neither XDG_CONFIG_HOME nor HOME is set."),
         });
     }
