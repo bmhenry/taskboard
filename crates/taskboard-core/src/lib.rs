@@ -6,6 +6,7 @@ pub mod board;
 pub mod filter;
 pub mod hooks;
 pub mod model;
+pub mod ops;
 pub mod settings;
 pub mod store;
 
@@ -15,8 +16,12 @@ pub use hooks::{Hook, HookEvent, TaskEvent};
 pub use model::{
     Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task, default_link_kind, short_id,
 };
+pub use ops::{Command, FileSource, Outcome, Output};
 pub use settings::GlobalSettings;
-pub use store::{Store, create_project_dir, new_file_name, project_path, project_root};
+pub use store::{
+    ProjectInput, Store, create_project_dir, new_file_name, project_path, project_root,
+    resolve_project,
+};
 pub use ulid::Ulid;
 
 #[derive(Debug, thiserror::Error)]

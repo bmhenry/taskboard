@@ -35,7 +35,7 @@ pub struct Hook {
 }
 
 /// Something that happened to a task, for matching against hooks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskEvent {
     pub event: HookEvent,
     pub task: Ulid,

@@ -10,6 +10,7 @@ serde_json.workspace = true
 ulid.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+base64.workspace = true
 
 # ulid/rand use getrandom 0.4, which needs its JS backend in the browser
 # (wasm spike; no effect on native builds).
