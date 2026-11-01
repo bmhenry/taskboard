@@ -21,7 +21,7 @@ arrays as `vec4[8](...)` constructors (it also zero-fills any local array that
 way). Mali's compiler rejects those: `S0032: no default precision defined for
 variable 'vec4[8]'`, and wgpu panics creating
 `iced_wgpu.triangle.gradient.pipeline`. See
-`crates/taskboard-wasm-spike/SPIKE.md` for details.
+`crates/taskboard-wasm/README.md` for details.
 
 The other iced shaders don't need this. `quad/gradient.wgsl` has the same
 arrays, but iced already skips that pipeline on wasm32. The remaining arrays

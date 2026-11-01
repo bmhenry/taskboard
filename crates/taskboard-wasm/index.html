@@ -3,11 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Taskboard (wasm spike)</title>
+    <title>Taskboard</title>
     <script>
-      // Phone debugging: mirror console output and errors into an on-page log,
-      // since a phone's browser console isn't visible. Tap the log to hide it.
+      // Phone debugging, with ?debug in the URL: mirror console output and
+      // errors into an on-page log, since a phone's browser console isn't
+      // visible. Tap the log to hide it.
       (function () {
+        if (!/[?&]debug\b/.test(location.search)) return;
         var lines = [];
         var box;
         function show(kind, args) {
@@ -57,12 +59,13 @@
         });
       })();
     </script>
-    <link data-trunk rel="rust" data-bin="taskboard-wasm-spike" />
+    <link data-trunk rel="rust" data-bin="taskboard-wasm" />
     <style>
       html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
       /* The app scrolls and zooms nothing itself on touch, so the browser
          mustn't take the gesture (and cancel the app's touches) either. */
       canvas { display: block; touch-action: none; }
+      .placeholder { padding: 18px; font: 15px/1.4 sans-serif; color: #888; }
       #debug-log {
         position: fixed; left: 0; right: 0; bottom: 0; max-height: 45%; overflow: auto; margin: 0;
         padding: 6px; font: 11px/1.3 monospace; white-space: pre-wrap; word-break: break-all;
@@ -70,5 +73,8 @@
       }
     </style>
   </head>
-  <body></body>
+  <body>
+    <!-- iced replaces this with its canvas once it starts. -->
+    <div id="iced" class="placeholder">Loading…</div>
+  </body>
 </html>

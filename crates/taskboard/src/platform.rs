@@ -90,15 +90,15 @@ impl Platform for Desktop {
 
     /// rfd gives `None` both when cancelled and when there's no portal (or
     /// zenity) to show a dialog, so the latter fails silently.
-    fn pick_file(&self) -> BoxFuture<Option<FileSource>> {
+    fn pick_file(&self) -> BoxFuture<Result<Option<FileSource>, String>> {
         Box::pin(async {
             let file = rfd::AsyncFileDialog::new()
                 .set_title("Attach a file")
                 .pick_file()
-                .await?;
-            Some(FileSource::Path {
+                .await;
+            Ok(file.map(|file| FileSource::Path {
                 path: file.path().to_path_buf(),
-            })
+            }))
         })
     }
 

@@ -1,5 +1,4 @@
 use std::fs;
-#[cfg(not(target_arch = "wasm32"))]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,6 @@ use crate::model::{Attachment, Board, FileKind, SCHEMA_VERSION};
 use crate::{Error, Result};
 
 const TASKS_FILE: &str = "tasks.json";
-#[cfg(not(target_arch = "wasm32"))]
 const LOCK_FILE: &str = "lock";
 const FILES_DIR: &str = "files";
 
@@ -108,8 +106,6 @@ impl Store {
 
     /// Opens the store in `dir`, creating it if needed.
     pub fn open(dir: &Path) -> Result<Store> {
-        // wasm spike: there's no filesystem; see `memory` below.
-        #[cfg(not(target_arch = "wasm32"))]
         fs::create_dir_all(dir.join(FILES_DIR))?;
         Ok(Store {
             dir: dir.to_path_buf(),
@@ -130,9 +126,6 @@ impl Store {
 
     /// Reads the board; a missing file is an empty board.
     pub fn load(&self) -> Result<Board> {
-        #[cfg(target_arch = "wasm32")]
-        return memory::load();
-        #[cfg(not(target_arch = "wasm32"))]
         match fs::read_to_string(self.tasks_path()) {
             Ok(text) => parse_board(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Board::default()),
@@ -160,42 +153,27 @@ impl Store {
     }
 
     fn locked_update<T>(&self, f: impl FnOnce(&mut Board) -> Result<T>) -> Result<T> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut board = self.load()?;
-            let out = f(&mut board)?;
-            self.write(&board)?;
-            Ok(out)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let lock = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(self.dir.join(LOCK_FILE))?;
-            lock.lock()?;
-            let mut board = self.load()?;
-            let out = f(&mut board)?;
-            self.write(&board)?;
-            // The lock is released when `lock` drops.
-            Ok(out)
-        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(LOCK_FILE))?;
+        lock.lock()?;
+        let mut board = self.load()?;
+        let out = f(&mut board)?;
+        self.write(&board)?;
+        // The lock is released when `lock` drops.
+        Ok(out)
     }
 
     fn write(&self, board: &Board) -> Result<()> {
-        #[cfg(target_arch = "wasm32")]
-        return memory::write(board);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
-            serde_json::to_writer_pretty(&mut tmp, board)?;
-            tmp.write_all(b"\n")?;
-            tmp.as_file().sync_all()?;
-            tmp.persist(self.tasks_path())
-                .map_err(|e| Error::Io(e.error))?;
-            Ok(())
-        }
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+        serde_json::to_writer_pretty(&mut tmp, board)?;
+        tmp.write_all(b"\n")?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(self.tasks_path())
+            .map_err(|e| Error::Io(e.error))?;
+        Ok(())
     }
 
     /// Copies `src` into the store's `files/` and attaches it to task `id`.
@@ -387,41 +365,6 @@ pub fn parse_board(text: &str) -> Result<Board> {
     }
     // Migrations from older versions go here, each upgrading `value` by one step.
     Ok(serde_json::from_value(value)?)
-}
-
-/// wasm spike (task 0DC4FM): browsers have no filesystem, so on wasm32 the
-/// store keeps `tasks.json` in memory, seeded with [`seed`]. Attachments
-/// still go through `std::fs` and fail there. Phase 1 replaces this with a
-/// real backend seam.
-#[cfg(target_arch = "wasm32")]
-pub mod memory {
-    use std::cell::RefCell;
-
-    use super::parse_board;
-    use crate::Result;
-    use crate::model::Board;
-
-    thread_local! {
-        static TASKS: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
-    /// Replaces the in-memory `tasks.json`.
-    pub fn seed(text: impl Into<String>) {
-        TASKS.with(|t| *t.borrow_mut() = Some(text.into()));
-    }
-
-    pub(super) fn load() -> Result<Board> {
-        TASKS.with(|t| match t.borrow().as_deref() {
-            Some(text) => parse_board(text),
-            None => Ok(Board::default()),
-        })
-    }
-
-    pub(super) fn write(board: &Board) -> Result<()> {
-        let text = serde_json::to_string_pretty(board)?;
-        TASKS.with(|t| *t.borrow_mut() = Some(text));
-        Ok(())
-    }
 }
 
 #[cfg(test)]

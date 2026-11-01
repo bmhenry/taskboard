@@ -1,8 +1,8 @@
 [package]
-name = "taskboard-wasm-spike"
+name = "taskboard-wasm"
 version.workspace = true
 edition.workspace = true
-description = "Phase 0 spike: the taskboard GUI built for wasm32 with a fixture board"
+description = "Taskboard's web client: the iced UI in the browser, over taskboard-web's API"
 publish = false
 
 # Everything is wasm-only, so `cargo build/test --workspace` on the desktop
@@ -12,30 +12,47 @@ taskboard-core.workspace = true
 # No tokio: taskboard-ui only enables it off wasm32.
 taskboard-ui.workspace = true
 chrono = { workspace = true, features = ["wasmbind"] }
+serde.workspace = true
+serde_json.workspace = true
 # No `tokio`: iced uses wasm-bindgen-futures on the web. `webgl` lets wgpu
 # fall back to WebGL2 where WebGPU isn't available.
 iced = { version = "0.14", features = ["advanced", "webgl"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 log = "0.4"
-# The hidden-textarea soft-keyboard bridge (src/keyboard.rs).
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
+  "AbortController",
+  "AbortSignal",
   "AddEventListenerOptions",
+  "Blob",
   "CssStyleDeclaration",
   "Document",
   "DomRect",
   "Element",
   "Event",
+  "EventSource",
   "EventTarget",
+  "File",
+  "FileList",
   "FocusOptions",
+  "Headers",
   "HtmlElement",
+  "HtmlInputElement",
   "HtmlTextAreaElement",
   "InputEvent",
   "KeyboardEvent",
   "KeyboardEventInit",
+  "MessageEvent",
   "PointerEvent",
+  "Request",
+  "RequestCredentials",
+  "RequestInit",
+  "Response",
+  "Storage",
+  "Url",
   "VisualViewport",
   "Window",
 ] }

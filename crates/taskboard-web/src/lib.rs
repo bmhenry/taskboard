@@ -148,7 +148,9 @@ pub fn router(config: Config) -> Router {
         .route(api::UPLOADS, post(upload))
         .route(api::PATH_KINDS, post(path_kinds))
         .route(api::SETTINGS, get(settings).put(save_settings))
-        .route(api::EVENTS, get(events));
+        .route(api::EVENTS, get(events))
+        // Only on the routes above, not the web UI's files.
+        .layer(axum::middleware::map_response(no_store));
     let app = match &server.config.static_dir {
         Some(dir) => app.fallback_service(ServeDir::new(dir)),
         None => app.fallback(placeholder),
@@ -161,6 +163,14 @@ pub fn router(config: Config) -> Router {
             auth::guard,
         ))
         .with_state(server)
+}
+
+/// Keeps browsers from caching API answers, so the board reloaded after a
+/// change is the new one.
+async fn no_store(mut res: Response) -> Response {
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
 }
 
 async fn board(State(server): Shared) -> Result<Json<BoardResponse>, ApiError> {
@@ -616,6 +626,7 @@ mod tests {
 
         let res = f.get(api::BOARD).await;
         assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
         let res: BoardResponse = read(res).await;
         assert_eq!(res.board.tasks.len(), 2);
         assert_eq!(res.missing_projects, vec![gone]);

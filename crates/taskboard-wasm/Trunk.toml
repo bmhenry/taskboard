@@ -1,0 +1,12 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+
+# `trunk serve` hands API requests to a daemon on its default address, so the
+# client can be served by trunk while working on it.
+[[proxy]]
+backend = "http://127.0.0.1:7878/api/"

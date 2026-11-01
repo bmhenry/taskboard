@@ -331,9 +331,11 @@ fn missing_project<'a>(gui: &'a Gui, path: &'a std::path::Path) -> El<'a> {
             )
             .on_submit(Message::Relocate(from.clone()))
             .width(Length::Fill),
-            btn(p, "Browse…", Style::Normal, Message::BrowseRelocate(from.clone())),
-            btn(p, "Relocate", Style::Primary, Message::Relocate(from)),
         ]
+        .push(gui.platform.picks_folders().then(|| {
+            btn(p, "Browse…", Style::Normal, Message::BrowseRelocate(from.clone()))
+        }))
+        .push(btn(p, "Relocate", Style::Primary, Message::Relocate(from)))
         .spacing(6)
         .align_y(Alignment::Center),
         row![delete],
@@ -457,20 +459,25 @@ fn files_editor<'a>(
             .align_y(Alignment::Center),
         );
     }
-    let mut attach = row![
-        input(
-            p,
-            "attach_path",
-            "Path to a file to attach",
-            &gui.ui.attach_path,
-            false,
-            Message::AttachPath
-        )
-        .on_submit(Message::Attach(owner))
-        .width(Length::Fill),
-        btn(p, "Attach", Style::Normal, Message::Attach(owner)),
-        btn(p, "Browse…", Style::Normal, Message::Browse(owner)),
-    ]
+    // Without typed paths, picked files are uploaded, so the button says so.
+    let mut attach = if gui.platform.attaches_paths() {
+        row![
+            input(
+                p,
+                "attach_path",
+                "Path to a file to attach",
+                &gui.ui.attach_path,
+                false,
+                Message::AttachPath
+            )
+            .on_submit(Message::Attach(owner))
+            .width(Length::Fill),
+            btn(p, "Attach", Style::Normal, Message::Attach(owner)),
+            btn(p, "Browse…", Style::Normal, Message::Browse(owner)),
+        ]
+    } else {
+        row![btn(p, "Upload…", Style::Normal, Message::Browse(owner))]
+    }
     .spacing(6)
     .align_y(Alignment::Center);
     // A new file is created in the store right away, so the draft has none.
@@ -689,14 +696,18 @@ fn project_field(gui: &Gui) -> El<'_> {
     .spacing(6)
     .align_y(Alignment::Center);
     let menu = ui.project_menu_open.then(|| project_menu(gui));
+    let browses = gui.platform.picks_folders();
     let picker = row![
         container(popup(face, menu).on_dismiss(Message::CloseProjectMenu)).width(Length::Fill),
-        btn(p, "Browse…", Style::Normal, Message::BrowseProject),
     ]
+    .push(browses.then(|| btn(p, "Browse…", Style::Normal, Message::BrowseProject)))
     .spacing(6)
     .align_y(Alignment::Center);
     let hint = match app.project_input(&ui.edit_project) {
-        ProjectInput::Empty => label(p, "Pick a project, browse for a folder, or type its path."),
+        ProjectInput::Empty if browses => {
+            label(p, "Pick a project, browse for a folder, or type its path.")
+        }
+        ProjectInput::Empty => label(p, "Pick a project, or type a folder's path."),
         ProjectInput::Known(path) => {
             let name = app.board.project_name(&path);
             path_label(p, &format!("{name} ·"), &path.display().to_string())
@@ -741,12 +752,12 @@ fn project_menu(gui: &Gui) -> El<'_> {
             .into()
         });
     let list: El = if gui.app.board.projects.is_empty() {
-        container(label(
-            p,
-            "No projects yet. Browse for a folder or type its path.",
-        ))
-        .padding(6)
-        .into()
+        let empty = if gui.platform.picks_folders() {
+            "No projects yet. Browse for a folder or type its path."
+        } else {
+            "No projects yet. Type a folder's path."
+        };
+        container(label(p, empty)).padding(6).into()
     } else {
         scrollable(column(items).spacing(2))
             .direction(Direction::Vertical(

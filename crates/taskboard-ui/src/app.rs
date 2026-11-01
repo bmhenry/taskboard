@@ -406,17 +406,21 @@ impl App {
     pub fn checked(&mut self, check: PathCheck, kinds: Vec<PathKind>) {
         let paths = check.paths();
         // A path left without an answer, as when a request failed, counts
-        // as missing.
+        // as missing for what a check was for, but a refresh leaves it as
+        // it was, to be asked about again.
         let kind = kinds.first().copied().unwrap_or(PathKind::Missing);
-        let answers = paths.into_iter().zip(kinds);
         match check {
             // Only the latest check's answer is kept: an earlier one can
             // finish later, from before the path changed.
             PathCheck::Refresh { stamp, .. } => {
-                for (path, kind) in answers {
+                let mut kinds = kinds.into_iter();
+                for path in paths {
+                    let kind = kinds.next();
                     if self.checking.get(&path) == Some(&stamp) {
                         self.checking.remove(&path);
-                        self.path_kinds.insert(path, kind);
+                        if let Some(kind) = kind {
+                            self.path_kinds.insert(path, kind);
+                        }
                     }
                 }
             }
@@ -424,9 +428,9 @@ impl App {
                 if draft == self.drafts {
                     self.draft_checks = self.draft_checks.saturating_sub(1);
                 }
-                self.path_kinds.extend(answers);
+                self.path_kinds.extend(paths.into_iter().zip(kinds));
             }
-            PathCheck::Relocate { .. } => self.path_kinds.extend(answers),
+            PathCheck::Relocate { .. } => self.path_kinds.extend(paths.into_iter().zip(kinds)),
         }
         self.note_missing();
         if let Err(e) = self.act_on(check, kind) {
@@ -1605,6 +1609,21 @@ mod tests {
         app.check_projects();
         app.run_effects();
         assert!(app.missing_projects.is_empty());
+    }
+
+    #[test]
+    fn an_unanswered_refresh_flags_nothing_and_is_asked_again() {
+        let (_dir, mut app) = app();
+        add(&mut app, "alpha");
+        let project = app.default_project.clone().unwrap();
+        app.app.check_projects();
+        let Some(Effect::CheckPaths(check)) = app.app.outbox.pop_back() else {
+            panic!("projects weren't checked");
+        };
+        // As when the web client can't reach the daemon.
+        app.app.checked(check, Vec::new());
+        assert!(!app.project_missing(&project));
+        assert!(app.app.check_paths(vec![project]));
     }
 
     #[test]

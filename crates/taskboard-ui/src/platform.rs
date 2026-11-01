@@ -42,12 +42,27 @@ pub trait Platform {
     fn board_changes(&self) -> Subscription<WatchEvent>;
 
     /// Asks the user for a file to attach: a path on the desktop, its name
-    /// and contents on the web. `None` if they cancelled.
-    fn pick_file(&self) -> BoxFuture<Option<FileSource>>;
+    /// and contents on the web. `None` if they cancelled, an error if the
+    /// file can't be taken (like one too big to upload).
+    fn pick_file(&self) -> BoxFuture<Result<Option<FileSource>, String>>;
 
     /// Asks the user for a folder, with the dialog titled `title`. Always
     /// `None` on the web, where folders are typed.
     fn pick_folder(&self, title: &str) -> BoxFuture<Option<PathBuf>>;
+
+    /// Whether [`Platform::pick_folder`] can ask at all. If not, the UI
+    /// has no buttons for it, and folders are only typed.
+    fn picks_folders(&self) -> bool {
+        true
+    }
+
+    /// Whether a file can be attached by typing its path, which is read on
+    /// the machine holding the store. If not (on the web, where that's the
+    /// daemon's machine), files are only attached with
+    /// [`Platform::pick_file`], which uploads them.
+    fn attaches_paths(&self) -> bool {
+        true
+    }
 
     /// Opens `url` in the user's browser.
     fn open_url(&self, url: &str) -> Result<(), String>;

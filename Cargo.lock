@@ -4150,7 +4150,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "taskboard-wasm-spike"
+name = "taskboard-wasm"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -4159,10 +4159,13 @@ dependencies = [
  "iced",
  "js-sys",
  "log",
+ "serde",
+ "serde_json",
  "taskboard-core",
  "taskboard-ui",
  "unicode-segmentation",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
