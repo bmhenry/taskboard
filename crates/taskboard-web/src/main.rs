@@ -17,7 +17,9 @@ use taskboard_web::auth::{self, HostName};
 #[command(version, about)]
 struct Cli {
     /// Address to listen on. Keep it on localhost, and reach it from other
-    /// machines through an SSH tunnel or Tailscale.
+    /// machines through an SSH tunnel or Tailscale. Requests must name this
+    /// address in `Host`, so on 0.0.0.0 every name clients use needs
+    /// --allow-host.
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:7878")]
     bind: String,
     /// Also take requests that reach the daemon by this name, like a
@@ -56,6 +58,11 @@ async fn main() -> ExitCode {
     };
     let token = match auth::load_or_create_token(&token_path) {
         Ok(token) => token,
+        // A bad token file is named in the error already.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            eprintln!("taskboard-web: {e}");
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
             eprintln!(
                 "taskboard-web: couldn't get the token from {}: {e}",

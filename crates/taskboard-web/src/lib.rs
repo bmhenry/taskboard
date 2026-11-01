@@ -537,7 +537,22 @@ mod tests {
             host: &str,
             headers: &[(header::HeaderName, &str)],
         ) -> Response {
-            let mut req = Request::builder().uri(uri).header(header::HOST, host);
+            self.send_raw(Method::GET, uri, host, headers).await
+        }
+
+        /// Sends `method` to `uri` from `host`, with an empty body and
+        /// only the `headers` given (which may repeat).
+        async fn send_raw(
+            &self,
+            method: Method,
+            uri: &str,
+            host: &str,
+            headers: &[(header::HeaderName, &str)],
+        ) -> Response {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, host);
             for (name, value) in headers {
                 req = req.header(name, *value);
             }
@@ -962,5 +977,153 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let res = f.get_raw(api::BOARD, "localhost:7878", &auth).await;
         assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn host_headers_must_be_single_and_plain() {
+        let f = fixture();
+        let bearer = format!("Bearer {TOKEN}");
+        let twice = [
+            (header::HOST, "evil.example:7878"),
+            (header::AUTHORIZATION, bearer.as_str()),
+        ];
+        let res = f.get_raw(api::BOARD, HOST, &twice).await;
+        assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST);
+        let auth = [(header::AUTHORIZATION, bearer.as_str())];
+        for host in ["127.0.0.1:+7878", "127.0.0.1:07878", "localhost.:7878"] {
+            let res = f.get_raw(api::BOARD, host, &auth).await;
+            assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_token_link_only_redirects_within_the_daemon() {
+        let f = static_fixture();
+        for (uri, to) in [
+            (format!("//evil.com/?token={TOKEN}"), "/evil.com/"),
+            (
+                format!("///evil.com/x?token={TOKEN}&a=1"),
+                "/evil.com/x?a=1",
+            ),
+        ] {
+            let res = f.get_raw(&uri, HOST, &[]).await;
+            assert_eq!(res.status(), StatusCode::SEE_OTHER, "{uri}");
+            assert_eq!(res.headers()[header::LOCATION], to, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_token_link_works_for_head_and_defers_to_the_cookie() {
+        let f = static_fixture();
+        let res = f
+            .send_raw(Method::HEAD, &format!("/?token={TOKEN}"), HOST, &[])
+            .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(res.headers().contains_key(header::SET_COOKIE));
+
+        // Already signed in, a stale link is no reason to refuse the page.
+        let cookie = format!("tb_token={TOKEN}");
+        let with_cookie = [(header::COOKIE, cookie.as_str())];
+        let res = f.get_raw("/?token=stale", HOST, &with_cookie).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res.headers().contains_key(header::SET_COOKIE));
+        // A good one still comes off the URL.
+        let res = f
+            .get_raw(&format!("/?token={TOKEN}"), HOST, &with_cookie)
+            .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn cookies_and_bearer_tokens_are_read_leniently() {
+        let f = fixture();
+        let wrong = format!("tb_token={}", "f".repeat(64));
+        let right = format!("tb_token={TOKEN}");
+        let both = format!("a=1; {wrong}; {right}");
+        for headers in [
+            vec![(header::COOKIE, both.as_str())],
+            vec![(header::COOKIE, wrong.as_str()), (header::COOKIE, &right)],
+            vec![(header::COOKIE, "x=y"), (header::COOKIE, &right)],
+        ] {
+            let res = f.get_raw(api::BOARD, HOST, &headers).await;
+            assert_eq!(res.status(), StatusCode::OK, "{headers:?}");
+        }
+        for scheme in ["bearer", "BEARER", "Bearer"] {
+            let auth = format!("{scheme} {TOKEN}");
+            let res = f
+                .get_raw(api::BOARD, HOST, &[(header::AUTHORIZATION, &auth)])
+                .await;
+            assert_eq!(res.status(), StatusCode::OK, "{scheme}");
+        }
+        let basic = format!("Basic {TOKEN}");
+        let res = f
+            .get_raw(api::BOARD, HOST, &[(header::AUTHORIZATION, &basic)])
+            .await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_paths_get_api_errors_however_written() {
+        let f = static_fixture();
+        for uri in ["/API/board", "//api/board", "/Api", "/api"] {
+            let res = f.get_raw(uri, HOST, &[]).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let _: ErrorBody = read(res).await;
+        }
+        let res = f.get_raw("/apiary", HOST, &[]).await;
+        assert!(text(res).await.contains("printed"));
+        // A CORS preflight carries no cookie, so it's refused too.
+        let preflight = [
+            (header::ORIGIN, "http://evil.example"),
+            (header::ACCESS_CONTROL_REQUEST_METHOD, "POST"),
+        ];
+        let res = f
+            .send_raw(Method::OPTIONS, api::COMMANDS, HOST, &preflight)
+            .await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn changes_from_other_sites_are_refused() {
+        let f = fixture_with(false, HOST, &["box.ts.net"]);
+        let cookie = format!("tb_token={TOKEN}");
+        for origin in [
+            "http://evil.example",
+            "http://evil.example:7878",
+            "http://127.0.0.1:9999",
+            "http://127.0.0.1",
+            "ftp://127.0.0.1:7878",
+            "null",
+            "",
+        ] {
+            let headers = [(header::COOKIE, cookie.as_str()), (header::ORIGIN, origin)];
+            for method in [Method::POST, Method::PUT, Method::DELETE] {
+                let res = f.send_raw(method, api::COMMANDS, HOST, &headers).await;
+                assert_eq!(res.status(), StatusCode::FORBIDDEN, "{origin}");
+                let _: ErrorBody = read(res).await;
+            }
+            // Reads don't change anything, so they aren't checked.
+            let res = f.get_raw(api::BOARD, HOST, &headers).await;
+            assert_eq!(res.status(), StatusCode::OK, "{origin}");
+        }
+        // The daemon's own pages, under any of its names, and clients that
+        // send no Origin get through (to complain about the empty body).
+        for origin in [
+            Some("http://127.0.0.1:7878"),
+            Some("http://LOCALHOST:7878"),
+            Some("http://box.ts.net:7878"),
+            None,
+        ] {
+            let mut headers = vec![(header::COOKIE, cookie.as_str())];
+            headers.extend(origin.map(|o| (header::ORIGIN, o)));
+            let res = f
+                .send_raw(Method::POST, api::COMMANDS, HOST, &headers)
+                .await;
+            assert_eq!(
+                res.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{origin:?}"
+            );
+        }
     }
 }

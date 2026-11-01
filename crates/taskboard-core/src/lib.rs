@@ -52,11 +52,12 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
 }
 
 /// `$<var>/tb`, falling back to `~/<fallback>/tb` as the XDG base directory
-/// spec says. `None` if neither variable is set.
+/// spec says, which includes ignoring a relative `$<var>`, so nothing lands
+/// wherever the program happened to start. `None` if neither is set.
 fn xdg_dir(var: &str, fallback: &str) -> Option<std::path::PathBuf> {
     let base = std::env::var_os(var)
-        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
+        .filter(|v| v.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(fallback)))?;
     Some(base.join("tb"))
 }
