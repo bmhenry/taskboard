@@ -8,6 +8,9 @@
 //! a `.br` or `.gz` copy of it next to it (the build script makes them) is
 //! sent instead to browsers that take one.
 
+use std::borrow::Cow;
+
+use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::EmbeddedFile;
@@ -36,7 +39,8 @@ const ENCODINGS: [(&str, &str); 2] = [("br", ".br"), ("gzip", ".gz")];
 /// Serves `uri`'s file from `bundle`, `/` being `index.html`.
 pub fn serve(bundle: Bundle, method: &Method, uri: &Uri, headers: &HeaderMap) -> Response {
     if method != Method::GET && method != Method::HEAD {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+        let allow = [(header::ALLOW, HeaderValue::from_static("GET, HEAD"))];
+        return (StatusCode::METHOD_NOT_ALLOWED, allow).into_response();
     }
     let path = match uri.path().trim_start_matches('/') {
         "" => "index.html",
@@ -49,10 +53,18 @@ pub fn serve(bundle: Bundle, method: &Method, uri: &Uri, headers: &HeaderMap) ->
     if content_type.starts_with("text/") {
         content_type.push_str("; charset=utf-8");
     }
-    let accepted = ENCODINGS.iter().find_map(|&(encoding, suffix)| {
-        let copy = bundle(&format!("{path}{suffix}"))?;
-        accepts(headers, encoding).then_some((encoding, copy))
-    });
+    // The copy the browser weighs highest, the first in `ENCODINGS` on a tie.
+    let mut accepted: Option<(f32, &str, EmbeddedFile)> = None;
+    for (encoding, suffix) in ENCODINGS {
+        let weight = weight(headers, encoding);
+        if weight > 0.0
+            && accepted.as_ref().is_none_or(|(best, ..)| weight > *best)
+            && let Some(copy) = bundle(&format!("{path}{suffix}"))
+        {
+            accepted = Some((weight, encoding, copy));
+        }
+    }
+    let accepted = accepted.map(|(_, encoding, copy)| (encoding, copy));
     let (encoding, file) = match accepted {
         Some((encoding, copy)) => (Some(encoding), copy),
         None => (None, file),
@@ -63,7 +75,12 @@ pub fn serve(bundle: Bundle, method: &Method, uri: &Uri, headers: &HeaderMap) ->
     let mut res = if if_none_match(headers, &etag) {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        let mut res = file.data.into_owned().into_response();
+        // Embedded data is borrowed, so it isn't copied for each request.
+        let body = match file.data {
+            Cow::Borrowed(data) => Bytes::from_static(data),
+            Cow::Owned(data) => Bytes::from(data),
+        };
+        let mut res = body.into_response();
         let headers = res.headers_mut();
         headers.insert(
             header::CONTENT_TYPE,
@@ -89,21 +106,29 @@ pub fn serve(bundle: Bundle, method: &Method, uri: &Uri, headers: &HeaderMap) ->
     res
 }
 
-/// Whether `Accept-Encoding` takes `encoding`, with a nonzero weight.
-fn accepts(headers: &HeaderMap, encoding: &str) -> bool {
+/// How much `Accept-Encoding` wants `encoding`, 0 for not at all. Naming
+/// it outweighs `*`, so `br;q=0, *` refuses br.
+fn weight(headers: &HeaderMap, encoding: &str) -> f32 {
+    let mut named = None;
+    let mut any = None;
     let values = headers.get_all(header::ACCEPT_ENCODING).iter();
-    values
+    for item in values
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|item| {
-            let mut parts = item.split(';').map(str::trim);
-            let name = parts.next().unwrap_or("");
-            let weight = parts
-                .find_map(|p| p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")))
-                .and_then(|q| q.parse::<f32>().ok())
-                .unwrap_or(1.0);
-            (name.eq_ignore_ascii_case(encoding) || name == "*") && weight > 0.0
-        })
+    {
+        let mut parts = item.split(';').map(str::trim);
+        let name = parts.next().unwrap_or("");
+        let weight = parts
+            .find_map(|p| p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")))
+            .map_or(Some(1.0), |q| q.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        if name.eq_ignore_ascii_case(encoding) {
+            named = Some(weight);
+        } else if name == "*" {
+            any = Some(weight);
+        }
+    }
+    named.or(any).unwrap_or(0.0)
 }
 
 /// Whether `If-None-Match` names `etag` (or anything, with `*`).
@@ -156,17 +181,20 @@ mod tests {
     }
 
     #[test]
-    fn encodings_with_no_weight_are_refused() {
+    fn encodings_are_weighed() {
         let with = |value: &'static str| {
             let mut headers = HeaderMap::new();
             headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(value));
             headers
         };
-        assert!(accepts(&with("gzip, deflate, br, zstd"), "br"));
-        assert!(accepts(&with("GZIP;q=0.5"), "gzip"));
-        assert!(accepts(&with("*"), "gzip"));
-        assert!(!accepts(&with("gzip;q=0, br"), "gzip"));
-        assert!(!accepts(&with("identity"), "gzip"));
-        assert!(!accepts(&HeaderMap::new(), "gzip"));
+        assert_eq!(weight(&with("gzip, deflate, br, zstd"), "br"), 1.0);
+        assert_eq!(weight(&with("GZIP;q=0.5"), "gzip"), 0.5);
+        assert_eq!(weight(&with("*"), "gzip"), 1.0);
+        assert_eq!(weight(&with("gzip;q=0, br"), "gzip"), 0.0);
+        assert_eq!(weight(&with("br;q=0, *"), "br"), 0.0);
+        assert_eq!(weight(&with("*, br;q=0"), "br"), 0.0);
+        assert_eq!(weight(&with("gzip;q=nonsense"), "gzip"), 0.0);
+        assert_eq!(weight(&with("identity"), "gzip"), 0.0);
+        assert_eq!(weight(&HeaderMap::new(), "gzip"), 0.0);
     }
 }

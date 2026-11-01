@@ -1233,6 +1233,72 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         let res = f.send_raw(Method::POST, "/", HOST, &signed_in).await;
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(res.headers()[header::ALLOW], "GET, HEAD");
+    }
+
+    #[tokio::test]
+    async fn the_built_in_web_ui_negotiates_encodings() {
+        let f = fixture_with(WebUi::Embedded, HOST, &[]);
+        let cookie = format!("tb_token={TOKEN}");
+        let js = "/app-0123456789abcdef.js";
+        let wasm = "/app-0123456789abcdef_bg.wasm";
+        // The fixture's js has .br and .gz copies, its wasm only a .gz.
+        for (uri, accept, want) in [
+            (js, "br", Some("br")),
+            (js, "gzip, br", Some("br")),
+            (js, "gzip, br;q=0.5", Some("gzip")),
+            (js, "br;q=0, *", Some("gzip")),
+            (js, "*, br;q=0", Some("gzip")),
+            (js, "br;q=0, gzip;q=0, *", None),
+            (js, "identity", None),
+            (wasm, "br", None),
+            (wasm, "br, gzip;q=0.1", Some("gzip")),
+        ] {
+            let headers = [
+                (header::COOKIE, cookie.as_str()),
+                (header::ACCEPT_ENCODING, accept),
+            ];
+            let res = f.get_raw(uri, HOST, &headers).await;
+            assert_eq!(res.status(), StatusCode::OK, "{uri} {accept}");
+            let got = res.headers().get(header::CONTENT_ENCODING);
+            assert_eq!(got.map(|v| v.to_str().unwrap()), want, "{uri} {accept}");
+        }
+
+        // HEAD has the headers GET would, and no body.
+        let headers = [
+            (header::COOKIE, cookie.as_str()),
+            (header::ACCEPT_ENCODING, "br"),
+        ];
+        let res = f.send_raw(Method::HEAD, js, HOST, &headers).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_ENCODING], "br");
+        assert!(
+            res.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains("javascript")
+        );
+        assert_eq!(res.headers()[header::CACHE_CONTROL], assets::FOREVER);
+        let etag = res.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert!(text(res).await.is_empty());
+
+        for (if_none_match, status) in [
+            ("*", StatusCode::NOT_MODIFIED),
+            (
+                &format!("\"0000\", {etag}") as &str,
+                StatusCode::NOT_MODIFIED,
+            ),
+            (&format!("W/{etag}"), StatusCode::NOT_MODIFIED),
+            ("\"0000\", \"1111\"", StatusCode::OK),
+        ] {
+            let headers = [
+                (header::COOKIE, cookie.as_str()),
+                (header::ACCEPT_ENCODING, "br"),
+                (header::IF_NONE_MATCH, if_none_match),
+            ];
+            let res = f.get_raw(js, HOST, &headers).await;
+            assert_eq!(res.status(), status, "{if_none_match}");
+        }
     }
 
     #[tokio::test]
