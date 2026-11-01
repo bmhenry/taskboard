@@ -7,11 +7,15 @@
 #[path = "../../taskboard/src/app.rs"]
 mod app;
 #[cfg(target_arch = "wasm32")]
+mod keyboard;
+#[cfg(target_arch = "wasm32")]
 #[path = "../../taskboard/src/markdown.rs"]
 mod markdown;
 #[cfg(target_arch = "wasm32")]
 #[path = "../../taskboard/src/source_link.rs"]
 mod source_link;
+#[cfg(any(target_arch = "wasm32", test))]
+mod text_diff;
 #[cfg(target_arch = "wasm32")]
 #[path = "../../taskboard/src/ui/mod.rs"]
 mod ui;
@@ -41,7 +45,7 @@ fn main() -> iced::Result {
             Gui::new(app)
         },
         update,
-        Gui::view,
+        view,
     )
     .title(Gui::title)
     .subscription(Gui::subscription)
@@ -53,6 +57,12 @@ fn main() -> iced::Result {
     .default_font(theme::REGULAR)
     .antialiasing(true)
     .run()
+}
+
+/// `Gui::view` with the soft-keyboard bridge for phones (see `keyboard.rs`).
+#[cfg(target_arch = "wasm32")]
+fn view(gui: &ui::Gui) -> iced::Element<'_, ui::Message> {
+    keyboard::bridge(gui.view())
 }
 
 /// `Gui::update`, logging to the browser console when timer and frame

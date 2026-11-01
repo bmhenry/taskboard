@@ -3917,9 +3917,13 @@ dependencies = [
  "iced",
  "iced_drop",
  "image",
+ "js-sys",
  "log",
  "pulldown-cmark",
  "taskboard-core",
+ "unicode-segmentation",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
