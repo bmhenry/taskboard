@@ -10,7 +10,8 @@ use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::widget::{
-    Id, Space, button, column, container, hover, image, mouse_area, row, scrollable, text,
+    Id, Space, button, column, container, hover, image, keyed_column, mouse_area, row, scrollable,
+    text,
 };
 use iced::{Alignment, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 use taskboard_core::{Board, LinkKind, Status, Task, Ulid};
@@ -20,7 +21,7 @@ use super::theme::{self, BOLD, Pal, Style, rgb, status_index};
 use super::widgets::{
     El, btn, count_badge, dot, epic_badge, grow, missing_project_badge, parent_label, plural,
 };
-use super::{EDGE, Gui, Message, side_width};
+use super::{Gui, Message, edge, side_width};
 use crate::app::{Action, DRAG_THRESHOLD, EditTarget, View};
 use crate::source_link::{self, Site};
 
@@ -59,7 +60,7 @@ pub fn card_id(id: Ulid) -> Id {
 pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
     let app = &gui.app;
     // Columns share the board's width, down to a minimum, past which it scrolls.
-    let mut room = window_width - 2.0 * EDGE;
+    let mut room = window_width - 2.0 * edge(window_width);
     if app.editing.is_some() || app.selected_task().is_some() {
         room -= side_width(window_width) + 12.0;
     }
@@ -76,7 +77,7 @@ pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
         if app.column_collapsed(status) {
             collapsed_column(gui, status)
         } else {
-            board_column(gui, status, column_width)
+            board_column(gui, status, column_width, false)
         }
     });
     scrollable(row(columns).spacing(COLUMN_GAP).height(Length::Fill))
@@ -89,6 +90,67 @@ pub fn board(gui: &Gui, window_width: f32) -> El<'_> {
         .height(Length::Fill)
         .style(move |_, status| theme::scroll_style(gui.pal(), status))
         .into()
+}
+
+/// One column at a time, with a tab for each status to pick it. A card
+/// dragged onto another status's tab lands at the bottom of that column.
+pub fn compact_board(gui: &Gui, window_width: f32) -> El<'_> {
+    let shown = gui.compact_column();
+    let tabs = Status::ALL
+        .into_iter()
+        .map(|status| status_tab(gui, status, status == shown));
+    let add = btn(
+        gui.pal(),
+        "+",
+        Style::Quiet,
+        Message::App(Action::Edit(EditTarget::New(shown))),
+    );
+    let width = window_width - 2.0 * edge(window_width);
+    // Keyed so a column doesn't take on the last one's scroll position.
+    let shown_column = keyed_column([(shown, board_column(gui, shown, width, true))]);
+    column![
+        row(tabs.chain([add])).spacing(6).wrap().vertical_spacing(6),
+        shown_column.height(Length::Fill),
+    ]
+    .spacing(8)
+    .height(Length::Fill)
+    .into()
+}
+
+/// A compact board's tab: a status and how many tasks it has. Like a
+/// collapsed column, it's a place to drop cards unless it's the `shown` one,
+/// whose column is.
+fn status_tab(gui: &Gui, status: Status, shown: bool) -> El<'_> {
+    let p = gui.pal();
+    let target = drop_target(gui, status);
+    let face = row![
+        dot(p.status_color(status)),
+        text(status.label())
+            .size(13)
+            .color(rgb(p.text))
+            .wrapping(Wrapping::None),
+        count_badge(p, gui.app.visible_column(status).len()),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let tab = container(
+        button(face)
+            .padding([4, 8])
+            .style(theme::bare_button)
+            .on_press(Message::ShowColumn(status)),
+    )
+    .style(move |_| {
+        if shown {
+            theme::boxed(p.card, p.accent, 8.0)
+        } else {
+            column_style(p, target)
+        }
+    });
+    if shown {
+        tab.into()
+    } else {
+        tab.id(column_id(status)).into()
+    }
 }
 
 /// The dragged card would land in this column.
@@ -131,7 +193,9 @@ fn collapsed_column(gui: &Gui, status: Status) -> El<'_> {
     .into()
 }
 
-fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
+/// A column's cards, under its header unless it's `compact`, where its tab
+/// and the strip of tabs do the header's work.
+fn board_column(gui: &Gui, status: Status, width: f32, compact: bool) -> El<'_> {
     let (app, p) = (&gui.app, gui.pal());
     let tasks = app.visible_column(status);
     let target = drop_target(gui, status);
@@ -221,13 +285,18 @@ fn board_column(gui: &Gui, status: Status, width: f32) -> El<'_> {
         .height(Length::Fill)
         .style(move |_, s| theme::scroll_style(p, s));
 
-    container(column![header, cards].spacing(8))
-        .id(column_id(status))
-        .padding(8)
-        .width(width)
-        .height(Length::Fill)
-        .style(move |_| column_style(p, target))
-        .into()
+    container(
+        column![]
+            .push((!compact).then_some(header))
+            .push(cards)
+            .spacing(8),
+    )
+    .id(column_id(status))
+    .padding(8)
+    .width(width)
+    .height(Length::Fill)
+    .style(move |_| column_style(p, target))
+    .into()
 }
 
 /// The gap at `slot`, which opens to a box the size of the dragged card

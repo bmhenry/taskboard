@@ -8,7 +8,7 @@ use taskboard_core::{Attachment, FileKind};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::widgets::{El, btn, grow, label, save_keys};
-use super::{FILE_EDITOR, Gui, Message};
+use super::{FILE_EDITOR, Gui, Message, dialog_width};
 use crate::app::Action;
 use crate::markdown::{self, BlockKind};
 
@@ -141,7 +141,7 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
 /// The viewer's frame around `content`, sized to the window.
 fn dialog<'a>(p: Pal, content: iced::widget::Column<'a, Message>, window: Size) -> El<'a> {
     container(content)
-        .width((window.width * 0.8).min(1100.0))
+        .width(dialog_width(window.width, (window.width * 0.8).min(1100.0)))
         .height(window.height * 0.85)
         .padding(16)
         .style(move |_| container::Style {

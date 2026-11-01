@@ -192,7 +192,10 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, 
         let node = self.content.as_widget_mut().layout(
             self.tree,
             renderer,
-            &layout::Limits::new(Size::ZERO, bounds),
+            &layout::Limits::new(
+                Size::ZERO,
+                Size::new(bounds.width - 2.0 * GAP, bounds.height),
+            ),
         );
         let at = popup_position(self.anchor, node.size(), bounds);
         node.move_to(at)

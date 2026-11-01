@@ -11,7 +11,7 @@ use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::widgets::{
     El, btn, checkbox, grow, help_bubble, input, label, path_label, section_title,
 };
-use super::{Gui, KEYBINDINGS, Message};
+use super::{Gui, KEYBINDINGS, Message, dialog_width};
 use crate::app::Action;
 
 const PASS_ID_HELP: &[(&str, bool)] = &[
@@ -168,7 +168,10 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
             ))
             .style(move |_, s| theme::scroll_style(p, s)),
     )
-    .width(460.0_f32.min(window.width * 0.9))
+    .width(dialog_width(
+        window.width,
+        460.0_f32.min(window.width * 0.9),
+    ))
     .max_height(window.height * 0.85)
     .style(move |_| container::Style {
         border: Border {
