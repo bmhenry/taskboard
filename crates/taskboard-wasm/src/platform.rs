@@ -122,8 +122,9 @@ impl Platform for Web {
             .map_err(|e| format!("couldn't open {url}: {}", js_error(e)))
     }
 
-    /// Paths the daemon can't be asked about count as missing, as the
-    /// desktop counts paths it can't read.
+    /// Paths the daemon can't be asked about count as folders: when it
+    /// can't be reached, every project would otherwise show as missing,
+    /// offering to relocate or delete it.
     fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
         Box::pin(async move {
             let asked = match Body::json(&paths) {
@@ -134,7 +135,7 @@ impl Platform for Web {
                 Ok(kinds) => kinds,
                 Err(e) => {
                     log::warn!("couldn't check paths: {e}");
-                    vec![PathKind::Missing; paths.len()]
+                    vec![PathKind::Dir; paths.len()]
                 }
             }
         })

@@ -12,7 +12,7 @@ use web_sys::{Headers, Request, RequestCredentials, RequestInit, Response};
 
 /// What a request the daemon refused for want of its sign-in cookie fails
 /// with.
-pub const UNAUTHORIZED: &str = "The daemon didn't let this browser in. Open the URL printed in the daemon's log (it ends in ?token=…) to sign in, then reload.";
+pub const UNAUTHORIZED: &str = "Not signed in to the daemon: open the link it printed when it started (the one ending in ?token=…), then reload this page";
 
 /// What's sent with a request.
 pub enum Body {
