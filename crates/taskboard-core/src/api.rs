@@ -6,17 +6,20 @@
 //! - `POST` [`COMMANDS`] with a [`Command`] → the [`Outcome`] of
 //!   [`crate::ops::execute`]. Commands that read files on the daemon's
 //!   machine are refused; see [`Command::is_remote_safe`].
-//! - `GET` [`FILES`]`/{task}/{file}` (ids) → the attachment's bytes.
+//! - `GET` [`FILES`]`/{task}/{file}` (ids) → the attachment's bytes, as a
+//!   download named after it.
 //! - `POST` [`UPLOADS`]`?task=…&name=…` ([`UploadQuery`]) with a file's raw
-//!   bytes → the [`Outcome`] of attaching it to the task, as a
-//!   [`Command::Attach`] with [`FileSource::Bytes`] would, without base64.
+//!   bytes, sent as `application/octet-stream` → the [`Outcome`] of attaching
+//!   it to the task, as a [`Command::Attach`] with [`FileSource::Bytes`]
+//!   would, without base64.
 //! - `POST` [`PATH_KINDS`] with a list of paths → a [`PathKind`] for each.
 //! - `GET` [`SETTINGS`] → [`SettingsResponse`]; `PUT` [`SETTINGS`] with
 //!   [`GlobalSettings`] saves them.
 //! - `GET` [`EVENTS`] → server-sent events, each a [`BoardEvent`] in its
 //!   `data`.
 //!
-//! Failures have a 4xx or 5xx status and an [`ErrorBody`].
+//! When one of these fails, including when the request is malformed, the
+//! response has a 4xx or 5xx status and an [`ErrorBody`].
 //!
 //! [`Command`]: crate::Command
 //! [`Command::Attach`]: crate::Command::Attach

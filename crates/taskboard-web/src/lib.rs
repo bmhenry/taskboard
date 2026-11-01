@@ -7,14 +7,17 @@
 //! through, like authentication, can go on it as a `.layer`.
 
 use std::convert::Infallible;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
+use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -30,6 +33,10 @@ use tower_http::services::ServeDir;
 /// The largest request body taken, which bounds uploads: attaching a file in
 /// a command sends it as base64, a third bigger again.
 pub const MAX_BODY: usize = 64 * 1024 * 1024;
+
+/// How long [`events`] waits after a change for the rest of its burst: one
+/// save makes several watcher events, which should make one server event.
+const SETTLE: Duration = Duration::from_millis(150);
 
 /// How the daemon is set up.
 pub struct Config {
@@ -55,7 +62,9 @@ struct Server {
     changes: broadcast::Sender<()>,
     /// Why the store can't be watched, if it can't.
     watch_failure: Option<String>,
-    /// Kept for as long as the server runs, to keep watching.
+    /// Kept for as long as the server runs, to keep watching. It's never
+    /// locked: the `Mutex` only makes it `Sync`, as axum's state must be,
+    /// which not every platform's watcher is.
     _watcher: Option<Mutex<Box<dyn Send>>>,
 }
 
@@ -157,7 +166,7 @@ async fn board(State(server): Shared) -> Result<Json<BoardResponse>, ApiError> {
 
 async fn command(
     State(server): Shared,
-    Json(command): Json<Command>,
+    JsonBody(command): JsonBody<Command>,
 ) -> Result<Json<Outcome>, ApiError> {
     if !command.is_remote_safe() {
         return Err(ApiError {
@@ -169,38 +178,65 @@ async fn command(
     blocking(move || server.run(command).map(Json)).await
 }
 
-/// The contents of `file`, one of `task`'s attachments. It's sent as bytes
+/// The contents of `file`, one of `task`'s attachments. It's sent as a file
 /// to save, never as a page the browser would show, so an attached HTML file
 /// can't run scripts in the daemon's origin.
 async fn file(
     State(server): Shared,
-    Path((task, file)): Path<(Ulid, Ulid)>,
+    ApiPath((task, file)): ApiPath<(Ulid, Ulid)>,
 ) -> Result<Response, ApiError> {
-    let bytes = blocking(move || {
+    let (name, bytes) = blocking(move || {
         let store = &server.config.store;
         let board = store.load()?;
         let attachment = board
             .get(task)
             .and_then(|t| t.files.iter().find(|f| f.id == file))
-            .ok_or_else(|| ApiError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("task {task} has no file {file}"),
-            })?;
-        Ok(std::fs::read(store.file_path(attachment)).map_err(taskboard_core::Error::from)?)
+            .ok_or_else(|| not_found(format!("task {task} has no file {file}")))?;
+        match std::fs::read(store.file_path(attachment)) {
+            Ok(bytes) => Ok((attachment.name.clone(), bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found(format!(
+                "{} is missing from the store",
+                attachment.name
+            ))),
+            Err(e) => Err(taskboard_core::Error::from(e).into()),
+        }
     })
     .await?;
-    let headers = [
-        (header::CONTENT_TYPE, "application/octet-stream"),
-        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-    ];
-    Ok((headers, bytes).into_response())
+    let mut res = bytes.into_response();
+    let headers = res.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    let disposition = HeaderValue::from_str(&content_disposition(&name))
+        .expect("percent-encoded names are plain ASCII");
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(res)
+}
+
+/// A `Content-Disposition` to save a file as `name`, which is encoded as
+/// RFC 5987 says, so any name survives.
+fn content_disposition(name: &str) -> String {
+    let mut encoded = String::new();
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            encoded.push(b as char);
+        } else {
+            let _ = write!(encoded, "%{b:02X}");
+        }
+    }
+    format!("attachment; filename*=UTF-8''{encoded}")
 }
 
 /// Attaches the body, a file's raw contents, to a task.
 async fn upload(
     State(server): Shared,
-    Query(UploadQuery { task, name }): Query<UploadQuery>,
-    body: Bytes,
+    ApiQuery(UploadQuery { task, name }): ApiQuery<UploadQuery>,
+    Upload(body): Upload,
 ) -> Result<Json<Outcome>, ApiError> {
     let command = Command::Attach {
         task,
@@ -212,7 +248,9 @@ async fn upload(
     blocking(move || server.run(command).map(Json)).await
 }
 
-async fn path_kinds(Json(paths): Json<Vec<PathBuf>>) -> Result<Json<Vec<PathKind>>, ApiError> {
+async fn path_kinds(
+    JsonBody(paths): JsonBody<Vec<PathBuf>>,
+) -> Result<Json<Vec<PathKind>>, ApiError> {
     blocking(move || Ok(Json(paths.iter().map(|p| PathKind::of(p)).collect()))).await
 }
 
@@ -228,7 +266,7 @@ async fn settings(State(server): Shared) -> Result<Json<SettingsResponse>, ApiEr
 
 async fn save_settings(
     State(server): Shared,
-    Json(settings): Json<GlobalSettings>,
+    JsonBody(settings): JsonBody<GlobalSettings>,
 ) -> Result<StatusCode, ApiError> {
     blocking(move || {
         let path = server
@@ -245,8 +283,9 @@ async fn save_settings(
     .await
 }
 
-/// Server-sent [`BoardEvent`]s: [`BoardEvent::Changed`] first, then for each
-/// change to the store, or [`BoardEvent::Failed`] if it isn't watched.
+/// Server-sent [`BoardEvent`]s: [`BoardEvent::Changed`] first, then one for
+/// each burst of changes to the store, or [`BoardEvent::Failed`] if it isn't
+/// watched.
 async fn events(State(server): Shared) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let first = match &server.watch_failure {
         Some(reason) => BoardEvent::Failed {
@@ -259,13 +298,14 @@ async fn events(State(server): Shared) -> Sse<impl Stream<Item = Result<Event, I
     // the browser doesn't keep reconnecting.
     let changes = server.changes.subscribe();
     let rest = stream::unfold(changes, |mut changes| async move {
-        match changes.recv().await {
-            // Missed changes are covered by the reload this one causes.
-            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                Some((BoardEvent::Changed, changes))
-            }
-            Err(broadcast::error::RecvError::Closed) => None,
+        use broadcast::error::{RecvError, TryRecvError};
+        // Missed changes are covered by the reload this one causes.
+        if let Err(RecvError::Closed) = changes.recv().await {
+            return None;
         }
+        tokio::time::sleep(SETTLE).await;
+        while let Ok(()) | Err(TryRecvError::Lagged(_)) = changes.try_recv() {}
+        Some((BoardEvent::Changed, changes))
     });
     let events = stream::once(async { first })
         .chain(rest)
@@ -300,12 +340,75 @@ fn json(value: &impl serde::Serialize) -> String {
     serde_json::to_string(value).expect("API types serialize")
 }
 
+/// [`axum::Json`] for requests, failing with an [`ApiError`].
+#[derive(FromRequest)]
+#[from_request(via(axum::Json), rejection(ApiError))]
+struct JsonBody<T>(T);
+
+/// [`axum::extract::Query`], failing with an [`ApiError`].
+#[derive(FromRequestParts)]
+#[from_request(via(axum::extract::Query), rejection(ApiError))]
+struct ApiQuery<T>(T);
+
+/// [`axum::extract::Path`], failing with an [`ApiError`].
+#[derive(FromRequestParts)]
+#[from_request(via(axum::extract::Path), rejection(ApiError))]
+struct ApiPath<T>(T);
+
+/// An upload's body: a file's raw bytes, sent as `application/octet-stream`.
+/// Requiring that type (as JSON is required elsewhere) makes browsers ask
+/// the daemon before sending one from another site, with a CORS preflight.
+struct Upload(Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for Upload {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Upload, ApiError> {
+        let octets = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/octet-stream"));
+        if !octets {
+            return Err(ApiError {
+                status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                message: "uploads must be sent as application/octet-stream".into(),
+            });
+        }
+        Ok(Upload(Bytes::from_request(req, state).await?))
+    }
+}
+
 /// A failed request, sent as an [`ErrorBody`].
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
 }
+
+fn not_found(message: String) -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        message,
+    }
+}
+
+/// Makes axum's rejections of a request [`ApiError`]s, keeping their status.
+macro_rules! from_rejection {
+    ($($rejection:ty),*) => {$(
+        impl From<$rejection> for ApiError {
+            fn from(r: $rejection) -> ApiError {
+                ApiError {
+                    status: r.status(),
+                    message: r.body_text(),
+                }
+            }
+        }
+    )*};
+}
+
+from_rejection!(JsonRejection, QueryRejection, PathRejection, BytesRejection);
 
 impl From<taskboard_core::Error> for ApiError {
     fn from(e: taskboard_core::Error) -> ApiError {
@@ -376,13 +479,25 @@ mod tests {
 
     impl Fixture {
         async fn send(&self, method: Method, uri: &str, body: Body) -> Response {
+            self.send_as(method, uri, "application/json", body).await
+        }
+
+        async fn send_as(&self, method: Method, uri: &str, ty: &str, body: Body) -> Response {
             let req = Request::builder()
                 .method(method)
                 .uri(uri)
-                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_TYPE, ty)
                 .body(body)
                 .unwrap();
             self.app.clone().oneshot(req).await.unwrap()
+        }
+
+        /// Uploads `bytes` as `name`, which is already percent-encoded.
+        async fn upload(&self, task: Ulid, name: &str, bytes: &'static str) -> Response {
+            let uri = format!("{}?task={task}&name={name}", api::UPLOADS);
+            let body = Body::from(bytes);
+            self.send_as(Method::POST, &uri, "application/octet-stream", body)
+                .await
         }
 
         async fn get(&self, uri: &str) -> Response {
@@ -478,6 +593,18 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         let ErrorBody { error } = read(res).await;
         assert!(error.contains("no task"), "{error}");
+
+        // So do requests that can't be read.
+        let res = f
+            .send(Method::POST, api::COMMANDS, Body::from(r#"{"type": "#))
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let ErrorBody { error } = read(res).await;
+        assert!(!error.is_empty());
+        let res = f.post(api::COMMANDS, json!({"type": "fly"})).await;
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let ErrorBody { error } = read(res).await;
+        assert!(error.contains("fly"), "{error}");
     }
 
     #[tokio::test]
@@ -513,20 +640,23 @@ mod tests {
     async fn uploads_attach_and_files_serve_them() {
         let f = fixture();
         let id = f.add("t", &f.project);
-        let uri = format!("{}?task={id}&name=notes.md", api::UPLOADS);
-        let res = f.send(Method::POST, &uri, Body::from("# Notes\n")).await;
+        let res = f.upload(id, "my%20notes.md", "# Notes\n").await;
         assert_eq!(res.status(), StatusCode::OK);
         let Outcome { output, .. } = read(res).await;
         let Output::File { file } = output else {
             panic!("expected File, got {output:?}");
         };
-        assert_eq!(file.name, "notes.md");
+        assert_eq!(file.name, "my notes.md");
 
         let res = f.get(&format!("{}/{id}/{}", api::FILES, file.id)).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
             res.headers()[header::CONTENT_TYPE],
             "application/octet-stream"
+        );
+        assert_eq!(
+            res.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename*=UTF-8''my%20notes.md"
         );
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[..], b"# Notes\n");
@@ -535,10 +665,35 @@ mod tests {
         let other = f.add("other", &f.project);
         let res = f.get(&format!("{}/{other}/{}", api::FILES, file.id)).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        // Names are file names, not paths.
-        let uri = format!("{}?task={id}&name=..%2Fescape", api::UPLOADS);
-        let res = f.send(Method::POST, &uri, Body::from("x")).await;
+        let unknown = Ulid::generate();
+        let res = f.get(&format!("{}/{id}/{unknown}", api::FILES)).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = f.get(&format!("{}/{id}/not-an-id", api::FILES)).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _: ErrorBody = read(res).await;
+        // So is one the store has lost.
+        std::fs::remove_file(f.store.file_path(&file)).unwrap();
+        let res = f.get(&format!("{}/{id}/{}", api::FILES, file.id)).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn uploads_need_plain_names_and_their_content_type() {
+        let f = fixture();
+        let id = f.add("t", &f.project);
+        // Names are file names, not paths.
+        let res = f.upload(id, "..%2Fescape", "x").await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _: ErrorBody = read(res).await;
+        // text/plain, which browsers send across sites without asking, is
+        // refused.
+        let uri = format!("{}?task={id}&name=a.txt", api::UPLOADS);
+        let res = f
+            .send_as(Method::POST, &uri, "text/plain", Body::from("x"))
+            .await;
+        assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let _: ErrorBody = read(res).await;
+        assert!(f.store.load().unwrap().tasks[0].files.is_empty());
     }
 
     #[tokio::test]
@@ -579,18 +734,20 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()[header::CONTENT_TYPE], "text/event-stream");
         let mut body = res.into_body();
-        let mut next = async || {
-            let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
-                .await
-                .expect("an event within 5s")
-                .unwrap()
-                .unwrap();
-            String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
-        };
         let changed = format!("data: {}\n\n", json(&BoardEvent::Changed));
-        // One on connecting, then one for a change made elsewhere.
-        assert_eq!(next().await, changed);
+        // One on connecting, then just one for a change made elsewhere,
+        // though saving it makes several watcher events.
+        let wait = Duration::from_secs(5);
+        assert_eq!(next_event(&mut body, wait).await.unwrap(), changed);
         f.add("from tb", &f.project);
-        assert_eq!(next().await, changed);
+        assert_eq!(next_event(&mut body, wait).await.unwrap(), changed);
+        assert_eq!(next_event(&mut body, SETTLE * 4).await, None);
+    }
+
+    /// The next event `body` sends within `wait`, if any.
+    async fn next_event(body: &mut Body, wait: Duration) -> Option<String> {
+        let frame = tokio::time::timeout(wait, body.frame()).await.ok()?;
+        let data = frame.unwrap().unwrap().into_data().unwrap();
+        Some(String::from_utf8(data.to_vec()).unwrap())
     }
 }

@@ -30,7 +30,7 @@ pub fn tasks(
 }
 
 /// Whether `event` may have changed `file`.
-pub fn changes(event: &notify::Event, file: &Path) -> bool {
+fn changes(event: &notify::Event, file: &Path) -> bool {
     changes_file(event.kind)
         && event
             .paths
