@@ -474,7 +474,8 @@ impl Gui {
                 self.app.apply(Action::AddLink { owner, url, kind });
             }
             Message::Attach(owner) => {
-                if !ui.attach_path.trim().is_empty() {
+                // The input is hidden then, but Enter could still submit it.
+                if self.platform.attaches_paths() && !ui.attach_path.trim().is_empty() {
                     let path = typed_path(&std::mem::take(&mut ui.attach_path));
                     let source = FileSource::Path { path };
                     self.app.apply(Action::Attach { owner, source });
@@ -1066,8 +1067,18 @@ mod tests {
     /// A GUI with one task, `(task, file)`, whose attached text file holds
     /// `text`, not yet open in the viewer.
     fn gui_with_file(text: &str) -> (tempfile::TempDir, Gui, (Ulid, Ulid)) {
+        gui_with_file_on(text, |_| {})
+    }
+
+    /// [`gui_with_file`], on a platform `setup` has changed.
+    fn gui_with_file_on(
+        text: &str,
+        setup: impl FnOnce(&mut TestPlatform),
+    ) -> (tempfile::TempDir, Gui, (Ulid, Ulid)) {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = Harness::new(TestPlatform::new(store(&dir), None));
+        let mut platform = TestPlatform::new(store(&dir), None);
+        setup(&mut platform);
+        let mut app = Harness::new(platform);
         app.default_project = Some(create_project_dir(&dir.path().join("app")).unwrap());
         app.apply(Action::Edit(EditTarget::New(Status::Open)));
         app.apply(Action::Save {
@@ -1192,6 +1203,18 @@ mod tests {
             )));
             assert!(gui.file_edit_dirty(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn typed_paths_are_not_attached_where_the_platform_refuses_them() {
+        let (dir, mut gui, (task, _)) = gui_with_file_on("", |p| p.attaches_paths = false);
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, "x").unwrap();
+        let _ = gui.update(Message::AttachPath(path.display().to_string()));
+        let _ = gui.update(Message::Attach(Owner::Task(task)));
+        settle(&mut gui);
+        assert_eq!(gui.app.board.get(task).unwrap().files.len(), 1);
+        assert_eq!(gui.app.error, None);
     }
 
     #[test]

@@ -49,6 +49,20 @@ pub trait Platform {
     /// `None` on the web, where folders are typed.
     fn pick_folder(&self, title: &str) -> BoxFuture<Option<PathBuf>>;
 
+    /// Whether [`Platform::pick_folder`] can ask at all. If not, the UI
+    /// has no buttons for it, and folders are only typed.
+    fn picks_folders(&self) -> bool {
+        true
+    }
+
+    /// Whether a file can be attached by typing its path, which is read on
+    /// the machine holding the store. If not (on the web, where that's the
+    /// daemon's machine), files are only attached with
+    /// [`Platform::pick_file`], which uploads them.
+    fn attaches_paths(&self) -> bool {
+        true
+    }
+
     /// Opens `url` in the user's browser.
     fn open_url(&self, url: &str) -> Result<(), String>;
 

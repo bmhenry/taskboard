@@ -27,6 +27,8 @@ pub struct TestPlatform {
     /// While set, every command fails with this error without running, as
     /// when the store can't be written or a web request is refused.
     pub failure: Arc<Mutex<Option<String>>>,
+    /// [`Platform::attaches_paths`]; off acts like the web client.
+    pub attaches_paths: bool,
 }
 
 impl TestPlatform {
@@ -41,6 +43,7 @@ impl TestPlatform {
             settings: Arc::default(),
             path_checks: Arc::default(),
             failure: Arc::default(),
+            attaches_paths: true,
         }
     }
 }
@@ -82,6 +85,10 @@ impl Platform for TestPlatform {
 
     fn open_url(&self, _url: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    fn attaches_paths(&self) -> bool {
+        self.attaches_paths
     }
 
     fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
