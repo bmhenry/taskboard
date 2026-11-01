@@ -35,11 +35,23 @@ const LONG_PRESS: Duration = Duration::from_millis(500);
 /// A fling slower than this, in pixels a second, doesn't start or stops.
 const MIN_FLING: f32 = 60.0;
 
+/// The fastest a drag is taken to move, in pixels a second, so one odd
+/// sample can't send a fling flying.
+const MAX_SPEED: f32 = 8000.0;
+
+/// Moves closer together than this are added up before measuring speed, as
+/// events handled back to back would make any move look instant.
+const MIN_SAMPLE: Duration = Duration::from_millis(8);
+
 /// How quickly a fling slows: its speed falls by e every this long.
 const FLING_DECAY: f32 = 0.33;
 
 /// A drag that rests this long before lifting doesn't fling.
 const FLING_REST: Duration = Duration::from_millis(80);
+
+/// A finger heard nothing from for this long may have lost its lift, so a
+/// new finger takes over from it.
+const STALE: Duration = Duration::from_secs(1);
 
 /// The axis a drag scrolls along.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +79,18 @@ impl Axis {
     }
 }
 
+/// `distance` covered in `elapsed`, in pixels a second, no faster than
+/// [`MAX_SPEED`].
+fn speed(distance: Vector, elapsed: Duration) -> Vector {
+    let v = distance * (1.0 / elapsed.as_secs_f32().max(1e-3));
+    let len = v.x.hypot(v.y);
+    if len > MAX_SPEED {
+        v * (MAX_SPEED / len)
+    } else {
+        v
+    }
+}
+
 /// What the finger being followed is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
@@ -75,13 +99,16 @@ enum Phase {
     /// Down, but not yet moved far or held long enough to say what it is.
     Pending { start: Point, at: Instant },
     /// Dragging, scrolling whatever's under `start`. `velocity` is in pixels
-    /// a second, along `axis`.
+    /// a second, along `axis`, last measured at `sampled_at`, with
+    /// `unsampled` moved since.
     Scrolling {
         start: Point,
         axis: Axis,
         last: Point,
         moved_at: Instant,
         velocity: Vector,
+        sampled_at: Instant,
+        unsampled: Vector,
     },
     /// Held long enough to be a pressed mouse button, which it stays until
     /// lifted.
@@ -98,6 +125,8 @@ enum Phase {
 #[derive(Debug, Clone, Copy)]
 struct Gesture {
     finger: Option<touch::Finger>,
+    /// When the followed finger was last heard from.
+    heard_at: Option<Instant>,
     phase: Phase,
 }
 
@@ -105,6 +134,7 @@ impl Default for Gesture {
     fn default() -> Self {
         Gesture {
             finger: None,
+            heard_at: None,
             phase: Phase::Idle,
         }
     }
@@ -128,11 +158,20 @@ impl Gesture {
         use mouse::{Button, Event as M};
         match event {
             touch::Event::FingerPressed { id, position } => {
+                let mut out = Vec::new();
                 if self.finger.is_some() {
-                    // A second finger is ignored; pinches aren't handled.
-                    return Vec::new();
+                    let stale = self
+                        .heard_at
+                        .is_none_or(|at| now.saturating_duration_since(at) >= STALE);
+                    if self.phase != Phase::Idle && !stale {
+                        // A second finger is ignored; pinches aren't handled.
+                        return out;
+                    }
+                    // The followed finger's lift went missing: let go of it.
+                    out = self.reset();
                 }
                 self.finger = Some(id);
+                self.heard_at = Some(now);
                 // Any fling stops. Leaving and re-entering ends the wheel
                 // "transaction" a scrollable keeps after scrolling, which
                 // would otherwise send the next drag to it whichever way it
@@ -141,13 +180,22 @@ impl Gesture {
                     start: position,
                     at: now,
                 };
-                vec![
-                    (M::CursorLeft, position),
-                    (M::CursorMoved { position }, position),
-                ]
+                out.push((M::CursorLeft, position));
+                out.push((M::CursorMoved { position }, position));
+                out
             }
             touch::Event::FingerMoved { id, position } if self.finger == Some(id) => {
+                self.heard_at = Some(now);
                 match self.phase {
+                    Phase::Pending { start, at } if now >= at + LONG_PRESS => {
+                        // Held long enough, though no frame has said so yet:
+                        // it's a press, and this move drags it.
+                        self.phase = Phase::Holding { last: position };
+                        vec![
+                            (M::ButtonPressed(Button::Left), start),
+                            (M::CursorMoved { position }, position),
+                        ]
+                    }
                     Phase::Pending { start, at } => {
                         let delta = position - start;
                         if delta.x.hypot(delta.y) < SLOP {
@@ -156,13 +204,17 @@ impl Gesture {
                         let axis = Axis::of(delta);
                         // Scrolling: the content follows the finger from
                         // where it went down.
-                        let elapsed = now.saturating_duration_since(at).as_secs_f32().max(1e-3);
                         self.phase = Phase::Scrolling {
                             start,
                             axis,
                             last: position,
                             moved_at: now,
-                            velocity: axis.along(delta) * (1.0 / elapsed),
+                            velocity: speed(
+                                axis.along(delta),
+                                now.saturating_duration_since(at).max(MIN_SAMPLE),
+                            ),
+                            sampled_at: now,
+                            unsampled: Vector::ZERO,
                         };
                         vec![(wheel(axis.along(delta)), start)]
                     }
@@ -170,16 +222,23 @@ impl Gesture {
                         start,
                         axis,
                         last,
-                        moved_at,
                         velocity,
+                        sampled_at,
+                        unsampled,
+                        ..
                     } => {
                         let delta = axis.along(position - last);
-                        let elapsed = now.saturating_duration_since(moved_at).as_secs_f32();
+                        let unsampled = unsampled + delta;
+                        let elapsed = now.saturating_duration_since(sampled_at);
                         // Smoothed, as moves arrive unevenly.
-                        let velocity = if elapsed > 0.0 {
-                            delta * (0.7 / elapsed) + velocity * 0.3
+                        let (velocity, sampled_at, unsampled) = if elapsed >= MIN_SAMPLE {
+                            (
+                                speed(unsampled, elapsed) * 0.7 + velocity * 0.3,
+                                now,
+                                Vector::ZERO,
+                            )
                         } else {
-                            velocity
+                            (velocity, sampled_at, unsampled)
                         };
                         self.phase = Phase::Scrolling {
                             start,
@@ -187,6 +246,8 @@ impl Gesture {
                             last: position,
                             moved_at: now,
                             velocity,
+                            sampled_at,
+                            unsampled,
                         };
                         vec![(wheel(delta), start)]
                     }
@@ -199,6 +260,7 @@ impl Gesture {
             }
             touch::Event::FingerLifted { id, position } if self.finger == Some(id) => {
                 self.finger = None;
+                self.heard_at = None;
                 let phase = std::mem::replace(&mut self.phase, Phase::Idle);
                 match phase {
                     Phase::Pending { .. } => vec![
@@ -231,14 +293,20 @@ impl Gesture {
                     Phase::Idle | Phase::Flinging { .. } => Vec::new(),
                 }
             }
-            touch::Event::FingerLost { id, position } if self.finger == Some(id) => {
-                self.finger = None;
-                let phase = std::mem::replace(&mut self.phase, Phase::Idle);
-                // A held button can't stay down; anything else just stops.
-                match phase {
-                    Phase::Holding { .. } => vec![(M::ButtonReleased(Button::Left), position)],
-                    _ => Vec::new(),
-                }
+            touch::Event::FingerLost { id, .. } if self.finger == Some(id) => self.reset(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Forgets the followed finger, as its touch was cancelled, its lift went
+    /// missing or the window lost focus. A held button can't stay down;
+    /// anything else just stops.
+    fn reset(&mut self) -> Vec<Synthetic> {
+        self.finger = None;
+        self.heard_at = None;
+        match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Holding { last } => {
+                vec![(mouse::Event::ButtonReleased(mouse::Button::Left), last)]
             }
             _ => Vec::new(),
         }
@@ -447,16 +515,26 @@ where
                     }
                 }
             }
-            _ => self.content.as_widget_mut().update(
-                &mut tree.children[0],
-                event,
-                layout,
-                cursor,
-                renderer,
-                clipboard,
-                shell,
-                viewport,
-            ),
+            _ => {
+                self.content.as_widget_mut().update(
+                    &mut tree.children[0],
+                    event,
+                    layout,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+                // Touches can end unseen while the window's in the
+                // background, so a held one lets go.
+                if let Event::Window(window::Event::Unfocused) = event {
+                    let synthetic = tree.state.downcast_mut::<Gesture>().reset();
+                    self.send(
+                        tree, synthetic, layout, cursor, renderer, clipboard, shell, viewport,
+                    );
+                }
+            }
         }
         if let Some(request) = tree.state.downcast_ref::<Gesture>().redraw() {
             shell.request_redraw_at(request);
@@ -711,5 +789,137 @@ mod tests {
         };
         assert!(g.touch(other_moved, t).is_empty());
         assert!(matches!(g.phase, Phase::Pending { .. }));
+    }
+
+    fn hold(g: &mut Gesture, t: Instant) {
+        press(g, 10.0, 10.0, t);
+        g.frame(t + LONG_PRESS);
+        moved(g, 40.0, 60.0, t + ms(600));
+        assert_eq!(
+            g.phase,
+            Phase::Holding {
+                last: Point::new(40.0, 60.0)
+            }
+        );
+    }
+
+    #[test]
+    fn lost_finger_releases_a_held_button() {
+        let (mut g, t) = (Gesture::default(), Instant::now());
+        hold(&mut g, t);
+        let lost = g.touch(
+            touch::Event::FingerLost {
+                id: F,
+                position: Point::new(40.0, 60.0),
+            },
+            t + ms(700),
+        );
+        assert_eq!(
+            lost,
+            vec![(M::ButtonReleased(Button::Left), Point::new(40.0, 60.0))]
+        );
+        assert_eq!((g.finger, g.phase), (None, Phase::Idle));
+    }
+
+    #[test]
+    fn reset_releases_a_held_button() {
+        let (mut g, t) = (Gesture::default(), Instant::now());
+        hold(&mut g, t);
+        assert_eq!(events(g.reset()), vec![M::ButtonReleased(Button::Left)]);
+        assert!(g.reset().is_empty());
+        // A new touch works as usual afterwards.
+        press(&mut g, 5.0, 5.0, t + ms(800));
+        assert_eq!(g.finger, Some(F));
+    }
+
+    #[test]
+    fn a_stale_finger_gives_way_to_a_new_one() {
+        let (mut g, t) = (Gesture::default(), Instant::now());
+        hold(&mut g, t);
+        let other = |position| touch::Event::FingerPressed {
+            id: touch::Finger(2),
+            position,
+        };
+        // While the held finger was just heard from, a new one is ignored.
+        assert!(
+            g.touch(other(Point::new(90.0, 90.0)), t + ms(900))
+                .is_empty()
+        );
+        assert_eq!(g.finger, Some(F));
+        // Its lift must have gone missing: let go of it, then follow the
+        // new finger.
+        let taken = g.touch(other(Point::new(90.0, 90.0)), t + ms(600) + STALE);
+        assert_eq!(
+            events(taken),
+            vec![
+                M::ButtonReleased(Button::Left),
+                M::CursorLeft,
+                M::CursorMoved {
+                    position: Point::new(90.0, 90.0)
+                },
+            ]
+        );
+        assert_eq!(g.finger, Some(touch::Finger(2)));
+        assert!(matches!(g.phase, Phase::Pending { .. }));
+        // The old finger's events no longer count.
+        assert!(lift(&mut g, 40.0, 60.0, t + ms(1700)).is_empty());
+        assert!(matches!(g.phase, Phase::Pending { .. }));
+    }
+
+    #[test]
+    fn moves_handled_back_to_back_do_not_spike_the_speed() {
+        let (mut g, t) = (Gesture::default(), Instant::now());
+        press(&mut g, 100.0, 500.0, t);
+        moved(&mut g, 100.0, 480.0, t + ms(16));
+        let before = match g.phase {
+            Phase::Scrolling { velocity, .. } => velocity,
+            p => panic!("not scrolling: {p:?}"),
+        };
+        // Two moves handled a microsecond apart still scroll by their full
+        // distance, but don't count toward the speed until 8 ms have passed.
+        let t2 = t + ms(16) + Duration::from_micros(1);
+        assert_eq!(
+            moved(&mut g, 100.0, 380.0, t2),
+            vec![(wheel(Vector::new(0.0, -100.0)), Point::new(100.0, 500.0))]
+        );
+        let Phase::Scrolling { velocity, .. } = g.phase else {
+            panic!("not scrolling");
+        };
+        assert_eq!(velocity, before);
+        // Once measured, it's no faster than the cap.
+        moved(&mut g, 100.0, 0.0, t + ms(30));
+        let Phase::Scrolling { velocity, .. } = g.phase else {
+            panic!("not scrolling");
+        };
+        assert!(velocity.y < 0.0 && velocity.y.abs() <= MAX_SPEED);
+        // Even the first move after the press is capped.
+        let mut g = Gesture::default();
+        press(&mut g, 100.0, 500.0, t);
+        moved(&mut g, 100.0, 0.0, t + Duration::from_micros(1));
+        let Phase::Scrolling { velocity, .. } = g.phase else {
+            panic!("not scrolling");
+        };
+        assert!(velocity.y.abs() <= MAX_SPEED);
+    }
+
+    #[test]
+    fn a_move_after_the_long_press_deadline_holds_and_drags() {
+        let (mut g, t) = (Gesture::default(), Instant::now());
+        press(&mut g, 10.0, 10.0, t);
+        // No frame came at the deadline; the first move after it decides.
+        let out = moved(&mut g, 80.0, 10.0, t + LONG_PRESS + ms(20));
+        assert_eq!(
+            out,
+            vec![
+                (M::ButtonPressed(Button::Left), Point::new(10.0, 10.0)),
+                (
+                    M::CursorMoved {
+                        position: Point::new(80.0, 10.0)
+                    },
+                    Point::new(80.0, 10.0)
+                ),
+            ]
+        );
+        assert!(matches!(g.phase, Phase::Holding { .. }));
     }
 }
