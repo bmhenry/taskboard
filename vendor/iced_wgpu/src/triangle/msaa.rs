@@ -156,6 +156,14 @@ impl Pipeline {
         targets.as_ref().unwrap().clone()
     }
 
+    /// taskboard patch: the size of the MSAA attachment that the next
+    /// [`render_pass`](Self::render_pass) draws to.
+    pub fn target_size(&self) -> Size<u32> {
+        let targets = self.targets.read().expect("Read MSAA targets");
+
+        targets.as_ref().unwrap().size
+    }
+
     pub fn render_pass<'a>(
         &self,
         encoder: &'a mut wgpu::CommandEncoder,

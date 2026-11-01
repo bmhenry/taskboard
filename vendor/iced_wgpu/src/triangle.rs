@@ -326,6 +326,17 @@ fn render<'a>(
                 &mut render_pass,
             );
         }
+
+        // taskboard patch: on the GL backend (WebGL2 in the browser) wgpu
+        // resolves the MSAA attachment with glBlitFramebuffer while the last
+        // mesh's scissor is still on, so only that rectangle is resolved and
+        // the rest of the resolve texture keeps meshes from earlier frames,
+        // which `state.render` then blits over the whole frame. Widen the
+        // scissor to the attachment before the pass ends so it all resolves.
+        if let Some((_state, pipeline)) = &msaa {
+            let size = pipeline.target_size();
+            render_pass.set_scissor_rect(0, 0, size.width, size.height);
+        }
     }
 
     if let Some((state, pipeline)) = msaa {
