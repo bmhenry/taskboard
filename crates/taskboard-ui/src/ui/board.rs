@@ -135,7 +135,7 @@ fn status_tab(gui: &Gui, status: Status, shown: bool) -> El<'_> {
     .align_y(Alignment::Center);
     let tab = container(
         button(face)
-            .padding([4, 8])
+            .padding([p.pad_y(18.0, 4.0), 8.0])
             .style(theme::bare_button)
             .on_press(Message::ShowColumn(status)),
     )
@@ -447,7 +447,7 @@ fn source_pill<'a>(p: Pal, url: &str) -> El<'a> {
         .into()
     };
     button(hover(face(false), face(true)))
-        .padding(0)
+        .padding([p.pad_y(20.0, 0.0), 0.0])
         .style(theme::bare_button)
         .on_press(Message::OpenUrl(url.to_string()))
         .into()

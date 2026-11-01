@@ -12,8 +12,8 @@ use super::popup::popup;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::viewer::markdown;
 use super::widgets::{
-    El, btn, epic_badge, grow, input, label, link, path_label, save_keys, section_title,
-    shorten_path, status_dot, warning_icon,
+    El, LINE_HEIGHT, btn, epic_badge, grow, input, label, link, path_label, save_keys,
+    section_title, shorten_path, status_dot, warning_icon,
 };
 use super::{EDIT_TITLE, Gui, Message, NEW_FILE_NAME};
 use crate::app::{Action, EditTarget, Owner, ProjectInput};
@@ -264,7 +264,7 @@ fn epic_menu<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
                     .align_y(Alignment::Center),
             )
             .width(Length::Fill)
-            .padding([5, 10])
+            .padding([p.pad_y(13.0 * LINE_HEIGHT, 5.0), 10.0])
             .style(move |_, status| menu_item_style(p, status))
             .on_press(Message::ChooseEpic(task.id, epic.id))
             .into()
@@ -543,7 +543,7 @@ fn status_dropdown<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
         .height(Length::Fill)
         .align_y(Alignment::Center),
     )
-    .height(28)
+    .height(p.control(28.0))
     .padding([0, 12])
     .style(move |_, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
@@ -572,11 +572,7 @@ fn status_menu<'a>(p: Pal, task: &'a Task) -> El<'a> {
         let on_press = if current {
             Message::CloseStatusMenu
         } else {
-            Message::App(Action::Move {
-                id: task.id,
-                status,
-                position: None,
-            })
+            Message::ChooseStatus(task.id, status)
         };
         button(
             row![
@@ -591,7 +587,7 @@ fn status_menu<'a>(p: Pal, task: &'a Task) -> El<'a> {
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(28)
+        .height(p.control(28.0))
         .padding([0, 10])
         .style(move |_, s| {
             let hovered = matches!(s, button::Status::Hovered | button::Status::Pressed);
@@ -746,7 +742,7 @@ fn project_menu(gui: &Gui) -> El<'_> {
                 .spacing(2),
             )
             .width(Length::Fill)
-            .padding([5, 10])
+            .padding([p.pad_y((13.0 + 11.0) * LINE_HEIGHT + 2.0, 5.0), 10.0])
             .style(move |_, status| menu_item_style(p, status))
             .on_press(Message::ChooseProject(project.path.clone()))
             .into()

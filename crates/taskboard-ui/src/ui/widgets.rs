@@ -18,21 +18,28 @@ use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 
 pub type El<'a> = Element<'a, Message>;
 
+/// A line of text's height for its size, iced's default.
+pub const LINE_HEIGHT: f32 = 1.3;
+
 pub fn btn<'a>(
     p: Pal,
     label: impl text::IntoFragment<'a>,
     style: Style,
     on_press: Message,
 ) -> El<'a> {
+    const PADDING: f32 = 10.0;
+    let label = text(label)
+        .size(13)
+        .wrapping(Wrapping::None)
+        .height(Length::Fill)
+        .align_y(Vertical::Center);
     button(
-        text(label)
-            .size(13)
-            .wrapping(Wrapping::None)
-            .height(Length::Fill)
-            .align_y(Vertical::Center),
+        column![label]
+            .push(p.min_label_width(PADDING).map(|w| Space::new().width(w)))
+            .align_x(Alignment::Center),
     )
-    .height(28)
-    .padding([0, 10])
+    .height(p.control(28.0))
+    .padding([0.0, PADDING])
     .style(move |_, status| theme::button_style(p, style, status))
     .on_press(on_press)
     .into()
@@ -45,8 +52,9 @@ pub fn link<'a>(
     size: u32,
     on_press: Message,
 ) -> El<'a> {
+    let line = size as f32 * LINE_HEIGHT;
     button(text(label).size(size))
-        .padding(0)
+        .padding([p.pad_y(line, 0.0), 0.0])
         .style(move |_, status| button::Style {
             text_color: rgb(match status {
                 button::Status::Hovered | button::Status::Pressed => p.text,
@@ -73,7 +81,7 @@ pub fn chip<'a>(
             .height(Length::Fill)
             .align_y(Vertical::Center),
     )
-    .height(26)
+    .height(p.control(26.0))
     .padding([0, 12])
     .style(move |_, _| button::Style {
         background: Some(Background::Color(rgb(if on { color } else { p.panel }))),
@@ -101,7 +109,7 @@ pub fn input<'a>(
         .id(id)
         .on_input(on_input)
         .size(14)
-        .padding([6, 8])
+        .padding([p.pad_y(14.0 * LINE_HEIGHT, 6.0), 8.0])
         .style(move |_, status| theme::input_style(p, invalid, status))
 }
 
@@ -133,6 +141,7 @@ pub fn checkbox<'a>(p: Pal, label: &'a str, on: bool, on_press: Message) -> El<'
     mouse_area(
         row![tick, text(label).size(14)]
             .spacing(8)
+            .padding([p.pad_y(14.0 * LINE_HEIGHT, 0.0), 0.0])
             .align_y(Alignment::Center),
     )
     .on_press(on_press)
