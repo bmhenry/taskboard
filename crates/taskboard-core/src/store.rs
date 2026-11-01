@@ -175,6 +175,17 @@ impl Store {
         self.add_file(id, name, |dest| fs::copy(src, dest).map(|_| ()))
     }
 
+    /// Stores `bytes` as a file named `name` and attaches it to task `id`,
+    /// like [`Store::attach`] for a file that isn't on this machine (e.g. an
+    /// upload). `name` must be a plain file name, not a path.
+    pub fn attach_bytes(&self, id: Ulid, name: &str, bytes: &[u8]) -> Result<Attachment> {
+        let plain = Path::new(name).file_name().and_then(|n| n.to_str()) == Some(name);
+        if !plain || name.contains('\\') {
+            return Err(Error::Invalid(format!("bad file name: {name}")));
+        }
+        self.add_file(id, name.to_string(), |dest| fs::write(dest, bytes))
+    }
+
     /// Creates an empty file named `name` in the store and attaches it to
     /// task `id`; see [`new_file_name`] for how the name is read. Like an
     /// attached file, it may share its name with another of the task's files.
