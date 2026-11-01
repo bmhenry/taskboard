@@ -28,6 +28,24 @@ arrays, but iced already skips that pipeline on wasm32. The remaining arrays
 (`blit.wgsl`, `image.wgsl`) are in vertex shaders, where GLSL ES predeclares
 `highp float`.
 
-Drop this patch when iced upgrades past 0.14 if upstream has fixed it: delete
+A second, separate fix (task B8XSZP27), on every target:
+
+- `src/triangle.rs`, `src/triangle/msaa.rs`: before an MSAA triangle render
+  pass ends, the scissor is widened to the whole MSAA attachment
+  (`msaa::Pipeline::target_size`).
+
+Why: with antialiasing on, iced draws meshes (canvas geometry, such as the
+collapsed columns' rotated titles) into a multisampled texture, resolves it,
+and blits the resolved texture over the frame. wgpu's GL backend (WebGL2 in
+the browser, and native GL) resolves with `glBlitFramebuffer` while the last
+mesh's scissor is still enabled, so only that rectangle is resolved; the rest
+of the resolve texture keeps meshes from earlier frames. On the phone that
+showed as a collapsed column's title drawn over the task details pane, where
+the column had been before the pane opened; on native GL other collapsed
+columns' titles went missing. On Vulkan/Metal/DX12 the resolve ignores the
+scissor and the extra `set_scissor_rect` with no draw after it is a no-op.
+
+Drop these patches when iced upgrades past 0.14 if upstream has fixed it: delete
 `vendor/iced_wgpu`, the `[patch.crates-io]` entry and the `exclude`, and test
-the web build on a Mali phone over plain HTTP.
+the web build on a Mali phone over plain HTTP (and that collapsed column titles
+don't show through the details pane with `WGPU_BACKEND=gl`).
