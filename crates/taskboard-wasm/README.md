@@ -29,11 +29,17 @@ with trunk, and served by the `taskboard-web` daemon. It runs with the web
 ```sh
 cd crates/taskboard-wasm
 trunk build                         # -> dist/ (~38 MB debug wasm; use --release for size)
-taskboard-web --static dist         # http://127.0.0.1:7878/
+taskboard-web --static dist         # prints http://127.0.0.1:7878/?token=…
 ```
 
-`trunk serve` also works while working on the client: it proxies `/api/` to
-a daemon on the default `127.0.0.1:7878` (see `Trunk.toml`).
+Open the `?token=…` link the daemon prints: it sets the sign-in cookie that
+the client's requests (and its event stream) then carry.
+
+`trunk serve` can serve the client while working on it: it proxies `/api/`
+to a daemon on the default `127.0.0.1:7878` (see `Trunk.toml`). The pages
+then come from trunk's port, so the daemon needs `--allow-host
+127.0.0.1:8080` to take their writes, and the cookie from opening the
+daemon's link (cookies don't depend on the port).
 
 Add `?debug` to the page's URL to mirror console output, errors and some
 environment details (secure context, WebGPU/WebGL2 availability, viewport,

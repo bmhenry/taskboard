@@ -67,7 +67,7 @@ impl GlobalSettings {
     /// `$XDG_CONFIG_HOME/tb/settings.json`, or `~/.config/tb/settings.json`.
     /// `None` if neither variable is set.
     pub fn default_path() -> Option<PathBuf> {
-        Some(crate::xdg_dir("XDG_CONFIG_HOME", ".config")?.join("settings.json"))
+        Some(crate::config_dir()?.join("settings.json"))
     }
 
     /// Reads settings from `path`; a missing file gives the defaults.
@@ -104,7 +104,7 @@ impl DeviceSettings {
     /// `$XDG_CONFIG_HOME/tb/device.json`, or `~/.config/tb/device.json`.
     /// `None` if neither variable is set.
     pub fn default_path() -> Option<PathBuf> {
-        Some(crate::xdg_dir("XDG_CONFIG_HOME", ".config")?.join("device.json"))
+        Some(crate::config_dir()?.join("device.json"))
     }
 
     /// Reads settings from `path`. Until it exists, they're taken from the
