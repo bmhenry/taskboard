@@ -9,6 +9,7 @@ mod popup;
 mod settings;
 pub mod theme;
 mod toolbar;
+mod touch;
 mod viewer;
 mod widgets;
 mod zones;
@@ -742,7 +743,9 @@ impl Gui {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        iced::widget::responsive(move |size| self.view_sized(size)).into()
+        // Touch scrolls and taps everywhere, rather than being taken by
+        // whichever button or card it lands on.
+        touch::touch_input(iced::widget::responsive(move |size| self.view_sized(size))).into()
     }
 
     fn view_sized(&self, size: Size) -> El<'_> {
