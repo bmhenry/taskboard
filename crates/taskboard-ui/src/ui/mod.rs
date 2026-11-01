@@ -41,6 +41,12 @@ const BASE_FONT_SIZE: f32 = 14.0;
 /// Space between the window's edges and the UI inside it.
 const EDGE: f32 = 18.0;
 
+/// [`EDGE`] in compact mode, where every pixel of width counts.
+const COMPACT_EDGE: f32 = 8.0;
+
+/// Windows narrower than this, in logical pixels, get the compact layout.
+const COMPACT_WIDTH: f32 = 720.0;
+
 /// How often to check whether project folders still exist.
 const PROJECT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -134,6 +140,8 @@ struct UiState {
     hook_edited_at: Option<Instant>,
     hovered_card: Option<Ulid>,
     drag: Option<Drag>,
+    /// The column picked from the compact board's tabs.
+    compact_column: Option<Status>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +153,10 @@ pub enum Message {
     ClearFilters,
     ToggleFilters,
     CloseFilters,
+    /// A tab of the compact board was picked.
+    ShowColumn(Status),
+    /// A view was picked in compact mode, which starts on its list of tasks.
+    OpenCompactView(View),
     ToggleStatusMenu(Ulid),
     CloseStatusMenu,
     ToggleEpicMenu(Ulid),
@@ -443,6 +455,13 @@ impl Gui {
             Message::ClearFilters => self.app.apply(Action::ClearFilters),
             Message::ToggleFilters => ui.filters_open = !ui.filters_open,
             Message::CloseFilters => ui.filters_open = false,
+            Message::ShowColumn(status) => ui.compact_column = Some(status),
+            Message::OpenCompactView(view) => {
+                // The In Progress view opens on a task's details, which here
+                // would cover the list it's chosen from.
+                self.app.apply(Action::SetView(view));
+                self.app.apply(Action::Select(None));
+            }
             Message::ToggleStatusMenu(id) => {
                 ui.status_open = match ui.status_open {
                     Some(_) => None,
@@ -725,9 +744,7 @@ impl Gui {
                         zones.iter().find(|(z, _)| *z == id).map(|(_, b)| *b)
                     };
                     for status in Status::ALL {
-                        if self.app.column_collapsed(status) {
-                            continue;
-                        }
+                        // Only columns showing their cards have a list.
                         let Some(list) = bounds(board::cards_id(status)) else {
                             continue;
                         };
@@ -972,18 +989,21 @@ impl Gui {
 
     fn view_sized(&self, size: Size) -> El<'_> {
         let (app, p) = (&self.app, self.pal());
+        let compact = is_compact(size.width);
         let mut page = column![toolbar::toolbar(self, size.width)];
         if let Some(err) = &app.error {
             page = page.push(toolbar::error_bar(p, err));
         }
         let main: El = match app.view {
+            View::Board if compact => board::compact_board(self, size.width),
             View::Board => board::board(self, size.width),
-            View::List => list::list(self),
-            View::InProgress => list::in_progress(self),
+            View::List => list::list(self, compact),
+            View::InProgress => list::in_progress(self, compact),
         };
         let mut body = row![main].spacing(12).height(Length::Fill);
-        // The In Progress view shows the editor and details itself.
-        if app.view != View::InProgress {
+        // The In Progress view shows the editor and details itself, and
+        // compact mode shows them in a sheet.
+        if !compact && app.view != View::InProgress {
             let width = side_width(size.width);
             if app.editing.is_some() {
                 body = body.push(panels::editor(self, Length::Fixed(width)));
@@ -991,14 +1011,18 @@ impl Gui {
                 body = body.push(panels::detail(self, task, Length::Fixed(width)));
             }
         }
+        let edge = edge(size.width);
         page = page
-            .push(container(body).padding(iced::Padding::ZERO.right(EDGE).bottom(EDGE).left(EDGE)));
+            .push(container(body).padding(iced::Padding::ZERO.right(edge).bottom(edge).left(edge)));
         let page = container(page)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| theme::fill(p.bg, 0.0));
 
         let mut layers = stack![page];
+        if compact {
+            layers = layers.push(self.sheet());
+        }
         if let Some((task_id, file_id)) = app.viewing_file
             && let Some(att) = app
                 .board
@@ -1013,6 +1037,64 @@ impl Gui {
             layers = layers.push(modal(dialog, Message::App(Action::ShowSettings(false))));
         }
         layers.into()
+    }
+
+    /// The editor or the selected task's details, covering the window. It's
+    /// laid over the page, which stays put, so closing it goes back to the
+    /// same place in the board or list.
+    fn sheet(&self) -> Option<El<'_>> {
+        let (app, p) = (&self.app, self.pal());
+        let panel = if app.editing.is_some() {
+            panels::editor(self, Length::Fill)
+        } else {
+            panels::detail(self, app.selected_task()?, Length::Fill)
+        };
+        let mut sheet = column![];
+        if let Some(err) = &app.error {
+            sheet = sheet.push(toolbar::error_bar(p, err));
+        }
+        Some(opaque(
+            container(sheet.push(panel))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| theme::fill(p.panel, 0.0)),
+        ))
+    }
+
+    /// The column the compact board shows: the one last picked, or else the
+    /// first with tasks.
+    fn compact_column(&self) -> Status {
+        let app = &self.app;
+        self.ui.compact_column.unwrap_or_else(|| {
+            Status::ALL
+                .into_iter()
+                .find(|s| !app.visible_column(*s).is_empty())
+                .unwrap_or(Status::Open)
+        })
+    }
+}
+
+/// Whether a window of this width gets the compact layout.
+fn is_compact(window_width: f32) -> bool {
+    window_width < COMPACT_WIDTH
+}
+
+/// The space kept between a window of this width and the UI inside it.
+fn edge(window_width: f32) -> f32 {
+    if is_compact(window_width) {
+        COMPACT_EDGE
+    } else {
+        EDGE
+    }
+}
+
+/// How wide a dialog is that would otherwise be `width`: all of a compact
+/// window.
+fn dialog_width(window_width: f32, width: f32) -> f32 {
+    if is_compact(window_width) {
+        window_width
+    } else {
+        width
     }
 }
 
@@ -1179,6 +1261,36 @@ mod tests {
             Modifiers::default(),
             event::Status::Ignored,
         ));
+    }
+
+    #[test]
+    fn compact_board_shows_the_first_column_with_tasks_until_one_is_picked() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::App(Action::Move {
+            id: task,
+            status: Status::Backlog,
+            position: None,
+        }));
+        settle(&mut gui);
+        assert_eq!(gui.compact_column(), Status::Backlog);
+
+        let _ = gui.update(Message::ShowColumn(Status::Closed));
+        assert_eq!(gui.compact_column(), Status::Closed);
+    }
+
+    #[test]
+    fn compact_in_progress_view_starts_on_its_list() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::App(Action::Move {
+            id: task,
+            status: Status::InProgress,
+            position: None,
+        }));
+        settle(&mut gui);
+        let _ = gui.update(Message::App(Action::Select(None)));
+        let _ = gui.update(Message::OpenCompactView(View::InProgress));
+        assert_eq!(gui.app.view, View::InProgress);
+        assert_eq!(gui.app.selected, None);
     }
 
     #[test]

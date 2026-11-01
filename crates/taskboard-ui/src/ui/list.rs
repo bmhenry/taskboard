@@ -12,7 +12,9 @@ use super::widgets::{El, count_badge, epic_badge, label, missing_project_badge, 
 use super::{Gui, Message, panels};
 use crate::app::Action;
 
-pub fn list(gui: &Gui) -> El<'_> {
+/// The table of tasks; `compact` stacks each row, as its columns won't fit
+/// side by side.
+pub fn list(gui: &Gui, compact: bool) -> El<'_> {
     let (app, p) = (&gui.app, gui.pal());
     let tasks = app.visible_list();
     let mut rows = column![];
@@ -38,19 +40,19 @@ pub fn list(gui: &Gui) -> El<'_> {
             .board
             .parent_of(task)
             .map(|epic| parent_label(p, &epic.title));
-        let cells = list_row(
-            p,
-            Some(task.status),
-            (!badges.is_empty()).then(|| row(badges).spacing(6).into()),
-            parent,
-            [
-                task.status.label().to_string(),
-                task.short_id(),
-                task.title.clone(),
-                app.board.project_name(&task.project),
-                updated,
-            ],
-        );
+        let badge = (!badges.is_empty()).then(|| row(badges).spacing(6).into());
+        let cells = [
+            task.status.label().to_string(),
+            task.short_id(),
+            task.title.clone(),
+            app.board.project_name(&task.project),
+            updated,
+        ];
+        let cells = if compact {
+            compact_row(p, task.status, badge, parent, cells)
+        } else {
+            list_row(p, Some(task.status), badge, parent, cells)
+        };
         rows = rows.push(
             button(cells)
                 .padding(0)
@@ -76,27 +78,27 @@ pub fn list(gui: &Gui) -> El<'_> {
                 .on_press(Message::App(Action::Select(Some(task.id)))),
         );
     }
-    let header = list_row(
-        p,
-        None,
-        None,
-        None,
-        ["Status", "ID", "Title", "Project", "Updated"].map(String::from),
-    );
-    container(column![
-        header,
-        scrollable(rows)
-            .direction(Direction::Vertical(
-                Scrollbar::new().width(4).scroller_width(4)
-            ))
-            .height(Length::Fill)
-            .style(move |_, s| theme::scroll_style(p, s)),
-    ])
-    .padding(8)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(move |_| theme::fill(p.panel, 8.0))
-    .into()
+    let header = (!compact).then(|| {
+        list_row(
+            p,
+            None,
+            None,
+            None,
+            ["Status", "ID", "Title", "Project", "Updated"].map(String::from),
+        )
+    });
+    let rows = scrollable(rows)
+        .direction(Direction::Vertical(
+            Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .height(Length::Fill)
+        .style(move |_, s| theme::scroll_style(p, s));
+    container(column![].push(header).push(rows))
+        .padding(8)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| theme::fill(p.panel, 8.0))
+        .into()
 }
 
 /// One row of the list table; `status` is `None` for the header. `badge` goes
@@ -147,9 +149,50 @@ fn list_row<'a>(
     .into()
 }
 
+/// One row of the compact list: the title, with `badge` before it and
+/// `parent` under it, above the status and the rest in a clipped line.
+fn compact_row<'a>(
+    p: Pal,
+    status: Status,
+    badge: Option<El<'a>>,
+    parent: Option<El<'a>>,
+    cells: [String; 5],
+) -> El<'a> {
+    let [status_cell, id, title, project, updated] = cells;
+    let meta = row![
+        text(status_cell)
+            .size(12)
+            .color(rgb(p.status_color(status)))
+            .wrapping(Wrapping::None),
+        text(id)
+            .size(12)
+            .font(MONO)
+            .color(rgb(p.muted))
+            .wrapping(Wrapping::None),
+        text(format!("{project} · {updated}"))
+            .size(12)
+            .color(rgb(p.muted))
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(8);
+    column![
+        row![]
+            .push(badge)
+            .push(text(title).size(14).color(rgb(p.text)))
+            .spacing(6)
+            .align_y(Alignment::Center)
+    ]
+    .push(parent)
+    .push(container(meta).clip(true))
+    .spacing(4)
+    .padding([8, 10])
+    .into()
+}
+
 /// In-progress tasks grouped by project in a sidebar, with the selected
-/// task's details (or the editor) filling the rest.
-pub fn in_progress(gui: &Gui) -> El<'_> {
+/// task's details (or the editor) filling the rest. In `compact` mode the
+/// sidebar is all there is, as details open in a sheet.
+pub fn in_progress(gui: &Gui, compact: bool) -> El<'_> {
     let (app, p) = (&gui.app, gui.pal());
     let groups = app.in_progress_groups();
     let mut items = column![].spacing(8);
@@ -180,9 +223,16 @@ pub fn in_progress(gui: &Gui) -> El<'_> {
             .height(Length::Fill)
             .style(move |_, s| theme::scroll_style(p, s)),
     )
-    .width(300)
+    .width(if compact {
+        Length::Fill
+    } else {
+        Length::Fixed(300.0)
+    })
     .height(Length::Fill)
     .style(move |_| theme::fill(p.panel, 8.0));
+    if compact {
+        return sidebar.into();
+    }
 
     let pane = if app.editing.is_some() {
         panels::editor(gui, Length::Fill)
