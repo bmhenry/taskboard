@@ -174,6 +174,22 @@ Headless Google Chrome was driven over CDP:
   on a real device. An emulated horizontal swipe didn't scroll anything
   visibly, so that result is inconclusive.
 
+## Touch input (task NQKE8X84)
+
+winit's web backend delivers `pointerType: "touch"` pointers as touch events
+(`touch::Event::Finger*`), not mouse events. Iced's scrollable only scrolls
+on touch when nothing inside it captures the `FingerPressed` first, but
+buttons (list rows), mouse areas (headers), `iced_drop` droppables (cards) and
+the nested column scrollable all do. So drags on them never scrolled, and a
+column's own scrollable kept horizontal drags from reaching the board.
+
+`ui/touch.rs` wraps the whole view and turns touch into mouse input: a tap is
+a left click, a drag is pixel wheel scrolling locked to its first axis (with
+a fling after lifting), and a 500 ms long press holds the left button, so
+dragging on from there moves a card. The canvas also has `touch-action:
+none`. In phone emulation (390 px wide, CDP touch events), drags on the
+column background, on cards and on list rows scroll, and taps select.
+
 ## Left for the real-phone test
 
 - **Soft keyboard.** Does tapping a `text_input` (search) or `text_editor`
