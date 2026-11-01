@@ -68,6 +68,14 @@ pub struct Gui {
     platform: Box<dyn Platform>,
     /// The effect the platform is doing; the rest wait in the app's outbox.
     running: Option<Effect>,
+    /// [`PathCheck::Refresh`] checks the platform is doing. They're done
+    /// alongside `running` rather than after it, so looking at paths never
+    /// holds up a command, or a command a path's hint.
+    refreshing: Vec<PathCheck>,
+    /// The typed project path being looked for. Another isn't asked about
+    /// until it's answered, so typing a path asks a few times rather than
+    /// once a keystroke.
+    typed_check: Option<PathBuf>,
     /// How many commands have been started, so a board loaded before the
     /// latest one is dropped.
     commands: u64,
@@ -199,8 +207,8 @@ pub enum Message {
     Ran(Result<Outcome, String>),
     /// The running settings save finished.
     SettingsSaved(Result<(), String>),
-    /// The running path check finished: what's at each of its paths.
-    Checked(Vec<PathKind>),
+    /// A path check finished: what's at each of its paths.
+    Checked(PathCheck, Vec<PathKind>),
     /// A board that was loaded.
     Loaded(LoadStamp, Result<Board, String>),
     Tick,
@@ -226,6 +234,8 @@ impl Gui {
             ui: UiState::default(),
             platform: Box::new(platform),
             running: None,
+            refreshing: Vec::new(),
+            typed_check: None,
             commands: 0,
             loads: 0,
             shown_load: 0,
@@ -352,16 +362,38 @@ impl Gui {
         // A typed project's folder is looked for once; see
         // `Message::CheckProjects` for looking again.
         if app.editing.is_some()
+            && self.typed_check.is_none()
             && let ProjectInput::Unchecked(path) = app.project_input(&ui.edit_project)
         {
-            self.app.check_paths(vec![path]);
+            self.app.check_paths(vec![path.clone()]);
+            self.typed_check = Some(path);
         }
         Task::batch([task, self.next_effect()])
     }
 
-    /// Starts the next effect in the app's outbox unless one is running, or,
-    /// with none left, reloads the board if it's stale.
+    /// Starts the path refreshes in the app's outbox, and the next of its
+    /// other effects unless one is running, or, with none left, reloads the
+    /// board if it's stale.
     fn next_effect(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        let outbox = std::mem::take(&mut self.app.outbox);
+        for effect in outbox {
+            match effect {
+                Effect::CheckPaths(check @ PathCheck::Refresh(_)) => {
+                    self.refreshing.push(check.clone());
+                    let kinds = self.platform.path_kinds(check.paths());
+                    tasks.push(Task::perform(kinds, move |kinds| {
+                        Message::Checked(check.clone(), kinds)
+                    }));
+                }
+                effect => self.app.outbox.push_back(effect),
+            }
+        }
+        tasks.push(self.next_ordered_effect());
+        Task::batch(tasks)
+    }
+
+    fn next_ordered_effect(&mut self) -> Task<Message> {
         if self.running.is_some() {
             return Task::none();
         }
@@ -381,7 +413,8 @@ impl Gui {
                     Message::SettingsSaved,
                 ),
                 Effect::CheckPaths(check) => {
-                    Task::perform(self.platform.path_kinds(check.paths()), Message::Checked)
+                    let kinds = self.platform.path_kinds(check.paths());
+                    Task::perform(kinds, move |kinds| Message::Checked(check.clone(), kinds))
                 }
             };
         }
@@ -600,10 +633,18 @@ impl Gui {
                 self.running = None;
                 self.app.settings_saved(result);
             }
-            Message::Checked(kinds) => {
-                let Some(Effect::CheckPaths(check)) = self.running.take() else {
+            Message::Checked(check, kinds) => {
+                if let PathCheck::Refresh(paths) = &check {
+                    let Some(i) = self.refreshing.iter().position(|c| *c == check) else {
+                        return Task::none();
+                    };
+                    self.refreshing.remove(i);
+                    if self.typed_check.as_ref().is_some_and(|p| paths.contains(p)) {
+                        self.typed_check = None;
+                    }
+                } else if self.running.take() != Some(Effect::CheckPaths(check.clone())) {
                     return Task::none();
-                };
+                }
                 let relocating = match &check {
                     PathCheck::Relocate { from, .. } => Some(from.clone()),
                     _ => None,
@@ -1059,7 +1100,11 @@ mod tests {
     /// tasks its updates returned: its effects, a reload of the board, and
     /// reading the file in the viewer.
     fn settle(gui: &mut Gui) {
-        while let Some(effect) = gui.running.clone() {
+        while let Some(effect) = gui
+            .running
+            .clone()
+            .or_else(|| gui.refreshing.first().cloned().map(Effect::CheckPaths))
+        {
             let message = match effect {
                 Effect::Run(command) => Message::Ran(now(gui.platform.run(command))),
                 Effect::SaveSettings(settings) => {
@@ -1069,7 +1114,8 @@ mod tests {
                     Message::SettingsSaved(now(gui.platform.save_device_settings(settings)))
                 }
                 Effect::CheckPaths(check) => {
-                    Message::Checked(now(gui.platform.path_kinds(check.paths())))
+                    let kinds = now(gui.platform.path_kinds(check.paths()));
+                    Message::Checked(check, kinds)
                 }
             };
             let _ = gui.update(message);
@@ -1275,11 +1321,31 @@ mod tests {
         let _ = gui.update(Message::App(Action::Edit(EditTarget::New(Status::Open))));
         let folder = dir.path().canonicalize().unwrap();
         let _ = gui.update(Message::EditProject(folder.display().to_string()));
-        let check = PathCheck::Refresh(vec![folder.clone()]);
-        assert_eq!(gui.running, Some(Effect::CheckPaths(check)));
+        assert_eq!(gui.refreshing, [PathCheck::Refresh(vec![folder.clone()])]);
         settle(&mut gui);
         let input = gui.app.project_input(&gui.ui.edit_project);
-        assert_eq!(input, ProjectInput::New(folder));
+        assert_eq!(input, ProjectInput::New(folder.clone()));
+
+        // Typed on while it's looked for, only the latest path is asked
+        // about next, and a save doesn't wait for it.
+        let typed = folder.join("new");
+        for text in [folder.join("n"), folder.join("ne"), typed.clone()] {
+            let _ = gui.update(Message::EditProject(text.display().to_string()));
+        }
+        let asked =
+            |gui: &Gui, path: PathBuf| gui.refreshing.contains(&PathCheck::Refresh(vec![path]));
+        assert!(asked(&gui, folder.join("n")));
+        assert!(!asked(&gui, folder.join("ne")) && !asked(&gui, typed.clone()));
+        let _ = gui.update(Message::EditTitle("alpha".into()));
+        let _ = gui.update(Message::Save);
+        assert!(matches!(
+            gui.running,
+            Some(Effect::Run(Command::Create { .. }))
+        ));
+        settle(&mut gui);
+        assert_eq!(gui.app.error, None);
+        assert!(typed.is_dir());
+        assert!(gui.app.missing_projects.is_empty());
     }
 
     #[test]
