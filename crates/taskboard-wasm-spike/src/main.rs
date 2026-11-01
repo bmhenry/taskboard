@@ -61,9 +61,9 @@ fn update(
 ) -> iced::Task<taskboard_ui::Message> {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    static FRAMES: AtomicU32 = AtomicU32::new(0);
     use taskboard_ui::Message;
 
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
     match &message {
         Message::CheckProjects => log::info!("spike: time::every fired (CheckProjects)"),
         Message::Frame(now) => {

@@ -10,7 +10,7 @@ publish = false
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 taskboard-core.workspace = true
 # Without `desktop`: no file dialogs and no tokio.
-taskboard-ui = { path = "../taskboard-ui", default-features = false }
+taskboard-ui.workspace = true
 chrono = { workspace = true, features = ["wasmbind"] }
 # No `tokio`: iced uses wasm-bindgen-futures on the web. `webgl` lets wgpu
 # fall back to WebGL2 where WebGPU isn't available.

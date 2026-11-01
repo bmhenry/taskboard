@@ -6,7 +6,7 @@ description = "Local Kanban GUI for Taskboard"
 
 [dependencies]
 taskboard-core.workspace = true
-taskboard-ui = { path = "../taskboard-ui" }
+taskboard-ui = { workspace = true, features = ["desktop"] }
 iced = { version = "0.14", features = ["tokio"] }
 notify = "8"
 

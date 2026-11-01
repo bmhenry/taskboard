@@ -119,7 +119,7 @@ every target but changes nothing on native, where `iced::time::Instant` is
 | `taskboard-ui/src/ui/mod.rs` `pick_file`/`pick_folder` | `rfd` | Returns `None` without the `desktop` feature, which the spike turns off, so rfd isn't a dependency. Its wasm build has no `FileHandle::path()`, so Phase 1 needs bytes-based upload. |
 | `taskboard-ui/src/ui/{mod,drag}.rs` | `std::time::Instant` | Changed to `iced::time::Instant` on every target (see above). |
 | `taskboard-wasm-spike/src/watch.rs` | `notify` watcher | A stub with the same API as the desktop crate's `watch.rs`, passed to `Gui::watching`, whose `subscription()` is `Subscription::none()`. Phase 2 replaces it with SSE. |
-| Spike `Cargo.toml` | dependencies | iced without `tokio` (`taskboard-ui` only enables it with `desktop`), plus `webgl`. Also chrono with `wasmbind` (otherwise `Utc::now()` panics). |
+| Spike `Cargo.toml` | dependencies | iced without `tokio` (`taskboard-ui` only enables it off wasm32), plus `webgl`. Also chrono with `wasmbind` (otherwise `Utc::now()` panics). |
 | `taskboard-core/Cargo.toml` | wasm32-only `getrandom` dependency with `wasm_js` | ulid/rand use getrandom 0.4, which needs its JS backend in the browser. With this, `cargo check -p taskboard-core --target wasm32-unknown-unknown` works on its own. |
 
 Not gated, because they compile and only fail at runtime:
