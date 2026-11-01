@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 description = "Daemon serving Taskboard's web UI and its HTTP API"
 
+[features]
+# Build trunk's `crates/taskboard-wasm/dist` into the binary, which then
+# serves it. `scripts/build-web.sh` builds the bundle and turns this on;
+# without it, the daemon serves `--static DIR` or a page saying how to.
+embed = []
+
 [dependencies]
 taskboard-core = { workspace = true, features = ["watch"] }
 serde.workspace = true
@@ -13,6 +19,9 @@ clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false }
 getrandom = "0.3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# Files are embedded at compile time in debug builds too, not read from the
+# source tree at run time.
+rust-embed = { version = "8", features = ["debug-embed", "mime-guess"] }
 tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]

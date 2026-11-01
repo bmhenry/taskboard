@@ -42,6 +42,10 @@ taskboard-web --static dist         # prints http://127.0.0.1:7878/?token=…
 Open the `?token=…` link the daemon prints: it sets the sign-in cookie that
 the client's requests (and its event stream) then carry.
 
+`scripts/build-web.sh` makes the release build instead: trunk's release
+`dist/` (trunk runs wasm-opt on it), gzip copies of its files, and the daemon
+with all of it built in (`--features embed`), which needs no `--static`.
+
 `trunk serve` can serve the client while working on it: it proxies `/api/`
 to a daemon on the default `127.0.0.1:7878` (see `Trunk.toml`). The pages
 then come from trunk's port, so the daemon needs `--allow-host

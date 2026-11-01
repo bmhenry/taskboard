@@ -58,7 +58,7 @@ The workspace's crates:
 - `crates/tb`: the CLI
 - `crates/taskboard-ui`: the GUI's iced UI, as a library shared with the web client. It reaches the store, file dialogs and settings through a `Platform` its host provides.
 - `crates/taskboard`: the desktop GUI app, with the desktop `Platform` (local filesystem, native dialogs, a `notify` watcher)
-- `crates/taskboard-web`: the daemon for the web client: an HTTP API over the store (its routes and JSON types are in `taskboard_core::api`) with live updates over server-sent events. `taskboard-web [--bind 127.0.0.1:7878] [--allow-host NAME[:PORT]]... [--static DIR] [DIR]`. Every request needs a token, kept in `$XDG_CONFIG_HOME/tb/web-token` (made on first run). Open the `http://…/?token=…` link the daemon prints on starting: it sets a cookie and then drops the token from the URL. Scripts can send `Authorization: Bearer <token>` instead. Requests must also name the daemon in their `Host` header (any of localhost's names when it's bound to loopback), which blocks DNS rebinding. Add `--allow-host` for a Tailscale name or an SSH tunnel on another port; bound to `0.0.0.0`, every name clients use needs one. Requests that change things are refused if their `Origin` is another site. Browsers send cookies to every port on a host, so other servers on the same host (say, on another localhost port) also receive the token cookie.
+- `crates/taskboard-web`: the daemon for the web client: an HTTP API over the store (its routes and JSON types are in `taskboard_core::api`) with live updates over server-sent events, and the web client's files (see [Web UI](#web-ui)). `taskboard-web [--bind 127.0.0.1:7878] [--allow-host NAME[:PORT]]... [--static DIR] [DIR]`. Every request needs a token, kept in `$XDG_CONFIG_HOME/tb/web-token` (made on first run). Open the `http://…/?token=…` link the daemon prints on starting: it sets a cookie and then drops the token from the URL. Scripts can send `Authorization: Bearer <token>` instead. Requests must also name the daemon in their `Host` header (any of localhost's names when it's bound to loopback), which blocks DNS rebinding. Add `--allow-host` for a Tailscale name or an SSH tunnel on another port; bound to `0.0.0.0`, every name clients use needs one. Requests that change things are refused if their `Origin` is another site. Browsers send cookies to every port on a host, so other servers on the same host (say, on another localhost port) also receive the token cookie.
 - `crates/taskboard-wasm`: the web client: the UI built for the browser with trunk, with the web `Platform` over `taskboard-web`'s API (see its `README.md`)
 
 ```sh
@@ -75,6 +75,23 @@ On Linux the GUI needs the usual X11/OpenGL development libraries (e.g. `libx11-
 cargo install --path crates/tb
 cargo install --path crates/taskboard
 ```
+
+### Web UI
+
+`scripts/build-web.sh` builds the web client with trunk (it needs `trunk` and the `wasm32-unknown-unknown` target) and then `taskboard-web` with the client built in (the `embed` feature), and says where the binary is. A `taskboard-web` built without it, as by `cargo build`, serves a page saying to run the script, or a `dist/` given with `--static`.
+
+To run it as a systemd user service:
+
+```sh
+scripts/build-web.sh
+install -Dm755 target/release/taskboard-web ~/.cargo/bin/taskboard-web
+cp contrib/taskboard-web.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now taskboard-web
+journalctl --user -u taskboard-web   # the http://127.0.0.1:7878/?token=… sign-in link
+```
+
+Edit `ExecStart` in the copied unit for another binary path, address, default project or `--allow-host`. It listens on localhost only. From another machine, either tunnel it (`ssh -L 7878:127.0.0.1:7878 host`, then open the link there; a different local port needs `--allow-host localhost:PORT`), or with Tailscale bind it to the machine's Tailscale address (`--bind 100.x.y.z:7878 --allow-host host.tailnet.ts.net`) and open the link with that address. Hooks run with the service's environment; see the unit's comments for `PATH`.
 
 
 ## Usage

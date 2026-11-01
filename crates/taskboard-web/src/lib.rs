@@ -6,6 +6,7 @@
 //! [`router`] builds the whole app, behind the [`auth`] checks that every
 //! request passes through.
 
+pub mod assets;
 pub mod auth;
 
 use std::convert::Infallible;
@@ -20,7 +21,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -53,9 +54,12 @@ pub struct Config {
     /// Whether `project` was named on the command line, which makes it the
     /// default even if it isn't a git repository or on the board yet.
     pub named: bool,
-    /// A directory to serve the web UI from (trunk's `dist/`); without it a
-    /// placeholder page is served.
+    /// A directory to serve the web UI from (trunk's `dist/`), in place of
+    /// [`Config::bundle`].
     pub static_dir: Option<PathBuf>,
+    /// The web UI built into the daemon, [`assets::BUILT_IN`]. With neither
+    /// this nor `static_dir`, a page saying how to build one is served.
+    pub bundle: Option<assets::Bundle>,
     /// What every request must carry; see [`auth`].
     pub token: String,
     /// The address the daemon listens on. Requests must name it in `Host`,
@@ -151,9 +155,17 @@ pub fn router(config: Config) -> Router {
         .route(api::EVENTS, get(events))
         // Only on the routes above, not the web UI's files.
         .layer(axum::middleware::map_response(no_store));
-    let app = match &server.config.static_dir {
-        Some(dir) => app.fallback_service(ServeDir::new(dir)),
-        None => app.fallback(placeholder),
+    let app = match (&server.config.static_dir, server.config.bundle) {
+        (Some(dir), _) => {
+            let files = ServeDir::new(dir).precompressed_br().precompressed_gzip();
+            app.fallback_service(files)
+        }
+        (None, Some(bundle)) => {
+            app.fallback(move |method: Method, uri: Uri, headers: HeaderMap| {
+                std::future::ready(assets::serve(bundle, &method, &uri, &headers))
+            })
+        }
+        (None, None) => app.fallback(placeholder),
     };
     let config = &server.config;
     let guard = auth::Guard::new(config.token.clone(), config.addr, &config.allow_hosts);
@@ -341,15 +353,18 @@ async fn events(State(server): Shared) -> Sse<impl Stream<Item = Result<Event, I
     Sse::new(events).keep_alive(KeepAlive::default())
 }
 
-/// Stands in for the web UI until it's built into the daemon.
+/// Stands in for the web UI in a daemon built without it.
 async fn placeholder(uri: Uri) -> Response {
     if uri.path() != "/" {
         return StatusCode::NOT_FOUND.into_response();
     }
     Html(concat!(
         "<!doctype html><title>Taskboard</title>",
-        "<p>taskboard-web is running, but has no web UI to serve. ",
-        "Start it with <code>--static DIR</code>, DIR being trunk's <code>dist/</code>.</p>",
+        "<p>taskboard-web is running, but was built without its web UI. ",
+        "Build it with <code>scripts/build-web.sh</code> in Taskboard's source, ",
+        "which builds the UI with trunk and then the daemon with the UI in it. ",
+        "Or start this one with <code>--static DIR</code>, ",
+        "DIR being trunk's <code>dist/</code>.</p>",
     ))
     .into_response()
 }
@@ -490,13 +505,27 @@ mod tests {
     const HOST: &str = "127.0.0.1:7878";
 
     fn fixture() -> Fixture {
-        fixture_with(false, HOST, &[])
+        fixture_with(WebUi::None, HOST, &[])
     }
 
+    /// Where a fixture's web UI comes from.
+    #[derive(PartialEq)]
+    enum WebUi {
+        None,
+        /// A directory with just an `index.html`.
+        Dir,
+        /// [`FakeDist`].
+        Embedded,
+    }
+
+    /// A stand-in for trunk's bundle, as [`assets::BUILT_IN`] embeds it.
+    #[derive(rust_embed::RustEmbed)]
+    #[folder = "tests/fixtures/dist"]
+    struct FakeDist;
+
     /// A fixture listening on `addr` and also taking requests for
-    /// `allow_hosts`. With `web_ui`, it serves a web UI that's just an
-    /// `index.html`.
-    fn fixture_with(web_ui: bool, addr: &str, allow_hosts: &[&str]) -> Fixture {
+    /// `allow_hosts`, with `web_ui`.
+    fn fixture_with(web_ui: WebUi, addr: &str, allow_hosts: &[&str]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store")).unwrap();
         let project = create_project_dir(&dir.path().join("proj")).unwrap();
@@ -508,7 +537,9 @@ mod tests {
             settings_path: Some(dir.path().join("config/settings.json")),
             project: project.clone(),
             named: true,
-            static_dir: web_ui.then_some(dist),
+            static_dir: (web_ui == WebUi::Dir).then_some(dist),
+            bundle: (web_ui == WebUi::Embedded)
+                .then_some(<FakeDist as rust_embed::RustEmbed>::get as assets::Bundle),
             token: TOKEN.into(),
             addr: addr.parse().unwrap(),
             allow_hosts: allow_hosts.iter().map(|h| h.parse().unwrap()).collect(),
@@ -831,7 +862,7 @@ mod tests {
     }
 
     fn static_fixture() -> Fixture {
-        fixture_with(true, HOST, &[])
+        fixture_with(WebUi::Dir, HOST, &[])
     }
 
     async fn text(res: Response) -> String {
@@ -962,7 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_hosts_can_be_allowed() {
-        let f = fixture_with(false, HOST, &["box.tailnet.ts.net", "localhost:9000"]);
+        let f = fixture_with(WebUi::None, HOST, &["box.tailnet.ts.net", "localhost:9000"]);
         let bearer = format!("Bearer {TOKEN}");
         let auth = [(header::AUTHORIZATION, bearer.as_str())];
         for host in [
@@ -983,7 +1014,7 @@ mod tests {
         }
 
         // Off loopback, only the address itself (and what's allowed) goes.
-        let f = fixture_with(false, "192.168.1.5:7878", &[]);
+        let f = fixture_with(WebUi::None, "192.168.1.5:7878", &[]);
         let res = f.get_raw(api::BOARD, "192.168.1.5:7878", &auth).await;
         assert_eq!(res.status(), StatusCode::OK);
         let res = f.get_raw(api::BOARD, "localhost:7878", &auth).await;
@@ -1096,7 +1127,7 @@ mod tests {
 
     #[tokio::test]
     async fn changes_from_other_sites_are_refused() {
-        let f = fixture_with(false, HOST, &["box.ts.net"]);
+        let f = fixture_with(WebUi::None, HOST, &["box.ts.net"]);
         let cookie = format!("tb_token={TOKEN}");
         for origin in [
             "http://evil.example",
@@ -1136,5 +1167,161 @@ mod tests {
                 "{origin:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_built_in_web_ui_is_served_for_caching() {
+        let f = fixture_with(WebUi::Embedded, HOST, &[]);
+        let cookie = format!("tb_token={TOKEN}");
+        let signed_in = [(header::COOKIE, cookie.as_str())];
+        let wasm = "/app-0123456789abcdef_bg.wasm";
+        for (uri, ty, cache) in [
+            ("/", "text/html", "no-cache"),
+            ("/index.html", "text/html", "no-cache"),
+            ("/app-0123456789abcdef.js", "javascript", assets::FOREVER),
+            (wasm, "application/wasm", assets::FOREVER),
+        ] {
+            let res = f.get_raw(uri, HOST, &signed_in).await;
+            assert_eq!(res.status(), StatusCode::OK, "{uri}");
+            let headers = res.headers();
+            let content_type = headers[header::CONTENT_TYPE].to_str().unwrap();
+            assert!(content_type.contains(ty), "{uri}: {content_type}");
+            assert_eq!(headers[header::CACHE_CONTROL], cache, "{uri}");
+            assert!(!headers.contains_key(header::CONTENT_ENCODING), "{uri}");
+            assert!(headers.contains_key(header::ETAG), "{uri}");
+        }
+        let res = f.get_raw("/", HOST, &signed_in).await;
+        assert_eq!(text(res).await, "<!doctype html><p>embedded web UI</p>\n");
+        let res = f.get_raw(wasm, HOST, &signed_in).await;
+        let raw = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&raw[..], b"\0asm\x01\0\0\0");
+
+        // Browsers that take gzip get the compressed copy, as wasm still.
+        let gzip = [
+            (header::COOKIE, cookie.as_str()),
+            (header::ACCEPT_ENCODING, "gzip, deflate, br"),
+        ];
+        let res = f.get_raw(wasm, HOST, &gzip).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let headers = res.headers();
+        assert_eq!(headers[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/wasm");
+        assert_eq!(headers[header::VARY], "accept-encoding");
+        let etag = headers[header::ETAG].to_str().unwrap().to_owned();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..2], b"\x1f\x8b");
+        // index.html has no compressed copy, so it goes as it is.
+        let res = f.get_raw("/", HOST, &gzip).await;
+        assert!(!res.headers().contains_key(header::CONTENT_ENCODING));
+
+        // A copy the browser has is just confirmed.
+        let again = [
+            (header::COOKIE, cookie.as_str()),
+            (header::ACCEPT_ENCODING, "gzip"),
+            (header::IF_NONE_MATCH, etag.as_str()),
+        ];
+        let res = f.get_raw(wasm, HOST, &again).await;
+        assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(res.headers()[header::ETAG], etag.as_str());
+        assert_eq!(res.headers()[header::CACHE_CONTROL], assets::FOREVER);
+        assert!(text(res).await.is_empty());
+        // The uncompressed copy has a tag of its own.
+        let res = f.get_raw(wasm, HOST, &again[..1]).await;
+        assert_ne!(res.headers()[header::ETAG], etag.as_str());
+
+        let res = f.get_raw("/nowhere.js", HOST, &signed_in).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = f.send_raw(Method::POST, "/", HOST, &signed_in).await;
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(res.headers()[header::ALLOW], "GET, HEAD");
+    }
+
+    #[tokio::test]
+    async fn the_built_in_web_ui_negotiates_encodings() {
+        let f = fixture_with(WebUi::Embedded, HOST, &[]);
+        let cookie = format!("tb_token={TOKEN}");
+        let js = "/app-0123456789abcdef.js";
+        let wasm = "/app-0123456789abcdef_bg.wasm";
+        // The fixture's js has .br and .gz copies, its wasm only a .gz.
+        for (uri, accept, want) in [
+            (js, "br", Some("br")),
+            (js, "gzip, br", Some("br")),
+            (js, "gzip, br;q=0.5", Some("gzip")),
+            (js, "br;q=0, *", Some("gzip")),
+            (js, "*, br;q=0", Some("gzip")),
+            (js, "br;q=0, gzip;q=0, *", None),
+            (js, "identity", None),
+            (wasm, "br", None),
+            (wasm, "br, gzip;q=0.1", Some("gzip")),
+        ] {
+            let headers = [
+                (header::COOKIE, cookie.as_str()),
+                (header::ACCEPT_ENCODING, accept),
+            ];
+            let res = f.get_raw(uri, HOST, &headers).await;
+            assert_eq!(res.status(), StatusCode::OK, "{uri} {accept}");
+            let got = res.headers().get(header::CONTENT_ENCODING);
+            assert_eq!(got.map(|v| v.to_str().unwrap()), want, "{uri} {accept}");
+        }
+
+        // HEAD has the headers GET would, and no body.
+        let headers = [
+            (header::COOKIE, cookie.as_str()),
+            (header::ACCEPT_ENCODING, "br"),
+        ];
+        let res = f.send_raw(Method::HEAD, js, HOST, &headers).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_ENCODING], "br");
+        assert!(
+            res.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains("javascript")
+        );
+        assert_eq!(res.headers()[header::CACHE_CONTROL], assets::FOREVER);
+        let etag = res.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert!(text(res).await.is_empty());
+
+        for (if_none_match, status) in [
+            ("*", StatusCode::NOT_MODIFIED),
+            (
+                &format!("\"0000\", {etag}") as &str,
+                StatusCode::NOT_MODIFIED,
+            ),
+            (&format!("W/{etag}"), StatusCode::NOT_MODIFIED),
+            ("\"0000\", \"1111\"", StatusCode::OK),
+        ] {
+            let headers = [
+                (header::COOKIE, cookie.as_str()),
+                (header::ACCEPT_ENCODING, "br"),
+                (header::IF_NONE_MATCH, if_none_match),
+            ];
+            let res = f.get_raw(js, HOST, &headers).await;
+            assert_eq!(res.status(), status, "{if_none_match}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_built_in_web_ui_needs_the_token() {
+        let f = fixture_with(WebUi::Embedded, HOST, &[]);
+        for uri in ["/", "/index.html", "/app-0123456789abcdef_bg.wasm"] {
+            let res = f.get_raw(uri, HOST, &[]).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert!(text(res).await.contains("printed"), "{uri}");
+        }
+        let res = f.get_raw(&format!("/?token={TOKEN}"), HOST, &[]).await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(res.headers().contains_key(header::SET_COOKIE));
+    }
+
+    #[tokio::test]
+    async fn without_a_web_ui_the_page_says_how_to_build_one() {
+        let f = fixture();
+        let cookie = format!("tb_token={TOKEN}");
+        let res = f.get_raw("/", HOST, &[(header::COOKIE, &cookie)]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let page = text(res).await;
+        assert!(page.contains("scripts/build-web.sh"), "{page}");
+        assert!(page.contains("--static"), "{page}");
     }
 }
