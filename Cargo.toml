@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/taskboard-core", "crates/tb", "crates/taskboard", "crates/taskboard-wasm-spike"]
+members = ["crates/taskboard-core", "crates/tb", "crates/taskboard-ui", "crates/taskboard", "crates/taskboard-wasm-spike"]
 # Vendored crates are patched dependencies, not workspace members.
 exclude = ["vendor"]
 
@@ -10,6 +10,7 @@ edition = "2024"
 
 [workspace.dependencies]
 taskboard-core = { path = "crates/taskboard-core" }
+taskboard-ui = { path = "crates/taskboard-ui", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

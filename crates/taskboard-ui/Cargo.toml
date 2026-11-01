@@ -1,0 +1,29 @@
+[package]
+name = "taskboard-ui"
+version.workspace = true
+edition.workspace = true
+description = "Taskboard's iced UI, shared by the desktop app and the web client"
+
+[features]
+default = ["desktop"]
+# Native file and folder dialogs. The wasm build turns it off.
+# TODO(Platform): rfd moves to the desktop crate behind the Platform trait.
+desktop = ["dep:rfd"]
+
+[dependencies]
+taskboard-core.workspace = true
+chrono.workspace = true
+iced = { version = "0.14", features = ["image", "canvas", "advanced"] }
+# Pinned exactly: published by a fork with frequent releases; review diffs before bumping.
+iced_drop = "=0.2.54"
+image = { version = "0.25", default-features = false, features = ["png"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"], optional = true }
+
+# Natively, `iced::time::every` needs an executor; on wasm32 iced uses
+# wasm-bindgen-futures.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+iced = { version = "0.14", features = ["tokio"] }
+
+[dev-dependencies]
+tempfile.workspace = true

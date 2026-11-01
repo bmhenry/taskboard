@@ -14,7 +14,7 @@ mod viewer;
 mod widgets;
 mod zones;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use iced::time::Instant;
@@ -25,7 +25,6 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Subscription, 
 use taskboard_core::{FileKind, LinkKind, Status, Ulid};
 
 use crate::app::{Action, App, EditTarget, Owner, View, drop_index, drop_position};
-use crate::watch::{self, WatchEvent};
 use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
 use widgets::El;
@@ -58,9 +57,25 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("Esc", "Close a dialog or menu, cancel editing, or deselect"),
 ];
 
+/// What a [`BoardWatcher`] reports to the UI.
+#[derive(Debug, Clone)]
+pub enum WatchEvent {
+    /// `tasks.json` changed.
+    Changed,
+    /// The watcher couldn't start; live updates are off.
+    Failed(String),
+}
+
+/// Reports changes to the store's `tasks.json` (the second path), which
+/// lives in the store's directory (the first), so edits from other processes
+/// (like `tb`) show up live. The desktop app watches the file with `notify`.
+// TODO(Platform): becomes `Platform::board_changes`.
+pub type BoardWatcher = fn(&Path, &Path) -> Subscription<WatchEvent>;
+
 pub struct Gui {
     app: App,
     ui: UiState,
+    watcher: Option<BoardWatcher>,
 }
 
 /// UI-only state that doesn't belong in [`App`].
@@ -193,6 +208,15 @@ impl Gui {
         Gui {
             app,
             ui: UiState::default(),
+            watcher: None,
+        }
+    }
+
+    /// Reloads the board when `watcher` reports a change.
+    pub fn watching(self, watcher: BoardWatcher) -> Gui {
+        Gui {
+            watcher: Some(watcher),
+            ..self
         }
     }
 
@@ -221,10 +245,12 @@ impl Gui {
             _ => None,
         });
         let mut subs = vec![
-            watch::subscription(store.dir(), &store.tasks_path()).map(Message::Watch),
             keys,
             iced::time::every(PROJECT_CHECK_INTERVAL).map(|_| Message::CheckProjects),
         ];
+        if let Some(watch) = self.watcher {
+            subs.push(watch(store.dir(), &store.tasks_path()).map(Message::Watch));
+        }
         if self.ui.hook_edited_at.is_some() {
             subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::Tick));
         }
@@ -808,10 +834,11 @@ fn typed_path(text: &str) -> PathBuf {
 /// rfd gives `None` both when cancelled and when there's no portal (or
 /// zenity) to show a dialog, so the latter fails silently.
 async fn pick_file() -> Option<PathBuf> {
-    // wasm spike: no paths in a browser; Phase 1 uploads bytes instead.
-    #[cfg(target_arch = "wasm32")]
+    // No paths in a browser; the web client will upload bytes instead.
+    // TODO(Platform): becomes `Platform::pick_file`.
+    #[cfg(not(feature = "desktop"))]
     return None;
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "desktop")]
     rfd::AsyncFileDialog::new()
         .set_title("Attach a file")
         .pick_file()
@@ -821,12 +848,13 @@ async fn pick_file() -> Option<PathBuf> {
 
 /// Asks for a directory with the system's folder dialog; see [`pick_file`].
 async fn pick_folder(title: &'static str) -> Option<PathBuf> {
-    #[cfg(target_arch = "wasm32")]
+    // TODO(Platform): becomes `Platform::pick_folder`.
+    #[cfg(not(feature = "desktop"))]
     return {
         let _ = title;
         None
     };
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "desktop")]
     rfd::AsyncFileDialog::new()
         .set_title(title)
         .pick_folder()

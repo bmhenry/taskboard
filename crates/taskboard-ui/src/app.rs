@@ -761,6 +761,7 @@ pub fn drop_index(card_midpoints: &[f32], y: f32) -> usize {
     card_midpoints.iter().filter(|mid| **mid < y).count()
 }
 
+// TODO(Platform): becomes `Platform::open_url` (`window.open` on the web).
 fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
@@ -776,6 +777,7 @@ fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 /// Whether a project's directory is gone.
+// TODO(Platform): asks the backend instead of the local filesystem.
 #[cfg(not(target_arch = "wasm32"))]
 fn dir_missing(path: &Path) -> bool {
     !path.is_dir()

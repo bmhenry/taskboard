@@ -9,13 +9,12 @@ publish = false
 # only builds an empty stub binary.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 taskboard-core.workspace = true
+# Without `desktop`: no file dialogs and no tokio.
+taskboard-ui.workspace = true
 chrono = { workspace = true, features = ["wasmbind"] }
 # No `tokio`: iced uses wasm-bindgen-futures on the web. `webgl` lets wgpu
 # fall back to WebGL2 where WebGPU isn't available.
-iced = { version = "0.14", features = ["image", "canvas", "advanced", "webgl"] }
-iced_drop = "=0.2.54"
-image = { version = "0.25", default-features = false, features = ["png"] }
-pulldown-cmark = { version = "0.13", default-features = false }
+iced = { version = "0.14", features = ["advanced", "webgl"] }
 console_error_panic_hook = "0.1"
 console_log = "1"
 log = "0.4"

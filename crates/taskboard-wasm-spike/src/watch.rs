@@ -4,13 +4,7 @@
 use std::path::Path;
 
 use iced::Subscription;
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum WatchEvent {
-    Changed,
-    Failed(String),
-}
+use taskboard_ui::WatchEvent;
 
 pub fn subscription(_store_dir: &Path, _tasks_file: &Path) -> Subscription<WatchEvent> {
     Subscription::none()
