@@ -1,5 +1,7 @@
 //! Colors, fonts and widget styles.
 
+use std::ops::Deref;
+
 use iced::border::Radius;
 use iced::widget::{button, container, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme as IcedTheme, font};
@@ -100,18 +102,69 @@ static LIGHT: Palette = Palette {
     error_bar: 0xFFEBEB,
 };
 
-pub type Pal = &'static Palette;
+/// The least height and width of something tapped in compact mode.
+const TOUCH_TARGET: f32 = 44.0;
 
-pub fn palette(theme: Theme) -> Pal {
+/// What the views draw with: a theme's colors, and whether to size controls
+/// for touch, which compact mode does.
+#[derive(Clone, Copy)]
+pub struct Pal {
+    colors: &'static Palette,
+    compact: bool,
+}
+
+impl Deref for Pal {
+    type Target = Palette;
+
+    fn deref(&self) -> &Palette {
+        self.colors
+    }
+}
+
+impl Pal {
+    /// The height of a control that's `height` tall outside compact mode.
+    pub fn control(self, height: f32) -> f32 {
+        if self.compact {
+            height.max(TOUCH_TARGET)
+        } else {
+            height
+        }
+    }
+
+    /// The padding above and below `content` tall content that's padded by
+    /// `padding` outside compact mode.
+    pub fn pad_y(self, content: f32, padding: f32) -> f32 {
+        if self.compact {
+            padding.max((TOUCH_TARGET - content) / 2.0)
+        } else {
+            padding
+        }
+    }
+
+    /// Room to hold a control of `padding` either side of its label at the
+    /// touch target's width, for labels as short as a "×".
+    pub fn min_label_width(self, padding: f32) -> Option<f32> {
+        self.compact.then_some(TOUCH_TARGET - 2.0 * padding)
+    }
+}
+
+fn colors(theme: Theme) -> &'static Palette {
     match theme {
         Theme::Dark => &DARK,
         Theme::Light => &LIGHT,
     }
 }
 
+pub fn palette(theme: Theme, compact: bool) -> Pal {
+    Pal {
+        colors: colors(theme),
+        compact,
+    }
+}
+
 /// The Iced theme behind widgets the UI doesn't style itself.
 pub fn iced_theme(theme: Theme) -> IcedTheme {
-    let p = palette(theme);
+    let p = colors(theme);
     IcedTheme::custom(
         "Taskboard".to_string(),
         iced::theme::Palette {

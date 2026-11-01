@@ -6,7 +6,7 @@ use taskboard_core::{DateField, Status, parse_date};
 
 use super::popup::popup;
 use super::theme::{self, BOLD, Pal, Style, rgb};
-use super::widgets::{El, btn, chip, grow, input, label};
+use super::widgets::{El, LINE_HEIGHT, btn, chip, grow, input, label};
 use super::{Gui, Message, SEARCH, edge, is_compact};
 use crate::app::{Action, EditTarget, View};
 
@@ -229,7 +229,7 @@ fn filter_menu(gui: &Gui, compact: bool) -> El<'_> {
 
 pub fn error_bar<'a>(p: Pal, err: &'a str) -> El<'a> {
     let dismiss = button(text("Dismiss").size(13))
-        .padding(0)
+        .padding([p.pad_y(13.0 * LINE_HEIGHT, 0.0), 0.0])
         .style(move |_, _| button::Style {
             text_color: rgb(p.text),
             ..button::Style::default()

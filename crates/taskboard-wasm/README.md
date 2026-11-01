@@ -165,6 +165,12 @@ dragging on from there moves a card. The canvas also has `touch-action:
 none`. In phone emulation (390 px wide, CDP touch events), drags on the
 column background, on cards and on list rows scroll, and taps select.
 
+Moving a task on touch is mainly done with the status menu in its details
+sheet. Long-press drag stays as a second way: in the same emulation, a long
+press on a card dragged it onto a status tab, and a quick swipe from the same
+spot didn't move it. Below 720 px tappable things are at least 44 px tall, and
+buttons at least 44 px wide (`Pal::control`, `Pal::pad_y`).
+
 ## Soft keyboard (task WRJVWT28)
 
 A phone only opens its keyboard for a focused editable DOM element, and iced
@@ -256,9 +262,10 @@ real IME behaves, needs a phone.
 - **Touch scroll.** Swipe the column lists vertically and the board
   horizontally.
 - **Taps.** Buttons, cards, the status menu and the toolbar.
-- **Custom drag (`ui/drag.rs` with `iced_drop`).** Long-press or press and
-  drag a card between columns. Check whether the browser's own touch scrolling
-  or zoom steals the gesture (it may need `touch-action: none` on the canvas).
+- **Custom drag (`ui/drag.rs` with `iced_drop`).** Long-press a card and drag
+  it onto a status tab or another column. It works in emulation, so check that
+  the phone's own long-press handling (a context menu or haptics) doesn't take
+  the gesture.
 - **DPR/canvas sizing.** Check the clipped right edge seen in emulation.
 - **Release-build size and load time over the tunnel.**
 - **The file picker.** Upload… should open the phone's picker (camera, files).

@@ -14,6 +14,7 @@ mod viewer;
 mod widgets;
 mod zones;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -142,6 +143,9 @@ struct UiState {
     drag: Option<Drag>,
     /// The column picked from the compact board's tabs.
     compact_column: Option<Status>,
+    /// The window was last laid out in compact mode. Set by the view, the
+    /// only place that knows the window's size.
+    compact: Cell<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +163,8 @@ pub enum Message {
     OpenCompactView(View),
     ToggleStatusMenu(Ulid),
     CloseStatusMenu,
+    /// A status was picked from the task's list.
+    ChooseStatus(Ulid, Status),
     ToggleEpicMenu(Ulid),
     CloseEpicMenu,
     /// An epic was picked from the task's list: (task, epic).
@@ -274,7 +280,7 @@ impl Gui {
     }
 
     fn pal(&self) -> Pal {
-        palette(self.app.device.theme)
+        palette(self.app.device.theme, self.ui.compact.get())
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -469,6 +475,14 @@ impl Gui {
                 }
             }
             Message::CloseStatusMenu => ui.status_open = None,
+            Message::ChooseStatus(id, status) => {
+                ui.status_open = None;
+                return self.apply(Action::Move {
+                    id,
+                    status,
+                    position: None,
+                });
+            }
             Message::ToggleEpicMenu(id) => {
                 ui.epic_open = match ui.epic_open {
                     Some(_) => None,
@@ -988,8 +1002,9 @@ impl Gui {
     }
 
     fn view_sized(&self, size: Size) -> El<'_> {
-        let (app, p) = (&self.app, self.pal());
         let compact = is_compact(size.width);
+        self.ui.compact.set(compact);
+        let (app, p) = (&self.app, self.pal());
         let mut page = column![toolbar::toolbar(self, size.width)];
         if let Some(err) = &app.error {
             page = page.push(toolbar::error_bar(p, err));
@@ -1276,6 +1291,27 @@ mod tests {
 
         let _ = gui.update(Message::ShowColumn(Status::Closed));
         assert_eq!(gui.compact_column(), Status::Closed);
+    }
+
+    #[test]
+    fn choosing_a_status_moves_the_task_and_closes_the_menu() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let _ = gui.update(Message::ToggleStatusMenu(task));
+        let _ = gui.update(Message::ChooseStatus(task, Status::Closed));
+        settle(&mut gui);
+        assert_eq!(gui.ui.status_open, None);
+        assert_eq!(gui.app.selected_task().unwrap().status, Status::Closed);
+    }
+
+    #[test]
+    fn controls_are_touch_sized_only_in_a_compact_window() {
+        let (_dir, gui, _) = gui_with_file("");
+        let _ = gui.view_sized(Size::new(390.0, 844.0));
+        assert_eq!(gui.pal().control(28.0), 44.0);
+        assert_eq!(gui.pal().pad_y(18.0, 6.0), 13.0);
+        let _ = gui.view_sized(Size::new(1000.0, 844.0));
+        assert_eq!(gui.pal().control(28.0), 28.0);
+        assert_eq!(gui.pal().pad_y(18.0, 6.0), 6.0);
     }
 
     #[test]
