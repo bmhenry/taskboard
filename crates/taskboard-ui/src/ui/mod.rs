@@ -160,7 +160,7 @@ pub enum Message {
     /// Opens the platform's file dialog to pick a file to attach.
     Browse(Owner),
     /// The file dialog closed; `None` if it was cancelled.
-    Picked(Owner, Option<FileSource>),
+    Picked(Owner, Result<Option<FileSource>, String>),
     /// Opens or closes the popup asking for a new file's name.
     ToggleNewFile(Ulid),
     CloseNewFile,
@@ -486,10 +486,11 @@ impl Gui {
                     Message::Picked(owner, source)
                 });
             }
-            Message::Picked(owner, Some(source)) => {
+            Message::Picked(owner, Ok(Some(source))) => {
                 self.app.apply(Action::Attach { owner, source });
             }
-            Message::Picked(_, None) => {}
+            Message::Picked(_, Ok(None)) => {}
+            Message::Picked(_, Err(e)) => self.app.error = Some(e),
             Message::ToggleNewFile(task) => {
                 ui.new_file_for = match ui.new_file_for {
                     Some(_) => None,

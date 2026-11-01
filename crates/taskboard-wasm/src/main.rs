@@ -12,6 +12,11 @@ mod platform;
 #[cfg(any(target_arch = "wasm32", test))]
 mod text_diff;
 
+/// How long starting up waits for the daemon's answers before showing an
+/// error instead.
+#[cfg(target_arch = "wasm32")]
+const STARTUP_TIMEOUT_SECS: u32 = 15;
+
 #[cfg(target_arch = "wasm32")]
 fn main() {
     console_error_panic_hook::set_once();
@@ -21,17 +26,34 @@ fn main() {
     wasm_bindgen_futures::spawn_local(async {
         if let Err(e) = run().await {
             log::error!("taskboard: {e}");
+            show_failure(&format!("Taskboard couldn't start: {e}"));
         }
     });
+}
+
+/// Puts `message` in place of the "Loading…" that `index.html` shows until
+/// iced replaces it with its canvas.
+#[cfg(target_arch = "wasm32")]
+fn show_failure(message: &str) {
+    if let Some(placeholder) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("iced"))
+    {
+        placeholder.set_text_content(Some(message));
+    }
 }
 
 /// Loads the settings and board from the daemon, then starts the UI, which
 /// shows why either couldn't be loaded.
 #[cfg(target_arch = "wasm32")]
 async fn run() -> iced::Result {
+    use taskboard_core::api::{BOARD, BoardResponse, SETTINGS, SettingsResponse};
     use taskboard_ui::{App, Gui, theme};
 
-    let (settings, board) = iced::futures::join!(platform::load_settings(), platform::load_board());
+    let (settings, board) = iced::futures::join!(
+        api::get_within::<SettingsResponse>(SETTINGS, STARTUP_TIMEOUT_SECS),
+        api::get_within::<BoardResponse>(BOARD, STARTUP_TIMEOUT_SECS),
+    );
     let location = settings.as_ref().ok().and_then(|r| r.location.clone());
     let settings = settings.map(|r| r.settings);
     let default_project = board.as_ref().ok().and_then(|r| r.default_project.clone());

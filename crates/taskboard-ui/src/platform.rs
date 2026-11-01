@@ -42,8 +42,9 @@ pub trait Platform {
     fn board_changes(&self) -> Subscription<WatchEvent>;
 
     /// Asks the user for a file to attach: a path on the desktop, its name
-    /// and contents on the web. `None` if they cancelled.
-    fn pick_file(&self) -> BoxFuture<Option<FileSource>>;
+    /// and contents on the web. `None` if they cancelled, an error if the
+    /// file can't be taken (like one too big to upload).
+    fn pick_file(&self) -> BoxFuture<Result<Option<FileSource>, String>>;
 
     /// Asks the user for a folder, with the dialog titled `title`. Always
     /// `None` on the web, where folders are typed.

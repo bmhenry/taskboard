@@ -27,6 +27,24 @@ use crate::api::{Body, UNAUTHORIZED, encode, js_error};
 /// The `localStorage` key device settings are kept under.
 const DEVICE_KEY: &str = "taskboard.device";
 
+/// The largest file that can be picked to attach, in MiB. A new task's
+/// files go to the daemon as base64 in its create command, a third bigger,
+/// which has to fit in its 64 MiB request limit.
+pub const MAX_UPLOAD_MIB: f64 = 40.0;
+
+/// The schemes of links that are opened; others, like `javascript:` from a
+/// task's links, would run in the daemon's origin.
+const OPENABLE_SCHEMES: &[&str] = &["http:", "https:", "mailto:"];
+
+/// How long the event stream waits before reopening after the daemon
+/// refuses it, at first and at most; it doubles in between.
+const RETRY_FIRST_MS: i32 = 2_000;
+const RETRY_MAX_MS: i32 = 30_000;
+
+/// How many times in a row the event stream is refused before live updates
+/// are reported as off (it keeps trying after that).
+const RETRIES_BEFORE_FAILING: u32 = 4;
+
 pub struct Web {
     /// Where the daemon saves settings, as it said when they were loaded.
     settings_location: Option<String>,
@@ -38,14 +56,8 @@ impl Web {
     }
 }
 
-/// The board and what came with it, for starting up.
-pub async fn load_board() -> Result<BoardResponse, String> {
+async fn load_board() -> Result<BoardResponse, String> {
     crate::api::json("GET", api::BOARD, Body::None).await
-}
-
-/// Settings and where they're saved, for starting up.
-pub async fn load_settings() -> Result<SettingsResponse, String> {
-    crate::api::json("GET", api::SETTINGS, Body::None).await
 }
 
 /// Reads device settings, as [`Platform::load_device_settings`] does but
@@ -97,7 +109,7 @@ impl Platform for Web {
         Subscription::run(board_events)
     }
 
-    fn pick_file(&self) -> BoxFuture<Option<FileSource>> {
+    fn pick_file(&self) -> BoxFuture<Result<Option<FileSource>, String>> {
         Box::pin(pick_file())
     }
 
@@ -114,6 +126,12 @@ impl Platform for Web {
     }
 
     fn open_url(&self, url: &str) -> Result<(), String> {
+        let scheme = web_sys::Url::new(url)
+            .map(|u| u.protocol())
+            .map_err(|_| format!("{url} isn't a link that can be opened"))?;
+        if !OPENABLE_SCHEMES.contains(&scheme.as_str()) {
+            return Err(format!("{scheme} links aren't opened from the web: {url}"));
+        }
         let window = web_sys::window().ok_or("no browser window")?;
         // `noopener`: the page opened can't reach back into this one.
         window
@@ -122,27 +140,27 @@ impl Platform for Web {
             .map_err(|e| format!("couldn't open {url}: {}", js_error(e)))
     }
 
-    /// Paths the daemon can't be asked about count as folders: when it
-    /// can't be reached, every project would otherwise show as missing,
-    /// offering to relocate or delete it.
+    /// No answer at all if the daemon can't be asked: projects then aren't
+    /// marked missing, but are asked about again with the next check.
     fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
         Box::pin(async move {
             let asked = match Body::json(&paths) {
                 Ok(body) => crate::api::json("POST", api::PATH_KINDS, body).await,
                 Err(e) => Err(e),
             };
-            match asked {
-                Ok(kinds) => kinds,
-                Err(e) => {
-                    log::warn!("couldn't check paths: {e}");
-                    vec![PathKind::Dir; paths.len()]
-                }
-            }
+            asked.unwrap_or_else(|e| {
+                log::warn!("couldn't check paths: {e}");
+                Vec::new()
+            })
         })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {
-        Box::pin(async { load_settings().await.map(|r| r.settings) })
+        Box::pin(async {
+            crate::api::json::<SettingsResponse>("GET", api::SETTINGS, Body::None)
+                .await
+                .map(|r| r.settings)
+        })
     }
 
     fn save_settings(&self, settings: GlobalSettings) -> BoxFuture<Result<(), String>> {
@@ -175,40 +193,62 @@ impl Platform for Web {
 }
 
 /// The daemon's [`api::EVENTS`], as the UI wants them. The browser
-/// reconnects by itself after the connection drops, and the daemon then
-/// says the board changed, so nothing is missed; only a refusal ends it.
+/// reconnects by itself after the connection drops; when the daemon
+/// refuses it instead (like while it restarts behind a proxy), it's
+/// reopened here, waiting longer each time. Each connection starts with
+/// the daemon saying the board changed, so nothing is missed. Only a
+/// refusal for want of signing in ends it.
 fn board_events() -> impl Stream<Item = WatchEvent> {
     iced::stream::channel(8, async |mut output: mpsc::Sender<WatchEvent>| {
-        let (tx, mut rx) = mpsc::unbounded();
-        let listener = match Listener::open(tx) {
-            Ok(listener) => listener,
-            Err(e) => {
+        let mut refusals = 0;
+        let mut wait = RETRY_FIRST_MS;
+        loop {
+            let (tx, mut rx) = mpsc::unbounded();
+            match Listener::open(tx) {
+                Ok(listener) => {
+                    while let Some(Some(event)) = rx.next().await {
+                        refusals = 0;
+                        wait = RETRY_FIRST_MS;
+                        if output.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                    drop(listener);
+                }
+                Err(e) => log::warn!("couldn't open the event stream: {e}"),
+            }
+            // An `EventSource` doesn't say why it was refused, so the API
+            // is asked, to tell a sign-in problem apart.
+            if let Err(e) = load_board().await
+                && e == UNAUTHORIZED
+            {
                 let _ = output.send(WatchEvent::Failed(e)).await;
                 return;
             }
-        };
-        while let Some(event) = rx.next().await {
-            let event = match event {
-                Some(event) => event,
-                // An `EventSource` doesn't say why it was refused, so
-                // the API is asked, to tell a sign-in problem apart.
-                None => {
-                    let why = match load_board().await {
-                        Err(e) if e == UNAUTHORIZED => e,
-                        _ => {
-                            "the daemon closed the connection; reload the page to reconnect".into()
-                        }
-                    };
-                    let _ = output.send(WatchEvent::Failed(why)).await;
-                    break;
+            refusals += 1;
+            if refusals == RETRIES_BEFORE_FAILING {
+                let why = format!(
+                    "the daemon keeps refusing them; still trying every {} s",
+                    RETRY_MAX_MS / 1000
+                );
+                if output.send(WatchEvent::Failed(why)).await.is_err() {
+                    return;
                 }
-            };
-            if output.send(event).await.is_err() {
-                break;
             }
+            sleep(wait).await;
+            wait = (wait * 2).min(RETRY_MAX_MS);
         }
-        drop(listener);
     })
+}
+
+/// Waits `ms` milliseconds.
+async fn sleep(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 /// An open `EventSource` on [`api::EVENTS`], sending each event it gets, or
@@ -267,46 +307,83 @@ impl Drop for Listener {
     }
 }
 
+/// Where a picker's file is sent: the file picked, or `None` if it was
+/// cancelled or another picker replaced it.
+type PickSender = Rc<RefCell<Option<oneshot::Sender<Option<web_sys::File>>>>>;
+
+thread_local! {
+    /// The file input of the picker last opened, while it's waiting.
+    static PICKER: RefCell<Option<(HtmlInputElement, PickSender)>> = const { RefCell::new(None) };
+}
+
 /// Opens the browser's file picker and reads the file chosen. The picker is
 /// opened now, not when the future is first polled, so that it's inside the
-/// click that asked for it, as browsers require. Cancelling gives `None`,
-/// in browsers that say so (with a `cancel` event); in others the future
-/// never finishes, which is harmless.
-fn pick_file() -> impl Future<Output = Option<FileSource>> {
+/// click that asked for it, as browsers require. Cancelling gives `None` in
+/// browsers that say so (with a `cancel` event); in others the pick waits
+/// until the next picker opens.
+fn pick_file() -> impl Future<Output = Result<Option<FileSource>, String>> {
     let (tx, rx) = oneshot::channel::<Option<web_sys::File>>();
     let opened = open_picker(tx);
     async move {
-        let (input, listeners) = match opened {
-            Ok(opened) => opened,
-            Err(e) => {
-                log::error!("couldn't open the file picker: {e}");
-                return None;
-            }
-        };
+        let listeners = opened.map_err(|e| format!("couldn't open the file picker: {e}"))?;
         let file = rx.await.ok().flatten();
-        input.remove();
         drop(listeners);
-        let file = file?;
-        match JsFuture::from(file.array_buffer()).await {
-            Ok(buffer) => Some(FileSource::Bytes {
-                name: file.name(),
-                bytes: Uint8Array::new(&buffer).to_vec(),
-            }),
-            Err(e) => {
-                log::error!("couldn't read {}: {}", file.name(), js_error(e));
-                None
-            }
+        let Some(file) = file else {
+            return Ok(None);
+        };
+        let mib = file.size() / (1024.0 * 1024.0);
+        if mib > MAX_UPLOAD_MIB {
+            return Err(format!(
+                "{} is {mib:.1} MiB; files over {MAX_UPLOAD_MIB:.0} MiB can't be uploaded",
+                file.name()
+            ));
+        }
+        let buffer = JsFuture::from(file.array_buffer())
+            .await
+            .map_err(|e| format!("couldn't read {}: {}", file.name(), js_error(e)))?;
+        Ok(Some(FileSource::Bytes {
+            name: file.name(),
+            bytes: Uint8Array::new(&buffer).to_vec(),
+        }))
+    }
+}
+
+/// Removes the input the waiting picker opened, if any, and ends its pick.
+fn close_picker() {
+    if let Some((input, tx)) = PICKER.with(|p| p.borrow_mut().take()) {
+        input.remove();
+        if let Some(tx) = tx.borrow_mut().take() {
+            let _ = tx.send(None);
         }
     }
 }
 
-type PickerListeners = [Closure<dyn FnMut(Event)>; 2];
+/// The listeners on a picker's input, kept until its pick ends; dropping
+/// them removes the input too.
+struct PickerListeners {
+    input: HtmlInputElement,
+    _closures: [Closure<dyn FnMut(Event)>; 2],
+}
+
+impl Drop for PickerListeners {
+    fn drop(&mut self) {
+        self.input.remove();
+        PICKER.with(|p| {
+            let mut picker = p.borrow_mut();
+            if picker
+                .as_ref()
+                .is_some_and(|(input, _)| *input == self.input)
+            {
+                *picker = None;
+            }
+        });
+    }
+}
 
 /// Adds a hidden file input to the page and clicks it; `tx` gets the file
 /// picked, or `None` if the picker was cancelled.
-fn open_picker(
-    tx: oneshot::Sender<Option<web_sys::File>>,
-) -> Result<(HtmlInputElement, PickerListeners), String> {
+fn open_picker(tx: oneshot::Sender<Option<web_sys::File>>) -> Result<PickerListeners, String> {
+    close_picker();
     let document = web_sys::window()
         .and_then(|w| w.document())
         .ok_or("no document")?;
@@ -319,16 +396,13 @@ fn open_picker(
         .style()
         .set_property("display", "none")
         .map_err(js_error)?;
-    // Some mobile browsers only open the picker for an input on the page.
-    document
-        .body()
-        .ok_or("no document body")?
-        .append_child(&input)
-        .map_err(js_error)?;
-    let tx = Rc::new(RefCell::new(Some(tx)));
-    let send = move |file: Option<web_sys::File>| {
-        if let Some(tx) = tx.borrow_mut().take() {
-            let _ = tx.send(file);
+    let tx: PickSender = Rc::new(RefCell::new(Some(tx)));
+    let send = {
+        let tx = tx.clone();
+        move |file: Option<web_sys::File>| {
+            if let Some(tx) = tx.borrow_mut().take() {
+                let _ = tx.send(file);
+            }
         }
     };
     let on_change = Closure::<dyn FnMut(Event)>::new({
@@ -336,12 +410,23 @@ fn open_picker(
         move |_: Event| send(input.files().and_then(|files| files.get(0)))
     });
     let on_cancel = Closure::<dyn FnMut(Event)>::new(move |_: Event| send(None));
-    input
-        .add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref())
+    // From here on, dropping it takes the input off the page.
+    let listeners = PickerListeners {
+        input: input.clone(),
+        _closures: [on_change, on_cancel],
+    };
+    // Some mobile browsers only open the picker for an input on the page.
+    document
+        .body()
+        .ok_or("no document body")?
+        .append_child(&input)
         .map_err(js_error)?;
-    input
-        .add_event_listener_with_callback("cancel", on_cancel.as_ref().unchecked_ref())
-        .map_err(js_error)?;
+    for (event, listener) in ["change", "cancel"].iter().zip(&listeners._closures) {
+        input
+            .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())
+            .map_err(js_error)?;
+    }
+    PICKER.with(|p| *p.borrow_mut() = Some((input.clone(), tx)));
     input.click();
-    Ok((input, [on_change, on_cancel]))
+    Ok(listeners)
 }

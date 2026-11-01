@@ -6,9 +6,10 @@ use js_sys::Uint8Array;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use taskboard_core::api::ErrorBody;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Headers, Request, RequestCredentials, RequestInit, Response};
+use web_sys::{AbortController, Headers, Request, RequestCredentials, RequestInit, Response};
 
 /// What a request the daemon refused for want of its sign-in cookie fails
 /// with.
@@ -30,12 +31,74 @@ impl Body {
     }
 }
 
+/// A time limit for a request, after which it's aborted. A daemon behind a
+/// tunnel that's gone half-open would otherwise never answer.
+pub struct Deadline {
+    controller: AbortController,
+    secs: u32,
+    timer: i32,
+    _abort: Closure<dyn FnMut()>,
+}
+
+impl Deadline {
+    pub fn in_secs(secs: u32) -> Result<Deadline, String> {
+        let controller = AbortController::new().map_err(js_error)?;
+        let abort = Closure::<dyn FnMut()>::new({
+            let controller = controller.clone();
+            move || controller.abort()
+        });
+        let window = web_sys::window().ok_or("no browser window")?;
+        let timer = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                abort.as_ref().unchecked_ref(),
+                (secs * 1000) as i32,
+            )
+            .map_err(js_error)?;
+        Ok(Deadline {
+            controller,
+            secs,
+            timer,
+            _abort: abort,
+        })
+    }
+
+    /// `error`, unless it's from the deadline passing, which says so.
+    fn explain(&self, error: String) -> String {
+        if self.controller.signal().aborted() {
+            format!("the daemon didn't answer within {} s", self.secs)
+        } else {
+            error
+        }
+    }
+}
+
+impl Drop for Deadline {
+    fn drop(&mut self) {
+        if let Some(window) = web_sys::window() {
+            window.clear_timeout_with_handle(self.timer);
+        }
+    }
+}
+
 /// Sends a request to `url` and returns the response, if it succeeded. A
 /// failure is the daemon's [`ErrorBody`], or says why there wasn't one.
 pub async fn send(method: &str, url: &str, body: Body) -> Result<Response, String> {
+    send_by(method, url, body, None).await
+}
+
+/// [`send`], aborted if it isn't answered by `deadline`.
+async fn send_by(
+    method: &str,
+    url: &str,
+    body: Body,
+    deadline: Option<&Deadline>,
+) -> Result<Response, String> {
     let init = RequestInit::new();
     init.set_method(method);
     init.set_credentials(RequestCredentials::SameOrigin);
+    if let Some(deadline) = deadline {
+        init.set_signal(Some(&deadline.controller.signal()));
+    }
     let content = match body {
         Body::None => None,
         Body::Json(text) => Some(("application/json", JsValue::from_str(&text))),
@@ -54,7 +117,13 @@ pub async fn send(method: &str, url: &str, body: Body) -> Result<Response, Strin
     let window = web_sys::window().ok_or("no browser window")?;
     let res: Response = JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| format!("couldn't reach the daemon: {}", js_error(e)))?
+        .map_err(|e| {
+            let e = format!("couldn't reach the daemon: {}", js_error(e));
+            match deadline {
+                Some(deadline) => deadline.explain(e),
+                None => e,
+            }
+        })?
         .unchecked_into();
     if res.ok() {
         return Ok(res);
@@ -73,6 +142,15 @@ pub async fn send(method: &str, url: &str, body: Body) -> Result<Response, Strin
 pub async fn json<T: DeserializeOwned>(method: &str, url: &str, body: Body) -> Result<T, String> {
     let res = send(method, url, body).await?;
     let text = text(&res).await?;
+    serde_json::from_str(&text).map_err(|e| format!("unexpected answer from the daemon: {e}"))
+}
+
+/// [`json`] for a `GET`, failing if the whole answer hasn't come within
+/// `secs`; for starting up, which would otherwise leave a blank page.
+pub async fn get_within<T: DeserializeOwned>(url: &str, secs: u32) -> Result<T, String> {
+    let deadline = Deadline::in_secs(secs)?;
+    let res = send_by("GET", url, Body::None, Some(&deadline)).await?;
+    let text = text(&res).await.map_err(|e| deadline.explain(e))?;
     serde_json::from_str(&text).map_err(|e| format!("unexpected answer from the daemon: {e}"))
 }
 

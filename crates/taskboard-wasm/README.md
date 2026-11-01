@@ -10,12 +10,19 @@ with trunk, and served by the `taskboard-web` daemon. It runs with the web
   goes with them. A 401 shows an error saying to open the URL printed in the
   daemon's log.
 - Files picked to attach to a task are uploaded raw to `POST /api/uploads`;
-  a new task's files go in its create command, as base64.
+  a new task's files go in its create command, as base64. Files over 40 MiB
+  are refused when picked, since base64 makes them a third bigger and the
+  daemon takes requests up to 64 MiB.
 - `board_changes()` is an `EventSource` on `/api/events`. The browser
-  reconnects by itself, and the daemon says the board changed on each
-  connection, so changes made while disconnected show up. If the daemon
-  refuses the stream, live updates are reported as off.
-- Links open with `window.open`.
+  reconnects by itself after a dropped connection, and the daemon says the
+  board changed on each connection, so changes made while disconnected show
+  up. If the daemon refuses the stream, it's reopened after 2 s, doubling up
+  to 30 s; after 4 refusals in a row live updates are reported as off,
+  though it keeps trying. A refusal for want of signing in stops it.
+- Links open with `window.open`, only for `http:`, `https:` and `mailto:`,
+  so a `javascript:` link in a task can't run in the daemon's origin.
+- The page says "Loading…" until the UI starts, and why if it can't. The
+  first requests for the board and settings give up after 15 s.
 - There's no folder picker, so the folder Browse buttons are hidden and
   folders are typed. Files can't be attached by typing a path either (it
   would be read on the daemon's machine), only uploaded with Upload….

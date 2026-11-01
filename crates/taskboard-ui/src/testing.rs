@@ -75,8 +75,8 @@ impl Platform for TestPlatform {
         Subscription::none()
     }
 
-    fn pick_file(&self) -> BoxFuture<Option<FileSource>> {
-        Box::pin(async { None })
+    fn pick_file(&self) -> BoxFuture<Result<Option<FileSource>, String>> {
+        Box::pin(async { Ok(None) })
     }
 
     fn pick_folder(&self, _title: &str) -> BoxFuture<Option<PathBuf>> {
