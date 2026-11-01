@@ -190,12 +190,68 @@ dragging on from there moves a card. The canvas also has `touch-action:
 none`. In phone emulation (390 px wide, CDP touch events), drags on the
 column background, on cards and on list rows scroll, and taps select.
 
+## Soft keyboard (task WRJVWT28)
+
+A phone only opens its keyboard for a focused editable DOM element, and iced
+draws to a canvas that winit focuses. `src/keyboard.rs` is the fallback: a
+hidden `<textarea>` that takes the focus while an iced text widget has it,
+after a touch. It lives in this crate and patches nothing in iced.
+
+- `keyboard::bridge` wraps the root view (outside `ui/touch.rs`). After each
+  event it runs an `Operation` over the tree, and over the overlay (the
+  new-file popup's name field is in one), to find a focused `Focusable`.
+- The textarea is focused from a `pointerup` listener on the document. That
+  runs after winit's own listener on the canvas, which has already fed the
+  tap to iced synchronously (winit's web runner handles the event and
+  `AboutToWait` inside the DOM handler). `touch.rs` turns the lift into a
+  click there, so the widget is focused by then, and the focus call happens
+  inside the user gesture. Focus set by a task (the "+" button focusing the
+  new task's title) is also seen in time. If a widget gains focus some other
+  way after a touch, the textarea is focused at the next redraw instead.
+- The textarea sits, invisible, over the focused widget, so the browser knows
+  what to keep visible above the keyboard.
+- Text goes back into iced as synthetic `keydown`/`keyup` events on the
+  canvas, which winit handles like a physical keyboard. Each `input` event is
+  diffed against the textarea's previous value (`src/text_diff.rs`), so
+  composition updates (Gboard composes each word, with keyCode 229),
+  autocorrect, `insertText`, `insertLineBreak` and `deleteContentBackward` all
+  become backspaces and characters. The value rests at one space, so a
+  backspace in an empty field still produces an `input` event and deletes
+  iced's text before the caret. Keys that aren't text (Enter, Backspace with
+  a real key code, arrows, Tab, Escape, Ctrl/Meta shortcuts) are forwarded
+  as they are.
+- winit focuses the canvas on every `pointerdown`, which would close the
+  keyboard on each tap. The canvas's `focus` is overridden to do nothing
+  while the textarea has focus. The canvas losing focus to the textarea is
+  also kept from iced, which would otherwise hide the caret.
+- When iced's text widget loses focus, the textarea is blurred (closing the
+  keyboard) and the canvas gets the focus back.
+- Mouse pointers never focus the textarea, so desktop browsers work as
+  before, and the native app doesn't compile any of this.
+
+Verified in headless Chrome over CDP in phone emulation (390x844, DPR 3,
+touch events from `Input.dispatchTouchEvent`). Tapping the search field, the
+new task's title and description, and the new-file popup's name field
+focused the textarea during the `pointerup`, with
+`navigator.userActivation.isActive` true. `Input.insertText`,
+`Input.imeSetComposition` (a word composed and then corrected on commit),
+`insertLineBreak`, `deleteContentBackward` and Backspace/Enter keys
+(keyCode 8/13) all showed up in the iced fields. A task created that way was
+saved. Tapping outside a field blurred the textarea. At desktop size with a
+mouse, the textarea never took focus and typing still reached the canvas.
+Headless Chrome has no on-screen keyboard, so whether one opens, and how a
+real IME behaves, needs a phone.
+
 ## Left for the real-phone test
 
-- **Soft keyboard.** Does tapping a `text_input` (search) or `text_editor`
-  (description) bring it up? iced draws to a canvas and winit's web backend
-  only focuses the canvas, so it probably won't. The fallback is a hidden DOM
-  `<input>` that mirrors focus.
+- **Soft keyboard.** Tap the search box, a task's Edit (title and
+  description) and Files → New…. Does the keyboard open and stay open while
+  typing? Does Gboard's composition (word suggestions, autocorrect, swipe
+  typing), backspace, held backspace and Enter edit the field correctly? Does
+  tapping another spot in the same field keep the keyboard up, and tapping
+  outside close it? After closing the keyboard with the back button, does
+  tapping the field reopen it? Is a field low on the screen kept visible
+  above the keyboard?
 - **Touch scroll.** Swipe the column lists vertically and the board
   horizontally.
 - **Taps.** Buttons, cards, the status menu and the toolbar.
