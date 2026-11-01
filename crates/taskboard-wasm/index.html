@@ -3,11 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Taskboard (wasm spike)</title>
+    <title>Taskboard</title>
     <script>
-      // Phone debugging: mirror console output and errors into an on-page log,
-      // since a phone's browser console isn't visible. Tap the log to hide it.
+      // Phone debugging, with ?debug in the URL: mirror console output and
+      // errors into an on-page log, since a phone's browser console isn't
+      // visible. Tap the log to hide it.
       (function () {
+        if (!/[?&]debug\b/.test(location.search)) return;
         var lines = [];
         var box;
         function show(kind, args) {
@@ -57,7 +59,7 @@
         });
       })();
     </script>
-    <link data-trunk rel="rust" data-bin="taskboard-wasm-spike" />
+    <link data-trunk rel="rust" data-bin="taskboard-wasm" />
     <style>
       html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
       /* The app scrolls and zooms nothing itself on touch, so the browser

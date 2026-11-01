@@ -59,7 +59,7 @@ The workspace's crates:
 - `crates/taskboard-ui`: the GUI's iced UI, as a library shared with the web client. It reaches the store, file dialogs and settings through a `Platform` its host provides.
 - `crates/taskboard`: the desktop GUI app, with the desktop `Platform` (local filesystem, native dialogs, a `notify` watcher)
 - `crates/taskboard-web`: the daemon for the web client: an HTTP API over the store (its routes and JSON types are in `taskboard_core::api`) with live updates over server-sent events. `taskboard-web [--bind 127.0.0.1:7878] [--static DIR] [DIR]`
-- `crates/taskboard-wasm-spike`: the UI built for the browser (see its `SPIKE.md`)
+- `crates/taskboard-wasm`: the web client: the UI built for the browser with trunk, with the web `Platform` over `taskboard-web`'s API (see its `README.md`)
 
 ```sh
 cargo build --release   # binaries land in target/release/{tb,taskboard}

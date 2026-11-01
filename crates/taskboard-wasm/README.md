@@ -1,45 +1,73 @@
-# Web UI, Phase 0 spike: the iced UI on wasm32
+# taskboard-wasm: the web client
 
-Task 0DC4FM, part of the "Web UI" epic. This crate builds the desktop GUI's
-own UI for `wasm32-unknown-unknown`. The board is seeded from
-`fixture/tasks.json` into an in-memory store. During the spike it included the
-desktop crate's files with `#[path]`; since Phase 1's split it depends on the
-`taskboard-ui` crate, run with the spike's own `Platform` (`src/platform.rs`).
+Taskboard's iced UI (`crates/taskboard-ui`) built for `wasm32-unknown-unknown`
+with trunk, and served by the `taskboard-web` daemon. It runs with the web
+`Platform` (`src/platform.rs`):
 
-## Answers
+- Commands, the board, attached files, path checks and global settings go to
+  the daemon's API (`taskboard_core::api`) with the browser's `fetch`
+  (`src/api.rs`). Requests are same-origin, so the daemon's sign-in cookie
+  goes with them. A 401 shows an error saying to open the URL printed in the
+  daemon's log.
+- Files picked to attach to a task are uploaded raw to `POST /api/uploads`;
+  a new task's files go in its create command, as base64.
+- `board_changes()` is an `EventSource` on `/api/events`. The browser
+  reconnects by itself, and the daemon says the board changed on each
+  connection, so changes made while disconnected show up. If the daemon
+  refuses the stream, live updates are reported as off.
+- Links open with `window.open`.
+- There's no folder picker, so the folder Browse buttons are hidden and
+  folders are typed. Files can't be attached by typing a path either (it
+  would be read on the daemon's machine), only uploaded with Upload….
+  Both come from the `Platform` (`picks_folders`, `attaches_paths`).
+- Font size and theme are this device's: they're kept in the browser's
+  `localStorage` (`taskboard.device`). Hooks, columns and the rest stay in
+  the daemon's global settings.
 
-**Does `iced_drop` compile for wasm?** Yes, as-is (`=0.2.54`), with no
-workaround. It turns on iced's `x11` feature (and, because it doesn't disable
-iced's default features, `wayland`, `thread-pool` and `linux-theme-detection`
-too). winit and softbuffer only pull in their X11 and Wayland dependencies
-for unix targets, so on wasm32 those features do nothing. Its `tiny-skia`
-feature compiles too. The drag itself also works in the browser (see below).
+## Build and serve
 
-**Do `iced::time::every` and `window::frames` work on wasm?** Yes. The spike
-wraps `Gui::update` and logs to the console when either fires. In headless
-Chrome, `time::every` (the 5 s `CheckProjects` timer) fired repeatedly, and
-`window::frames` fired during a card drag's gap animation (10+ frames with
-increasing `Instant`s). One code change was needed: `ui/mod.rs` and
-`ui/drag.rs` used `std::time::Instant`. `Instant::now()` panics on
-wasm32-unknown-unknown, and `Message::Frame` has to carry the `Instant` type
-that `window::frames` produces. Both now use `iced::time::Instant`, which is
-a re-export of `web_time::Instant` and the same type as `std::time::Instant`
-on native, so desktop behaviour doesn't change.
+```sh
+cd crates/taskboard-wasm
+trunk build                         # -> dist/ (~38 MB debug wasm; use --release for size)
+taskboard-web --static dist         # http://127.0.0.1:7878/
+```
 
-**Do the embedded fonts load?** Yes. `.font(theme::*_BYTES)` and
-`.default_font(theme::REGULAR)` work unchanged, because `include_bytes!` puts
-the fonts in the wasm binary. The screenshots show DejaVu Sans, Bold
-(headings) and Mono rendering.
+`trunk serve` also works while working on the client: it proxies `/api/` to
+a daemon on the default `127.0.0.1:7878` (see `Trunk.toml`).
 
-**Renderer.** Headless Chrome reports "No available adapters" for WebGPU, so
-wgpu falls back to WebGL2 through iced's `webgl` feature, which this crate
-turns on. tiny-skia is also compiled in as the last fallback.
+Add `?debug` to the page's URL to mirror console output, errors and some
+environment details (secure context, WebGPU/WebGL2 availability, viewport,
+canvas sizes) into a log panel at the bottom of the page, since a phone's
+browser console isn't visible. Tap the panel to hide it.
 
-**Requirement: plain HTTP on the LAN.** The web UI has to work when served
-over plain `http://` from a machine on the local network. That isn't a secure
-context, so browsers expose no WebGPU (`navigator.gpu` is undefined) and the
-WebGL2 path is the one that matters, on phones too. Firefox for Android has
-no WebGPU at all, so it always takes this path.
+## Running iced on wasm
+
+Found in the Phase 0 spike (task 0DC4FM), which this crate replaces:
+
+- **`iced_drop` compiles for wasm as it is** (`=0.2.54`). It turns on iced's
+  `x11` feature (and, because it doesn't disable iced's default features,
+  `wayland`, `thread-pool` and `linux-theme-detection` too), but winit and
+  softbuffer only pull in their X11 and Wayland dependencies on unix, so on
+  wasm32 those do nothing. The custom card drag works in the browser.
+- **`iced::time::every` and `window::frames` work.** The UI uses
+  `iced::time::Instant` rather than `std::time::Instant`, whose `now()`
+  panics on wasm32; natively they're the same type.
+- **The embedded fonts load**, since `include_bytes!` puts them in the wasm.
+- **iced without `tokio`.** iced uses wasm-bindgen-futures on the web;
+  `taskboard-ui` only enables `tokio` off wasm32.
+- **`chrono` needs `wasmbind`**, or `Utc::now()` panics, and ulid's
+  `getrandom` needs its `wasm_js` backend (in `taskboard-core`).
+- **Renderer.** `webgl` lets wgpu fall back to WebGL2 where there's no
+  WebGPU; tiny-skia is compiled in as the last fallback.
+- **Plain HTTP on the LAN.** The web UI has to work over plain `http://`
+  from another machine. That isn't a secure context, so browsers expose no
+  WebGPU (`navigator.gpu` is undefined) and the WebGL2 path is the one that
+  matters, on phones too. Firefox for Android has no WebGPU at all. To test
+  the WebGL2 path from a desktop browser, open the page through the
+  machine's LAN or Tailscale address, not `127.0.0.1`/`localhost`, which
+  count as secure contexts and may get WebGPU.
+- The canvas has `touch-action: none` (`index.html`): the app scrolls and
+  zooms nothing itself on touch, so the browser mustn't take the gesture.
 
 ## Mali GPUs and WebGL2 (task 8DS45NWN)
 
@@ -104,77 +132,6 @@ Alternatives considered:
   have to track naga's output names. Fixing the WGSL lets naga and wgpu
   validate it.
 
-## What was gated or stubbed
-
-Every gate uses `cfg(target_arch = "wasm32")` (since Phase 1, the file
-dialogs and the watcher sit behind `taskboard-ui`'s `Platform` instead), so native builds keep
-the desktop code paths. The one exception is the `Instant` swap, which applies on
-every target but changes nothing on native, where `iced::time::Instant` is
-`std::time::Instant`.
-
-| Where | What | On wasm |
-|---|---|---|
-| `taskboard-core/src/store.rs` | `Store::open`, `load`, `locked_update`, `write` | New `store::memory` module: `tasks.json` is a thread-local string seeded with `memory::seed()`. There's no lock file and no `create_dir_all`. Board edits (create, edit, move, delete) work in memory. Attachments still call `std::fs` and fail with an error banner. |
-| `taskboard-ui/src/app.rs` `check_projects` | `Path::is_dir` | No project counts as missing. Otherwise every project shows "Project folder is missing". |
-| `pick_file`/`pick_folder` | `rfd` | Since Phase 1, `Platform` methods; rfd is only a dependency of the desktop crate. The spike's return `None`. rfd's wasm build has no `FileHandle::path()`, so the web picks files as bytes (`FileSource::Bytes`). |
-| `taskboard-ui/src/ui/{mod,drag}.rs` | `std::time::Instant` | Changed to `iced::time::Instant` on every target (see above). |
-| `taskboard-wasm-spike/src/platform.rs` | `notify` watcher, file reads | The spike's `Platform`: commands run with `ops::execute` on the in-memory store, `board_changes()` is `Subscription::none()` (Phase 2 uses SSE), and attached files can't be read. |
-| Spike `Cargo.toml` | dependencies | iced without `tokio` (`taskboard-ui` only enables it off wasm32), plus `webgl`. Also chrono with `wasmbind` (otherwise `Utc::now()` panics). |
-| `taskboard-core/Cargo.toml` | wasm32-only `getrandom` dependency with `wasm_js` | ulid/rand use getrandom 0.4, which needs its JS backend in the browser. With this, `cargo check -p taskboard-core --target wasm32-unknown-unknown` works on its own. |
-
-Not gated, because they compile and only fail at runtime:
-
-- `xdg-open` in `app.rs` (`std::process::Command`) fails, so opening links
-  does nothing.
-- Hooks (`hooks::run`) fail to spawn and are reported as hook failures. The
-  fixture has no hooks.
-- The viewer's `std::fs::read` shows a read error.
-- `project_path`/`create_project_dir` use `fs::canonicalize`/`create_dir_all`.
-
-All the dependencies in this crate are under
-`[target.'cfg(target_arch = "wasm32")'.dependencies]`. A native
-`cargo build/test --workspace` only builds an empty stub `main`.
-
-## Build and serve
-
-```sh
-cd crates/taskboard-wasm-spike
-trunk build                                   # -> dist/ (~37 MB debug wasm; use --release for size)
-trunk serve                                   # http://127.0.0.1:8080/
-trunk serve --address 0.0.0.0 --port 8080     # reachable from a phone on the LAN / Tailscale
-```
-
-`index.html` mirrors console output, errors and some environment details
-(secure context, WebGPU/WebGL2 availability, viewport, canvas sizes) into a
-log panel at the bottom of the page, because a phone's browser console isn't
-visible. Tap the panel to hide it.
-
-To test the WebGL2 path from a desktop browser, open the page through the
-machine's LAN or Tailscale address (not `127.0.0.1`/`localhost`, which count
-as secure contexts and may get WebGPU).
-
-The phone opens `http://<this-machine's-LAN-or-Tailscale-IP>:8080/`. A
-release build is much smaller and faster: `trunk serve --release --address
-0.0.0.0`. Reloading the page resets the board to the fixture.
-
-## What was verified in a browser
-
-Headless Google Chrome was driven over CDP:
-
-- At 1400x900, the board renders all six columns with the fixture's 10 tasks,
-  including the epic badge, parent links and the source-link chip.
-- A mouse drag of "Apple Pay button" from Open to In Progress shows the
-  custom drag ghost and the animated gap. After the drop the card is in In
-  Progress and the counts update.
-- Clicking the search box and typing "nvim" filters the board.
-- No panics or exceptions appeared in the console.
-- In phone emulation (390x844, DPR 3, touch enabled), the page renders and an
-  emulated tap selects a card, which opens the detail panel. The desktop
-  layout is unusable at that width (Phase 3). The canvas also didn't cover
-  the right ~20% of the viewport at DPR 3, which is a sizing issue to check
-  on a real device. An emulated horizontal swipe didn't scroll anything
-  visibly, so that result is inconclusive.
-
 ## Touch input (task NQKE8X84)
 
 winit's web backend delivers `pointerType: "touch"` pointers as touch events
@@ -196,7 +153,7 @@ column background, on cards and on list rows scroll, and taps select.
 A phone only opens its keyboard for a focused editable DOM element, and iced
 draws to a canvas that winit focuses. `src/keyboard.rs` is the fallback: a
 hidden `<textarea>` that takes the focus while an iced text widget has it,
-after a touch. It lives in this crate and patches nothing in iced.
+after a touch. It lives in this crate (`src/keyboard.rs`) and patches nothing in iced.
 
 - `keyboard::bridge` wraps the root view (outside `ui/touch.rs`). After each
   event it runs an `Operation` over the tree, and over the overlay (the
@@ -269,7 +226,7 @@ mouse, the textarea never took focus and typing still reached the canvas.
 Headless Chrome has no on-screen keyboard, so whether one opens, and how a
 real IME behaves, needs a phone.
 
-## Left for the real-phone test
+## Left for a real-phone test
 
 - **Soft keyboard.** Tap the search box, a task's Edit (title and
   description) and Files → New…. Does the keyboard open and stay open while
@@ -287,3 +244,4 @@ real IME behaves, needs a phone.
   or zoom steals the gesture (it may need `touch-action: none` on the canvas).
 - **DPR/canvas sizing.** Check the clipped right edge seen in emulation.
 - **Release-build size and load time over the tunnel.**
+- **The file picker.** Upload… should open the phone's picker (camera, files).
