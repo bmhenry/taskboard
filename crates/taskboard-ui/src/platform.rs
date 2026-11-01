@@ -24,14 +24,7 @@ pub enum WatchEvent {
     Failed(String),
 }
 
-/// What's at a path on the machine holding the store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathKind {
-    File,
-    Dir,
-    /// Nothing, or something that can't be read.
-    Missing,
-}
+pub use taskboard_core::api::PathKind;
 
 /// The program hosting the UI. Errors are strings, ready to show, since on
 /// the web they come over the network.
