@@ -1,0 +1,43 @@
+# Taskboard's web UI daemon, as a systemd user service. See README.md
+# ("Web UI") to install it.
+#
+# ExecStart expects `cargo install` or scripts/build-web.sh's install line
+# to have put taskboard-web in ~/.cargo/bin; change the path if it's
+# elsewhere (%h is your home directory). Flags go on the same line, e.g.
+# `--allow-host box.tailnet.ts.net` for Tailscale, or a project directory
+# for new tasks to go in by default. After editing the installed copy
+# (~/.config/systemd/user/taskboard-web.service), run
+# `systemctl --user daemon-reload` and restart the service.
+#
+# The sign-in link (http://127.0.0.1:7878/?token=…) is in the journal:
+#   journalctl --user -u taskboard-web
+
+[Unit]
+Description=Taskboard web UI
+
+[Service]
+ExecStart=%h/.cargo/bin/taskboard-web --bind 127.0.0.1:7878
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5
+
+# Hooks run with this service's environment, which has the user manager's
+# PATH rather than your shell's. Give them yours if they need ~/.local/bin
+# and the like:
+#Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+# Hardening that leaves files alone: the store (~/.local/share/tb),
+# settings (~/.config/tb) and project directories must stay writable, and
+# hooks run as you do. Nothing the daemon starts (hooks included) can gain
+# privileges, so a hook can't use sudo. ProtectSystem= and the like are left
+# out: in a user service they need unprivileged user namespaces, and guard
+# nothing you can write anyway.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
