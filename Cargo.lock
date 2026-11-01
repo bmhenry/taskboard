@@ -3891,6 +3891,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "notify",
+ "rfd",
  "taskboard-core",
  "taskboard-ui",
  "tempfile",
@@ -3919,7 +3920,6 @@ dependencies = [
  "iced_drop",
  "image",
  "pulldown-cmark",
- "rfd",
  "taskboard-core",
  "tempfile",
 ]

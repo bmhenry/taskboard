@@ -380,7 +380,7 @@ fn source_pill<'a>(p: Pal, url: &str) -> El<'a> {
     button(hover(face(false), face(true)))
         .padding(0)
         .style(theme::bare_button)
-        .on_press(Message::App(Action::OpenUrl(url.to_string())))
+        .on_press(Message::OpenUrl(url.to_string()))
         .into()
 }
 

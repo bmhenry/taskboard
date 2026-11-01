@@ -25,6 +25,9 @@ pub struct NewTask {
     pub epic: bool,
     /// The epic it's a child of, which must be in the same project.
     pub parent: Option<Ulid>,
+    /// The task's id, if the caller chose it (as the GUI does, to show a
+    /// task before the store has it); otherwise a new one. It must be unused.
+    pub id: Option<Ulid>,
 }
 
 /// Changes to apply to an existing task; `None` leaves a field alone.
@@ -258,6 +261,13 @@ impl Board {
         if title.is_empty() {
             return Err(Error::Invalid("title must not be empty".into()));
         }
+        if let Some(id) = new.id
+            && self.get(id).is_some()
+        {
+            return Err(Error::Invalid(format!(
+                "a task with id {id} already exists"
+            )));
+        }
         if let Some(parent) = new.parent {
             self.check_parent(new.epic, parent, &new.project)?;
         }
@@ -265,7 +275,7 @@ impl Board {
         let status = new.status.unwrap_or(Status::Open);
         let now = Utc::now();
         let task = Task {
-            id: Ulid::generate(),
+            id: new.id.unwrap_or_else(Ulid::generate),
             title,
             project: new.project,
             description: new.description,

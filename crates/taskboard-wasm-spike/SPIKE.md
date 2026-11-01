@@ -4,7 +4,7 @@ Task 0DC4FM, part of the "Web UI" epic. This crate builds the desktop GUI's
 own UI for `wasm32-unknown-unknown`. The board is seeded from
 `fixture/tasks.json` into an in-memory store. During the spike it included the
 desktop crate's files with `#[path]`; since Phase 1's split it depends on the
-`taskboard-ui` crate, without that crate's `desktop` feature.
+`taskboard-ui` crate, run with the spike's own `Platform` (`src/platform.rs`).
 
 ## Answers
 
@@ -107,7 +107,7 @@ Alternatives considered:
 ## What was gated or stubbed
 
 Every gate uses `cfg(target_arch = "wasm32")` (since Phase 1, the file
-dialogs use `taskboard-ui`'s `desktop` feature instead), so native builds keep
+dialogs and the watcher sit behind `taskboard-ui`'s `Platform` instead), so native builds keep
 the desktop code paths. The one exception is the `Instant` swap, which applies on
 every target but changes nothing on native, where `iced::time::Instant` is
 `std::time::Instant`.
@@ -116,9 +116,9 @@ every target but changes nothing on native, where `iced::time::Instant` is
 |---|---|---|
 | `taskboard-core/src/store.rs` | `Store::open`, `load`, `locked_update`, `write` | New `store::memory` module: `tasks.json` is a thread-local string seeded with `memory::seed()`. There's no lock file and no `create_dir_all`. Board edits (create, edit, move, delete) work in memory. Attachments still call `std::fs` and fail with an error banner. |
 | `taskboard-ui/src/app.rs` `check_projects` | `Path::is_dir` | No project counts as missing. Otherwise every project shows "Project folder is missing". |
-| `taskboard-ui/src/ui/mod.rs` `pick_file`/`pick_folder` | `rfd` | Returns `None` without the `desktop` feature, which the spike turns off, so rfd isn't a dependency. Its wasm build has no `FileHandle::path()`, so Phase 1 needs bytes-based upload. |
+| `pick_file`/`pick_folder` | `rfd` | Since Phase 1, `Platform` methods; rfd is only a dependency of the desktop crate. The spike's return `None`. rfd's wasm build has no `FileHandle::path()`, so the web picks files as bytes (`FileSource::Bytes`). |
 | `taskboard-ui/src/ui/{mod,drag}.rs` | `std::time::Instant` | Changed to `iced::time::Instant` on every target (see above). |
-| `taskboard-wasm-spike/src/watch.rs` | `notify` watcher | A stub with the same API as the desktop crate's `watch.rs`, passed to `Gui::watching`, whose `subscription()` is `Subscription::none()`. Phase 2 replaces it with SSE. |
+| `taskboard-wasm-spike/src/platform.rs` | `notify` watcher, file reads | The spike's `Platform`: commands run with `ops::execute` on the in-memory store, `board_changes()` is `Subscription::none()` (Phase 2 uses SSE), and attached files can't be read. |
 | Spike `Cargo.toml` | dependencies | iced without `tokio` (`taskboard-ui` only enables it off wasm32), plus `webgl`. Also chrono with `wasmbind` (otherwise `Utc::now()` panics). |
 | `taskboard-core/Cargo.toml` | wasm32-only `getrandom` dependency with `wasm_js` | ulid/rand use getrandom 0.4, which needs its JS backend in the browser. With this, `cargo check -p taskboard-core --target wasm32-unknown-unknown` works on its own. |
 

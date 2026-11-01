@@ -56,8 +56,8 @@ Taskboard is built with Rust in a Cargo workspace, using [Iced](https://iced.rs)
 The workspace's crates:
 - `crates/taskboard-core`: task model, board operations, search filters, and the shared task store
 - `crates/tb`: the CLI
-- `crates/taskboard-ui`: the GUI's iced UI, as a library shared with the web client
-- `crates/taskboard`: the desktop GUI app
+- `crates/taskboard-ui`: the GUI's iced UI, as a library shared with the web client. It reaches the store, file dialogs and settings through a `Platform` its host provides.
+- `crates/taskboard`: the desktop GUI app, with the desktop `Platform` (local filesystem, native dialogs, a `notify` watcher)
 - `crates/taskboard-wasm-spike`: the UI built for the browser (see its `SPIKE.md`)
 
 ```sh

@@ -368,7 +368,7 @@ fn links_editor<'a>(
                     p,
                     l.display_text(),
                     13,
-                    Message::App(Action::OpenUrl(l.url.clone()))
+                    Message::OpenUrl(l.url.clone())
                 ))
                 .width(Length::Fill),
                 btn(
