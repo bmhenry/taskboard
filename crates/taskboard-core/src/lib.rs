@@ -17,7 +17,7 @@ pub use model::{
     Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task, default_link_kind, short_id,
 };
 pub use ops::{Command, FileSource, Outcome, Output};
-pub use settings::GlobalSettings;
+pub use settings::{DeviceSettings, GlobalSettings};
 pub use store::{
     ProjectInput, Store, create_project_dir, new_file_name, project_path, project_root,
     resolve_project,

@@ -14,7 +14,7 @@ mod text_diff;
 fn main() -> iced::Result {
     use std::path::{Path, PathBuf};
 
-    use taskboard_core::{GlobalSettings, Store};
+    use taskboard_core::{DeviceSettings, GlobalSettings, Store};
 
     use taskboard_ui::{App, Gui, theme};
 
@@ -28,9 +28,15 @@ fn main() -> iced::Result {
             // The in-memory store ignores its directory.
             let store = Store::open(Path::new("/tb")).expect("in-memory store opens");
             let board = store.load().map_err(|e| e.to_string());
-            let mut app = App::new(Ok(GlobalSettings::default()), board);
+            let mut app = App::new(
+                Ok(GlobalSettings::default()),
+                Ok(DeviceSettings::default()),
+                board,
+            );
             app.default_project = Some(PathBuf::from("/home/demo/webshop"));
-            Gui::new(app, platform::Spike::new(store))
+            let mut gui = Gui::new(app, platform::Spike::new(store));
+            let start = gui.start();
+            (gui, start)
         },
         update,
         view,

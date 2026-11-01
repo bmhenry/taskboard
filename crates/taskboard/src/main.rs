@@ -9,7 +9,7 @@ mod watch;
 
 use std::path::PathBuf;
 
-use taskboard_core::{GlobalSettings, Store, project_path, project_root};
+use taskboard_core::{DeviceSettings, GlobalSettings, Store, project_path, project_root};
 
 use platform::Desktop;
 use taskboard_ui::{App, Gui, theme};
@@ -27,18 +27,28 @@ fn main() -> iced::Result {
             std::process::exit(1);
         }
     };
-    let platform = Desktop::new(store.clone(), GlobalSettings::default_path());
+    let platform = Desktop::new(
+        store.clone(),
+        GlobalSettings::default_path(),
+        DeviceSettings::default_path(),
+    );
     iced::application(
         move || {
             let board = store.load().map_err(|e| e.to_string());
-            let mut app = App::new(platform.load_settings_now(), board);
+            let mut app = App::new(
+                platform.load_settings_now(),
+                platform.load_device_settings_now(),
+                board,
+            );
             // Started from somewhere that isn't a project (like ~), new
             // tasks get no project until one is picked.
             let is_project = named.is_some()
                 || project.join(".git").exists()
                 || app.board.project(&project).is_some();
             app.default_project = is_project.then(|| project.clone());
-            Gui::new(app, platform.clone())
+            let mut gui = Gui::new(app, platform.clone());
+            let start = gui.start();
+            (gui, start)
         },
         Gui::update,
         Gui::view,

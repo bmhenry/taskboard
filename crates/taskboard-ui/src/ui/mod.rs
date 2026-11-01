@@ -25,8 +25,11 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Subscription, 
 use taskboard_core::ops::{Command, FileSource, Outcome};
 use taskboard_core::{Board, LinkKind, Status, Ulid};
 
-use crate::app::{Action, App, EditTarget, Effect, Owner, View, drop_index, drop_position};
-use crate::platform::{Platform, WatchEvent};
+use crate::app::{
+    Action, App, EditTarget, Effect, Owner, PathCheck, ProjectInput, View, drop_index,
+    drop_position,
+};
+use crate::platform::{PathKind, Platform, WatchEvent};
 use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
 use widgets::El;
@@ -65,6 +68,14 @@ pub struct Gui {
     platform: Box<dyn Platform>,
     /// The effect the platform is doing; the rest wait in the app's outbox.
     running: Option<Effect>,
+    /// [`PathCheck::Refresh`] checks the platform is doing. They're done
+    /// alongside `running` rather than after it, so looking at paths never
+    /// holds up a command, or a command a path's hint.
+    refreshing: Vec<PathCheck>,
+    /// The typed project path being looked for. Another isn't asked about
+    /// until it's answered, so typing a path asks a few times rather than
+    /// once a keystroke.
+    typed_check: Option<PathBuf>,
     /// How many commands have been started, so a board loaded before the
     /// latest one is dropped.
     commands: u64,
@@ -196,6 +207,8 @@ pub enum Message {
     Ran(Result<Outcome, String>),
     /// The running settings save finished.
     SettingsSaved(Result<(), String>),
+    /// A path check finished: what's at each of its paths.
+    Checked(PathCheck, Vec<PathKind>),
     /// A board that was loaded.
     Loaded(LoadStamp, Result<Board, String>),
     Tick,
@@ -221,6 +234,8 @@ impl Gui {
             ui: UiState::default(),
             platform: Box::new(platform),
             running: None,
+            refreshing: Vec::new(),
+            typed_check: None,
             commands: 0,
             loads: 0,
             shown_load: 0,
@@ -228,20 +243,26 @@ impl Gui {
         }
     }
 
+    /// Starts what the app left for the platform as it loaded, like
+    /// checking projects' folders; for the task `iced::application` starts.
+    pub fn start(&mut self) -> Task<Message> {
+        self.next_effect()
+    }
+
     pub fn title(&self) -> String {
         "Taskboard".to_string()
     }
 
     pub fn theme(&self) -> iced::Theme {
-        theme::iced_theme(self.app.settings.theme)
+        theme::iced_theme(self.app.device.theme)
     }
 
     pub fn scale_factor(&self) -> f32 {
-        self.app.settings.font_size as f32 / BASE_FONT_SIZE
+        self.app.device.font_size as f32 / BASE_FONT_SIZE
     }
 
     fn pal(&self) -> Pal {
-        palette(self.app.settings.theme)
+        palette(self.app.device.theme)
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -338,12 +359,41 @@ impl Gui {
             ui.link_url.clear();
             ui.attach_path.clear();
         }
+        // A typed project's folder is looked for once; see
+        // `Message::CheckProjects` for looking again.
+        if app.editing.is_some()
+            && self.typed_check.is_none()
+            && let ProjectInput::Unchecked(path) = app.project_input(&ui.edit_project)
+            && self.app.check_paths(vec![path.clone()])
+        {
+            self.typed_check = Some(path);
+        }
         Task::batch([task, self.next_effect()])
     }
 
-    /// Starts the next effect in the app's outbox unless one is running, or,
-    /// with none left, reloads the board if it's stale.
+    /// Starts the path refreshes in the app's outbox, and the next of its
+    /// other effects unless one is running, or, with none left, reloads the
+    /// board if it's stale.
     fn next_effect(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        let outbox = std::mem::take(&mut self.app.outbox);
+        for effect in outbox {
+            match effect {
+                Effect::CheckPaths(check @ PathCheck::Refresh { .. }) => {
+                    self.refreshing.push(check.clone());
+                    let kinds = self.platform.path_kinds(check.paths());
+                    tasks.push(Task::perform(kinds, move |kinds| {
+                        Message::Checked(check.clone(), kinds)
+                    }));
+                }
+                effect => self.app.outbox.push_back(effect),
+            }
+        }
+        tasks.push(self.next_ordered_effect());
+        Task::batch(tasks)
+    }
+
+    fn next_ordered_effect(&mut self) -> Task<Message> {
         if self.running.is_some() {
             return Task::none();
         }
@@ -358,6 +408,14 @@ impl Gui {
                     self.platform.save_settings(settings),
                     Message::SettingsSaved,
                 ),
+                Effect::SaveDeviceSettings(settings) => Task::perform(
+                    self.platform.save_device_settings(settings),
+                    Message::SettingsSaved,
+                ),
+                Effect::CheckPaths(check) => {
+                    let kinds = self.platform.path_kinds(check.paths());
+                    Task::perform(kinds, move |kinds| Message::Checked(check.clone(), kinds))
+                }
             };
         }
         if std::mem::take(&mut self.stale) {
@@ -508,14 +566,7 @@ impl Gui {
             Message::RelocatePath(s) => ui.relocate_path = s,
             Message::Relocate(from) => {
                 let to = ui.relocate_path.clone();
-                self.app.apply(Action::RelocateProject {
-                    from: from.clone(),
-                    to,
-                });
-                // Keep the typed folder to fix if relocating failed.
-                if self.app.board.project(&from).is_none() {
-                    self.ui.relocate_path.clear();
-                }
+                self.app.apply(Action::RelocateProject { from, to });
             }
             Message::BrowseRelocate(from) => {
                 let title = "Choose the project's new folder";
@@ -529,7 +580,16 @@ impl Gui {
             }
             Message::PickedRelocate(_, None) => {}
             Message::ConfirmDeleteProject(path) => ui.confirm_delete_project = Some(path),
-            Message::CheckProjects => self.app.check_projects(),
+            Message::CheckProjects => {
+                self.app.check_projects();
+                // The typed project's folder may have been made or removed.
+                if self.app.editing.is_some()
+                    && let ProjectInput::New(path) | ProjectInput::Missing(path) =
+                        self.app.project_input(&ui.edit_project)
+                {
+                    self.app.check_paths(vec![path]);
+                }
+            }
             Message::Save => {
                 // The file editor sits above the task editor, so it saves first.
                 if ui.file_edit.is_some() {
@@ -572,6 +632,30 @@ impl Gui {
             Message::SettingsSaved(result) => {
                 self.running = None;
                 self.app.settings_saved(result);
+            }
+            Message::Checked(check, kinds) => {
+                if let PathCheck::Refresh { paths, .. } = &check {
+                    let Some(i) = self.refreshing.iter().position(|c| *c == check) else {
+                        return Task::none();
+                    };
+                    self.refreshing.remove(i);
+                    if self.typed_check.as_ref().is_some_and(|p| paths.contains(p)) {
+                        self.typed_check = None;
+                    }
+                } else if self.running.as_ref() == Some(&Effect::CheckPaths(check.clone())) {
+                    self.running = None;
+                } else {
+                    return Task::none();
+                }
+                let relocating = match &check {
+                    PathCheck::Relocate { from, .. } => Some(from.clone()),
+                    _ => None,
+                };
+                self.app.checked(check, kinds);
+                // Keep the typed folder to fix if relocating failed.
+                if relocating.is_some_and(|from| self.app.board.project(&from).is_none()) {
+                    ui.relocate_path.clear();
+                }
             }
             Message::Loaded(stamp, board) => {
                 // A board loaded before the latest command started, or
@@ -868,10 +952,10 @@ impl Gui {
                 return self.apply(Action::Edit(EditTarget::New(Status::Open)));
             }
             Key::Character("=" | "+") if ctrl => {
-                return self.apply(Action::SetFontSize(app.settings.font_size + 1));
+                return self.apply(Action::SetFontSize(app.device.font_size + 1));
             }
             Key::Character("-" | "_") if ctrl => {
-                return self.apply(Action::SetFontSize(app.settings.font_size - 1));
+                return self.apply(Action::SetFontSize(app.device.font_size - 1));
             }
             _ => {}
         }
@@ -1018,18 +1102,11 @@ mod tests {
     /// tasks its updates returned: its effects, a reload of the board, and
     /// reading the file in the viewer.
     fn settle(gui: &mut Gui) {
-        while let Some(effect) = gui.running.clone() {
-            let message = match effect {
-                Effect::Run(command) => Message::Ran(now(gui.platform.run(command))),
-                Effect::SaveSettings(settings) => {
-                    Message::SettingsSaved(now(gui.platform.save_settings(settings)))
-                }
-            };
-            let _ = gui.update(message);
-        }
+        run_effects(gui);
         let stamp = gui.load_stamp();
         let board = now(gui.platform.load_board());
         let _ = gui.update(Message::Loaded(stamp, board));
+        run_effects(gui);
         if let Some((task, file)) = gui.ui.file_shown
             && gui.ui.file_text.is_none()
             && gui.ui.file_image.is_none()
@@ -1042,6 +1119,35 @@ mod tests {
             let contents = viewer::contents(att.kind, now(gui.platform.read_file(task, att)));
             let _ = gui.update(Message::FileRead((task, file), contents));
         }
+    }
+
+    /// Does the effects `gui` started, and those they lead to, oldest first.
+    fn run_effects(gui: &mut Gui) {
+        while let Some(effect) = gui
+            .running
+            .clone()
+            .or_else(|| gui.refreshing.first().cloned().map(Effect::CheckPaths))
+        {
+            let message = match effect {
+                Effect::Run(command) => Message::Ran(now(gui.platform.run(command))),
+                Effect::SaveSettings(settings) => {
+                    Message::SettingsSaved(now(gui.platform.save_settings(settings)))
+                }
+                Effect::SaveDeviceSettings(settings) => {
+                    Message::SettingsSaved(now(gui.platform.save_device_settings(settings)))
+                }
+                Effect::CheckPaths(check) => {
+                    let kinds = now(gui.platform.path_kinds(check.paths()));
+                    Message::Checked(check, kinds)
+                }
+            };
+            let _ = gui.update(message);
+        }
+    }
+
+    /// The path refresh `gui` started for `path` alone, if any.
+    fn refresh_of(gui: &Gui, path: &std::path::Path) -> Option<PathCheck> {
+        gui.refreshing.iter().find(|c| c.paths() == [path]).cloned()
     }
 
     fn view_file(gui: &mut Gui, file: (Ulid, Ulid)) {
@@ -1220,6 +1326,78 @@ mod tests {
         assert_eq!(gui.ui.file_text.as_deref(), Some("one"));
         assert!(gui.ui.file_edit.is_none());
         assert_eq!(gui.app.board.get(file.0).unwrap().files.len(), 2);
+    }
+
+    #[test]
+    fn a_typed_project_is_classified_once_the_platform_answers() {
+        let (dir, mut gui, _) = gui_with_file("");
+        let _ = gui.update(Message::App(Action::Edit(EditTarget::New(Status::Open))));
+        let folder = dir.path().canonicalize().unwrap();
+        let _ = gui.update(Message::EditProject(folder.display().to_string()));
+        assert!(refresh_of(&gui, &folder).is_some());
+        settle(&mut gui);
+        let input = gui.app.project_input(&gui.ui.edit_project);
+        assert_eq!(input, ProjectInput::New(folder.clone()));
+
+        // Typed on while it's looked for, only the latest path is asked
+        // about next, once the first is answered.
+        let typed = folder.join("new");
+        for text in [folder.join("n"), folder.join("ne"), typed.clone()] {
+            let _ = gui.update(Message::EditProject(text.display().to_string()));
+        }
+        let first = refresh_of(&gui, &folder.join("n")).unwrap();
+        assert!(refresh_of(&gui, &folder.join("ne")).is_none());
+        assert!(refresh_of(&gui, &typed).is_none());
+        let kinds = now(gui.platform.path_kinds(first.paths()));
+        let _ = gui.update(Message::Checked(first, kinds));
+        assert!(refresh_of(&gui, &typed).is_some());
+        run_effects(&mut gui);
+        let input = gui.app.project_input(&gui.ui.edit_project);
+        assert_eq!(input, ProjectInput::Missing(typed.clone()));
+
+        // A save doesn't wait for path checks.
+        let _ = gui.update(Message::EditProject(
+            folder.join("other").display().to_string(),
+        ));
+        let _ = gui.update(Message::EditProject(typed.display().to_string()));
+        let _ = gui.update(Message::EditTitle("alpha".into()));
+        let _ = gui.update(Message::Save);
+        assert!(!gui.refreshing.is_empty());
+        assert!(matches!(
+            gui.running,
+            Some(Effect::Run(Command::Create { .. }))
+        ));
+        settle(&mut gui);
+        assert_eq!(gui.app.error, None);
+        assert!(typed.is_dir());
+        assert!(gui.app.missing_projects.is_empty());
+        assert!(gui.refreshing.is_empty());
+        assert_eq!(gui.typed_check, None);
+    }
+
+    #[test]
+    fn a_typed_folder_is_kept_until_the_project_is_relocated() {
+        let (dir, mut gui, (task, _)) = gui_with_file("");
+        let old = gui.app.board.get(task).unwrap().project.clone();
+        let moved = dir.path().join("moved");
+        std::fs::rename(&old, &moved).unwrap();
+        let _ = gui.update(Message::CheckProjects);
+        settle(&mut gui);
+        assert!(gui.app.project_missing(&old));
+
+        let nowhere = dir.path().join("nowhere").display().to_string();
+        let _ = gui.update(Message::RelocatePath(nowhere.clone()));
+        let _ = gui.update(Message::Relocate(old.clone()));
+        settle(&mut gui);
+        assert!(gui.app.error.take().unwrap().starts_with("no folder at "));
+        assert_eq!(gui.ui.relocate_path, nowhere);
+
+        let _ = gui.update(Message::RelocatePath(moved.display().to_string()));
+        let _ = gui.update(Message::Relocate(old));
+        settle(&mut gui);
+        assert_eq!(gui.app.error, None);
+        assert!(gui.ui.relocate_path.is_empty());
+        assert!(gui.app.missing_projects.is_empty());
     }
 
     #[test]

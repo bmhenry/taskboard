@@ -3,17 +3,21 @@
 //!
 //! Actions that change the store are optimistic: [`App::apply`] makes the
 //! change to its own [`Board`] at once, and leaves a [`Command`] in its
-//! outbox for the [`crate::Platform`] to run; see [`Effect`].
+//! outbox for the [`crate::Platform`] to run; see [`Effect`]. So are
+//! questions about paths, like whether a project's directory still exists:
+//! the answers are kept, and shown once they come.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use taskboard_core::ops::{Command, FileSource, Outcome, Output};
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, NewTaskPosition, Theme};
 use taskboard_core::{
-    Board, DateField, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent, Link, LinkKind,
-    NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
+    Board, DateField, DeviceSettings, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent,
+    Link, LinkKind, NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
 };
+
+use crate::platform::PathKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -56,20 +60,15 @@ pub struct DraftFile {
 }
 
 impl Draft {
-    /// Adds the file from `source`, checking a path names a file now rather
-    /// than when the task is saved.
+    /// Adds the file from `source`. A path has been checked to name a file;
+    /// see [`PathCheck::DraftFile`].
     fn attach(&mut self, source: FileSource) -> taskboard_core::Result<()> {
         let name = match &source {
-            FileSource::Path { path } => {
-                // TODO(Platform): asks `Platform::path_kind` instead.
-                if !path.is_file() {
-                    return Err(Error::Invalid(format!("not a file: {}", path.display())));
-                }
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| Error::Invalid(format!("bad file name: {}", path.display())))?
-                    .to_string()
-            }
+            FileSource::Path { path } => path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| Error::Invalid(format!("bad file name: {}", path.display())))?
+                .to_string(),
             FileSource::Bytes { name, .. } => name.clone(),
         };
         self.files.push(DraftFile {
@@ -92,6 +91,39 @@ pub enum ProjectInput {
     New(PathBuf),
     /// A directory that will be created when the task is saved.
     Missing(PathBuf),
+    /// A directory the platform hasn't been asked about yet; see
+    /// [`App::check_paths`]. Saving uses it whether or not it exists.
+    Unchecked(PathBuf),
+}
+
+/// Paths for the [`crate::Platform`] to look at, and what to do with what
+/// it finds; see [`App::checked`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathCheck {
+    /// Notes what's at each path, like projects' directories or a typed
+    /// project's. `stamp` tells it from earlier checks of the same paths,
+    /// whose answers may come after its own; see [`App::checked`].
+    Refresh { paths: Vec<PathBuf>, stamp: u64 },
+    /// Adds the file at `path` to the new task's draft if it is a file, and
+    /// the draft is still the `draft`th; see [`App::drafts`].
+    DraftFile { path: PathBuf, draft: u64 },
+    /// Points project `from` at the folder `to`, typed as `typed`, if it
+    /// is one.
+    Relocate {
+        from: PathBuf,
+        to: PathBuf,
+        typed: String,
+    },
+}
+
+impl PathCheck {
+    pub fn paths(&self) -> Vec<PathBuf> {
+        match self {
+            PathCheck::Refresh { paths, .. } => paths.clone(),
+            PathCheck::DraftFile { path, .. } => vec![path.clone()],
+            PathCheck::Relocate { to, .. } => vec![to.clone()],
+        }
+    }
 }
 
 /// Distance in pixels the pointer must travel before a press becomes a drag.
@@ -192,7 +224,8 @@ pub enum Action {
 }
 
 /// Work [`App::apply`] leaves for the [`crate::Platform`], to be done one
-/// at a time, in order.
+/// at a time, in order, except that [`PathCheck::Refresh`] checks can be
+/// done alongside the rest, as they change nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// A change already made to [`App::board`], to make in the store too.
@@ -200,6 +233,10 @@ pub enum Effect {
     Run(Command),
     /// Its result goes to [`App::settings_saved`].
     SaveSettings(GlobalSettings),
+    /// Its result goes to [`App::settings_saved`].
+    SaveDeviceSettings(DeviceSettings),
+    /// What's at its paths goes to [`App::checked`].
+    CheckPaths(PathCheck),
 }
 
 pub struct App {
@@ -216,6 +253,8 @@ pub struct App {
     pub date_inputs: (String, String),
     pub error: Option<String>,
     pub settings: GlobalSettings,
+    /// Settings for this device only, like the font size.
+    pub device: DeviceSettings,
     pub settings_open: bool,
     /// Settings were changed without being saved.
     pub settings_dirty: bool,
@@ -224,6 +263,21 @@ pub struct App {
     pub default_project: Option<PathBuf>,
     /// Projects whose directory wasn't there when last checked.
     pub missing_projects: Vec<PathBuf>,
+    /// What the platform last found at the paths it was asked about.
+    path_kinds: HashMap<PathBuf, PathKind>,
+    /// Paths in [`PathCheck::Refresh`] checks not yet answered, so none is
+    /// asked about twice at once, with the stamp of the check whose answer
+    /// is awaited; answers from other checks are out of date.
+    checking: HashMap<PathBuf, u64>,
+    /// How many [`PathCheck::Refresh`] checks have been made, for stamps.
+    refreshes: u64,
+    /// How many new-task drafts have been started, so a file checked after
+    /// its draft was saved or dropped isn't added to the next.
+    drafts: u64,
+    /// How many of the current draft's [`PathCheck::DraftFile`] checks
+    /// aren't done yet. It isn't saved meanwhile, as its file would be left
+    /// out.
+    draft_checks: usize,
     /// Effects waiting to be done, oldest first.
     pub(crate) outbox: VecDeque<Effect>,
     /// The editor's save that's being run, and the task it writes. The
@@ -236,8 +290,12 @@ pub struct App {
 
 impl App {
     /// Starts with settings and a board loaded by the platform, showing
-    /// why either couldn't be.
-    pub fn new(settings: Result<GlobalSettings, String>, board: Result<Board, String>) -> App {
+    /// why any couldn't be.
+    pub fn new(
+        settings: Result<GlobalSettings, String>,
+        device: Result<DeviceSettings, String>,
+        board: Result<Board, String>,
+    ) -> App {
         let mut app = App {
             board: Board::default(),
             view: View::Board,
@@ -249,20 +307,38 @@ impl App {
             date_inputs: (String::new(), String::new()),
             error: None,
             settings: GlobalSettings::default(),
+            device: DeviceSettings::default(),
             settings_open: false,
             settings_dirty: false,
             default_project: None,
             missing_projects: Vec::new(),
+            path_kinds: HashMap::new(),
+            checking: HashMap::new(),
+            refreshes: 0,
+            drafts: 0,
+            draft_checks: 0,
             outbox: VecDeque::new(),
             saving: None,
             new_file_viewer: VecDeque::new(),
         };
         match settings {
             Ok(settings) => app.settings = settings,
-            Err(e) => app.error = Some(format!("Couldn't read settings: {e}")),
+            Err(e) => app.add_error(format!("Couldn't read settings: {e}")),
+        }
+        match device {
+            Ok(device) => app.device = device,
+            Err(e) => app.add_error(format!("Couldn't read device settings: {e}")),
         }
         app.loaded(board);
         app
+    }
+
+    /// Shows `msg`, after any error already shown.
+    fn add_error(&mut self, msg: String) {
+        self.error = Some(match self.error.take() {
+            Some(earlier) => format!("{earlier}; {msg}"),
+            None => msg,
+        });
     }
 
     /// Shows a board freshly loaded from the store.
@@ -290,26 +366,139 @@ impl App {
             }
             // Kept with an earlier error, like the failed command this
             // load was meant to undo.
-            Err(e) => {
-                let msg = format!("Couldn't read tasks: {e}");
-                self.error = Some(match self.error.take() {
-                    Some(earlier) => format!("{earlier}; {msg}"),
-                    None => msg,
-                });
-            }
+            Err(e) => self.add_error(format!("Couldn't read tasks: {e}")),
         }
     }
 
-    /// Notes which projects' directories are gone, such as after being
-    /// moved or deleted outside Taskboard.
+    /// Asks the platform which projects' directories are gone, such as
+    /// after being moved or deleted outside Taskboard.
     pub fn check_projects(&mut self) {
+        let paths = self.board.projects.iter().map(|p| p.path.clone()).collect();
+        self.check_paths(paths);
+        self.note_missing();
+    }
+
+    /// Asks the platform what's at `paths` now, leaving out those it's
+    /// already being asked about. Whether any were left to ask about.
+    pub fn check_paths(&mut self, paths: Vec<PathBuf>) -> bool {
+        let stamp = self.refreshes + 1;
+        let mut asked = Vec::new();
+        for path in paths {
+            if !self.checking.contains_key(&path) {
+                self.checking.insert(path.clone(), stamp);
+                asked.push(path);
+            }
+        }
+        if asked.is_empty() {
+            return false;
+        }
+        self.refreshes = stamp;
+        let check = PathCheck::Refresh {
+            paths: asked,
+            stamp,
+        };
+        self.outbox.push_back(Effect::CheckPaths(check));
+        true
+    }
+
+    /// Notes what the platform found at `check`'s paths, `kinds` in the
+    /// same order, and does what the check was for.
+    pub fn checked(&mut self, check: PathCheck, kinds: Vec<PathKind>) {
+        let paths = check.paths();
+        // A path left without an answer, as when a request failed, counts
+        // as missing.
+        let kind = kinds.first().copied().unwrap_or(PathKind::Missing);
+        let answers = paths.into_iter().zip(kinds);
+        match check {
+            // Only the latest check's answer is kept: an earlier one can
+            // finish later, from before the path changed.
+            PathCheck::Refresh { stamp, .. } => {
+                for (path, kind) in answers {
+                    if self.checking.get(&path) == Some(&stamp) {
+                        self.checking.remove(&path);
+                        self.path_kinds.insert(path, kind);
+                    }
+                }
+            }
+            PathCheck::DraftFile { draft, .. } => {
+                if draft == self.drafts {
+                    self.draft_checks = self.draft_checks.saturating_sub(1);
+                }
+                self.path_kinds.extend(answers);
+            }
+            PathCheck::Relocate { .. } => self.path_kinds.extend(answers),
+        }
+        self.note_missing();
+        if let Err(e) = self.act_on(check, kind) {
+            self.error = Some(e.to_string());
+        }
+    }
+
+    /// Does what a [`PathCheck`] was for, given what's at its first path.
+    fn act_on(&mut self, check: PathCheck, kind: PathKind) -> taskboard_core::Result<()> {
+        match check {
+            PathCheck::Refresh { .. } => {}
+            // A file dialog, or the check, can finish after the new task was
+            // saved or cancelled; don't slip its file into the next draft.
+            PathCheck::DraftFile { path, draft } => {
+                if draft == self.drafts && matches!(self.editing, Some(EditTarget::New(_))) {
+                    if kind != PathKind::File {
+                        return Err(Error::Invalid(format!("not a file: {}", path.display())));
+                    }
+                    self.draft.attach(FileSource::Path { path })?;
+                }
+            }
+            PathCheck::Relocate { from, to, typed } => {
+                // Already relocated, as when Relocate was pressed twice, or
+                // deleted meanwhile.
+                if self.board.project(&from).is_none() {
+                    return Ok(());
+                }
+                if kind != PathKind::Dir {
+                    return Err(Error::Invalid(format!("no folder at {}", to.display())));
+                }
+                let command = Command::RelocateProject {
+                    from: from.clone(),
+                    to: typed,
+                };
+                self.change(command, |b| b.relocate_project(&from, to.clone()))?;
+                for path in [&mut self.filter.project, &mut self.default_project]
+                    .into_iter()
+                    .flatten()
+                {
+                    if *path == from {
+                        *path = to.clone();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Notes which projects' directories weren't there when last checked;
+    /// those not checked yet aren't counted.
+    fn note_missing(&mut self) {
         self.missing_projects = self
             .board
             .projects
             .iter()
-            .filter(|p| dir_missing(&p.path))
+            .filter(|p| {
+                self.path_kinds
+                    .get(&p.path)
+                    .is_some_and(|k| *k != PathKind::Dir)
+            })
             .map(|p| p.path.clone())
             .collect();
+    }
+
+    /// Forgets that `path` wasn't a folder when last checked, as saving a
+    /// task in it makes it one; it's checked again with the projects, and
+    /// the answer to a check from before is ignored.
+    fn forget_missing(&mut self, path: &Path) {
+        if self.path_kinds.get(path) != Some(&PathKind::Dir) {
+            self.path_kinds.remove(path);
+            self.checking.remove(path);
+        }
     }
 
     pub fn project_missing(&self, path: &Path) -> bool {
@@ -371,7 +560,7 @@ impl App {
     }
 
     /// Reads the editor's project input: a known project's name or
-    /// directory, or the directory of a new one.
+    /// directory, or the directory of a new one, as last checked.
     pub fn project_input(&self, text: &str) -> ProjectInput {
         let text = text.trim();
         if text.is_empty() {
@@ -387,11 +576,12 @@ impl App {
         }
         let path = project_path(Path::new(text));
         if self.board.project(&path).is_some() {
-            ProjectInput::Known(path)
-        } else if path.is_dir() {
-            ProjectInput::New(path)
-        } else {
-            ProjectInput::Missing(path)
+            return ProjectInput::Known(path);
+        }
+        match self.path_kinds.get(&path) {
+            Some(PathKind::Dir) => ProjectInput::New(path),
+            Some(_) => ProjectInput::Missing(path),
+            None => ProjectInput::Unchecked(path),
         }
     }
 
@@ -448,13 +638,20 @@ impl App {
         if let Some(msg) = outcome.message() {
             self.error = Some(msg);
         }
+        // The store made the task's folder if it wasn't there, maybe since
+        // the save was asked for.
+        if let Command::Create { id: Some(id), .. } | Command::Edit { id, .. } = command
+            && let Some(project) = self.board.get(*id).map(|t| t.project.clone())
+        {
+            self.forget_missing(&project);
+        }
         // The editor closes, unless it's been moved on to something else.
         if let Some((target, _)) = saved
             && self.editing == Some(target)
         {
             self.editing = None;
             if let EditTarget::New(_) = target {
-                self.draft = Draft::default();
+                self.new_draft();
             }
         }
         // Files only exist once the store has made them, so they're added
@@ -510,12 +707,12 @@ impl App {
                 self.editing = Some(target);
                 match target {
                     EditTarget::Existing(id) => self.selected = Some(id),
-                    EditTarget::New(_) => self.draft = Draft::default(),
+                    EditTarget::New(_) => self.new_draft(),
                 }
             }
             Action::CancelEdit => {
                 self.editing = None;
-                self.draft = Draft::default();
+                self.new_draft();
             }
             Action::Save {
                 title,
@@ -529,6 +726,11 @@ impl App {
                 if title.trim().is_empty() {
                     return Err(Error::Invalid("title must not be empty".into()));
                 }
+                if matches!(target, EditTarget::New(_)) && self.draft_checks > 0 {
+                    return Err(Error::Invalid(
+                        "still checking an attached file; save again in a moment".into(),
+                    ));
+                }
                 // A missing directory is created when the command runs.
                 let project = match self.project_input(&typed) {
                     ProjectInput::Empty => {
@@ -536,8 +738,11 @@ impl App {
                     }
                     ProjectInput::Known(path)
                     | ProjectInput::New(path)
-                    | ProjectInput::Missing(path) => path,
+                    | ProjectInput::Missing(path)
+                    | ProjectInput::Unchecked(path) => path,
                 };
+                // Saving makes the folder, so it's not shown as missing.
+                self.forget_missing(&project);
                 match target {
                     EditTarget::Existing(id) => {
                         let patch = TaskPatch {
@@ -650,7 +855,17 @@ impl App {
                     // or cancelled; don't slip its file into the next unsaved
                     // draft.
                     Owner::Draft if matches!(self.editing, Some(EditTarget::New(_))) => {
-                        self.draft.attach(source)?
+                        match source {
+                            // Checked to be a file now rather than when the
+                            // task is saved; added once it is.
+                            FileSource::Path { path } => {
+                                let draft = self.drafts;
+                                let check = PathCheck::DraftFile { path, draft };
+                                self.outbox.push_back(Effect::CheckPaths(check));
+                                self.draft_checks += 1;
+                            }
+                            source => self.draft.attach(source)?,
+                        }
                     }
                     Owner::Draft => {}
                 }
@@ -685,24 +900,13 @@ impl App {
                 if typed.is_empty() {
                     return Err(Error::Invalid("choose the project's new folder".into()));
                 }
-                let to = project_path(Path::new(typed));
-                // TODO(Platform): asks `Platform::path_kind` instead.
-                if !to.is_dir() {
-                    return Err(Error::Invalid(format!("no folder at {}", to.display())));
-                }
-                let command = Command::RelocateProject {
-                    from: from.clone(),
-                    to: typed.to_string(),
+                // Relocated once the platform finds a folder there.
+                let check = PathCheck::Relocate {
+                    from,
+                    to: project_path(Path::new(typed)),
+                    typed: typed.to_string(),
                 };
-                self.change(command, |b| b.relocate_project(&from, to.clone()))?;
-                for path in [&mut self.filter.project, &mut self.default_project]
-                    .into_iter()
-                    .flatten()
-                {
-                    if *path == from {
-                        *path = to.clone();
-                    }
-                }
+                self.outbox.push_back(Effect::CheckPaths(check));
             }
             Action::DeleteProject(path) => {
                 let command = Command::DeleteProject { path: path.clone() };
@@ -744,16 +948,16 @@ impl App {
                 }
             }
             Action::SetFontSize(size) => {
-                self.settings.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-                self.save_settings();
+                self.device.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                self.save_device_settings();
             }
             Action::SetCollapseEmptyColumns(collapse) => {
                 self.settings.collapse_empty_columns = collapse;
                 self.save_settings();
             }
             Action::SetTheme(theme) => {
-                self.settings.theme = theme;
-                self.save_settings();
+                self.device.theme = theme;
+                self.save_device_settings();
             }
             Action::SetNewTaskPosition(position) => {
                 self.settings.new_task_position = position;
@@ -830,6 +1034,18 @@ impl App {
             .push_back(Effect::SaveSettings(self.settings.clone()));
         self.settings_dirty = false;
     }
+
+    fn save_device_settings(&mut self) {
+        self.outbox
+            .push_back(Effect::SaveDeviceSettings(self.device));
+    }
+
+    /// Starts an empty draft for a new task.
+    fn new_draft(&mut self) {
+        self.draft = Draft::default();
+        self.drafts += 1;
+        self.draft_checks = 0;
+    }
 }
 
 /// Converts a drop at visible index `visible_index` (among the column's
@@ -859,19 +1075,6 @@ pub fn drop_position(
 /// the cards it could land between.
 pub fn drop_index(card_midpoints: &[f32], y: f32) -> usize {
     card_midpoints.iter().filter(|mid| **mid < y).count()
-}
-
-/// Whether a project's directory is gone.
-// TODO(Platform): asks the backend instead of the local filesystem.
-#[cfg(not(target_arch = "wasm32"))]
-fn dir_missing(path: &Path) -> bool {
-    !path.is_dir()
-}
-
-/// wasm spike: there's no filesystem to check, so none count as missing.
-#[cfg(target_arch = "wasm32")]
-fn dir_missing(_path: &Path) -> bool {
-    false
 }
 
 #[cfg(test)]
@@ -1129,6 +1332,12 @@ mod tests {
         let typed = fresh.to_str().unwrap();
         assert_eq!(
             app.project_input(typed),
+            ProjectInput::Unchecked(fresh.clone())
+        );
+        app.check_paths(vec![fresh.clone()]);
+        app.run_effects();
+        assert_eq!(
+            app.project_input(typed),
             ProjectInput::Missing(fresh.clone())
         );
         app.apply(Action::Edit(EditTarget::Existing(a)));
@@ -1157,6 +1366,245 @@ mod tests {
         }
         assert!(!other.exists());
         assert!(app.board.column(Status::Open).is_empty());
+    }
+
+    #[test]
+    fn typed_paths_are_classified_by_the_platform() {
+        let (dir, mut app) = app();
+        let typed = |p: &Path| p.to_str().unwrap().to_string();
+        let file = dir.path().join("notes.md");
+        std::fs::write(&file, "").unwrap();
+        let folder = dir.path().canonicalize().unwrap();
+        let paths = vec![folder.clone(), file.clone(), dir.path().join("nowhere")];
+        // Not asked about twice at once.
+        assert!(app.app.check_paths(paths.clone()));
+        assert!(!app.app.check_paths(paths.clone()));
+        assert_eq!(app.outbox.len(), 1);
+        assert_eq!(
+            app.project_input(&typed(&folder)),
+            ProjectInput::Unchecked(folder.clone())
+        );
+        app.run_effects();
+        assert_eq!(
+            app.platform.path_checks.lock().unwrap().last(),
+            Some(&paths)
+        );
+        assert_eq!(
+            app.project_input(&typed(&folder)),
+            ProjectInput::New(folder.clone())
+        );
+        // A file can't be a project's folder, so it's one to create.
+        for path in &paths[1..] {
+            assert_eq!(
+                app.project_input(&typed(path)),
+                ProjectInput::Missing(path.clone())
+            );
+        }
+
+        // What's found is kept until asked again.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert_eq!(
+            app.project_input(&typed(&file)),
+            ProjectInput::Missing(file.clone())
+        );
+        app.check_paths(vec![file.clone()]);
+        app.run_effects();
+        assert_eq!(
+            app.project_input(&typed(&file)),
+            ProjectInput::New(file.clone())
+        );
+    }
+
+    #[test]
+    fn a_drafted_file_is_added_once_the_platform_finds_it() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        let attach = |app: &mut Harness, path: &Path| {
+            app.app.apply(Action::Attach {
+                owner: Owner::Draft,
+                source: FileSource::Path {
+                    path: path.to_path_buf(),
+                },
+            });
+        };
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        attach(&mut app, &src);
+        assert!(app.draft.files.is_empty());
+        app.run_effects();
+        assert_eq!(app.draft.files[0].name, "notes.md");
+
+        // A folder isn't a file.
+        attach(&mut app, dir.path());
+        app.run_effects();
+        assert!(app.error.take().unwrap().starts_with("not a file: "));
+        assert_eq!(app.draft.files.len(), 1);
+
+        // Nor is it added to a draft started while it was being checked.
+        attach(&mut app, &src);
+        app.apply(Action::CancelEdit);
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.run_effects();
+        assert_eq!(app.error, None);
+        assert_eq!(app.draft, Draft::default());
+    }
+
+    #[test]
+    fn a_new_task_isnt_saved_while_its_file_is_checked() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Attach {
+            owner: Owner::Draft,
+            source: FileSource::Path { path: src },
+        });
+        app.app.apply(Action::Save {
+            title: "alpha".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        assert!(app.error.take().unwrap().starts_with("still checking"));
+        assert_eq!(app.editing, Some(EditTarget::New(Status::Open)));
+        assert!(app.board.column(Status::Open).is_empty());
+
+        app.run_effects();
+        save(&mut app, "alpha");
+        assert_eq!(app.error, None);
+        assert_eq!(app.board.column(Status::Open)[0].files[0].name, "notes.md");
+    }
+
+    #[test]
+    fn a_project_made_on_save_isnt_missing() {
+        let (dir, mut app) = app();
+        let fresh = dir.path().join("fresh");
+        let typed = fresh.to_str().unwrap().to_string();
+        app.check_paths(vec![fresh.clone()]);
+        app.run_effects();
+        assert_eq!(
+            app.project_input(&typed),
+            ProjectInput::Missing(fresh.clone())
+        );
+
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Save {
+            title: "alpha".into(),
+            project: typed,
+            description: String::new(),
+        });
+        // Not while it's being made, nor once the board shows it, before
+        // its folder is checked again.
+        assert!(app.missing_projects.is_empty());
+        app.run_effects();
+        assert_eq!(app.error, None);
+        app.app
+            .loaded(app.platform.store.load().map_err(|e| e.to_string()));
+        assert!(app.missing_projects.is_empty());
+        app.run_effects();
+        assert!(app.missing_projects.is_empty());
+    }
+
+    #[test]
+    fn a_late_answer_to_an_earlier_check_is_ignored() {
+        let (dir, mut app) = app();
+        let path = dir.path().join("fresh");
+        let typed = path.to_str().unwrap();
+        let take_check = |app: &mut Harness| match app.app.outbox.pop_back() {
+            Some(Effect::CheckPaths(check)) => check,
+            effect => panic!("not a check: {effect:?}"),
+        };
+        app.app.check_paths(vec![path.clone()]);
+        let first = take_check(&mut app);
+        // Asked again as saving a task there makes it, before the first
+        // check is answered.
+        app.forget_missing(&path);
+        assert!(app.app.check_paths(vec![path.clone()]));
+        let second = take_check(&mut app);
+        std::fs::create_dir(&path).unwrap();
+
+        // The first check's answer, from before, comes last...
+        app.app.checked(second, vec![PathKind::Dir]);
+        app.app.checked(first.clone(), vec![PathKind::Missing]);
+        assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
+
+        // ...or while a later check is still being answered, which it
+        // doesn't end, so the path isn't asked about twice at once.
+        assert!(app.app.check_paths(vec![path.clone()]));
+        let third = take_check(&mut app);
+        app.app.checked(first, vec![PathKind::Missing]);
+        assert!(!app.app.check_paths(vec![path.clone()]));
+        assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
+        app.app.checked(third, vec![PathKind::Dir]);
+        assert!(app.app.check_paths(vec![path]));
+    }
+
+    #[test]
+    fn a_check_left_from_an_earlier_draft_doesnt_hold_up_saving() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Attach {
+            owner: Owner::Draft,
+            source: FileSource::Path { path: src },
+        });
+        app.app.apply(Action::CancelEdit);
+        app.app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Save {
+            title: "alpha".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        assert_eq!(app.error, None);
+        app.settle();
+        assert_eq!(app.error, None);
+        let task = app.board.column(Status::Open)[0];
+        assert!(task.files.is_empty());
+    }
+
+    #[test]
+    fn relocating_twice_relocates_once() {
+        let (dir, mut app) = app();
+        let a = add(&mut app, "alpha");
+        let old = app.default_project.clone().unwrap();
+        let to = dir.path().join("moved");
+        std::fs::rename(&old, &to).unwrap();
+        app.reload();
+        for _ in 0..2 {
+            app.app.apply(Action::RelocateProject {
+                from: old.clone(),
+                to: to.to_str().unwrap().into(),
+            });
+        }
+        app.settle();
+        assert_eq!(app.error, None);
+        assert_eq!(
+            app.board.get(a).unwrap().project,
+            to.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn projects_are_missing_once_the_platform_says_so() {
+        let (_dir, mut app) = app();
+        add(&mut app, "alpha");
+        let project = app.default_project.clone().unwrap();
+        std::fs::remove_dir(&project).unwrap();
+        // Asked about every load, but not missing until answered.
+        app.app
+            .loaded(app.platform.store.load().map_err(|e| e.to_string()));
+        assert!(!app.project_missing(&project));
+        app.run_effects();
+        assert!(app.project_missing(&project));
+        let asked = app.platform.path_checks.lock().unwrap().last().cloned();
+        assert_eq!(asked, Some(vec![project.clone()]));
+
+        // Back, it's found on the next check.
+        std::fs::create_dir(&project).unwrap();
+        app.check_projects();
+        app.run_effects();
+        assert!(app.missing_projects.is_empty());
     }
 
     #[test]
@@ -1198,17 +1646,51 @@ mod tests {
     }
 
     #[test]
-    fn font_size_is_clamped_and_saved() {
+    fn font_size_is_clamped_and_saved_for_this_device() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
         let mut app = settings_app(dir.path(), &path);
         app.apply(Action::SetFontSize(MAX_FONT_SIZE + 10));
         assert_eq!(app.error, None);
-        assert_eq!(app.settings.font_size, MAX_FONT_SIZE);
-        assert_eq!(GlobalSettings::load(&path).unwrap(), app.settings);
+        assert_eq!(app.device.font_size, MAX_FONT_SIZE);
+        let device = app.platform.device_path.clone().unwrap();
+        assert_eq!(DeviceSettings::load(&device, None).unwrap(), app.device);
+        // Global settings are left alone.
+        assert!(!path.exists());
 
         let reopened = settings_app(dir.path(), &path);
-        assert_eq!(reopened.settings.font_size, MAX_FONT_SIZE);
+        assert_eq!(reopened.device.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn device_settings_move_out_of_global_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/tb/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // As saved before font size and theme were per device.
+        std::fs::write(
+            &path,
+            r#"{"font_size": 18, "theme": "light", "hooks": [{"event": "moved", "command": "true"}]}"#,
+        )
+        .unwrap();
+        let mut app = settings_app(dir.path(), &path);
+        assert_eq!(app.error, None);
+        assert_eq!((app.device.font_size, app.device.theme), (18, Theme::Light));
+        assert_eq!(app.settings.hooks.len(), 1);
+
+        // Hooks are still saved to the shared file, now without the font size.
+        app.apply(Action::AddHook);
+        let saved = GlobalSettings::load(&path).unwrap();
+        assert_eq!(saved.hooks.len(), 2);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("font_size")
+        );
+
+        let reopened = settings_app(dir.path(), &path);
+        assert_eq!(reopened.device, app.device);
+        assert_eq!(reopened.settings, saved);
     }
 
     #[test]
@@ -1243,12 +1725,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config/tb/settings.json");
         let mut app = settings_app(dir.path(), &path);
-        assert_eq!(app.settings.theme, Theme::Dark);
+        assert_eq!(app.device.theme, Theme::Dark);
         app.apply(Action::SetTheme(Theme::Light));
         assert_eq!(app.error, None);
 
         let reopened = settings_app(dir.path(), &path);
-        assert_eq!(reopened.settings.theme, Theme::Light);
+        assert_eq!(reopened.device.theme, Theme::Light);
     }
 
     #[test]

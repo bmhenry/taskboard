@@ -1,12 +1,12 @@
 //! What the UI needs from the program hosting it: the store, file dialogs,
-//! a browser and settings. The desktop app implements [`Platform`] with the
+//! a browser, what's at paths and settings. The desktop app implements [`Platform`] with the
 //! local filesystem; the web client will implement it over HTTP.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use iced::Subscription;
 use taskboard_core::ops::{Command, FileSource, Outcome};
-use taskboard_core::{Attachment, Board, GlobalSettings, Ulid};
+use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Ulid};
 
 /// A boxed future the UI can run as an `iced::Task`: `Send` natively, but
 /// not on the web, where nothing is.
@@ -59,8 +59,9 @@ pub trait Platform {
     /// Opens `url` in the user's browser.
     fn open_url(&self, url: &str) -> Result<(), String>;
 
-    /// What's at `path`, e.g. whether a typed project directory exists.
-    fn path_kind(&self, path: &Path) -> BoxFuture<PathKind>;
+    /// What's at each of `paths`, in order: whether projects' directories
+    /// still exist, or what a typed path names.
+    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>>;
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>>;
 
@@ -70,4 +71,13 @@ pub trait Platform {
     /// Where settings are saved, to show in the settings dialog; `None` if
     /// they can't be.
     fn settings_location(&self) -> Option<String>;
+
+    /// Settings for this device only, like the font size: a file on the
+    /// desktop, the browser's storage on the web.
+    fn load_device_settings(&self) -> BoxFuture<Result<DeviceSettings, String>>;
+
+    fn save_device_settings(&self, settings: DeviceSettings) -> BoxFuture<Result<(), String>>;
+
+    /// Where device settings are saved, like [`Platform::settings_location`].
+    fn device_settings_location(&self) -> Option<String>;
 }
