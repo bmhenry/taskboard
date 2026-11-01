@@ -3,11 +3,14 @@
 //! through [`ops::execute`], as they do on the desktop, so both behave the
 //! same.
 //!
-//! [`router`] builds the whole app. Anything every request should pass
-//! through, like authentication, can go on it as a `.layer`.
+//! [`router`] builds the whole app, behind the [`auth`] checks that every
+//! request passes through.
+
+pub mod auth;
 
 use std::convert::Infallible;
 use std::fmt::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,6 +56,14 @@ pub struct Config {
     /// A directory to serve the web UI from (trunk's `dist/`); without it a
     /// placeholder page is served.
     pub static_dir: Option<PathBuf>,
+    /// What every request must carry; see [`auth`].
+    pub token: String,
+    /// The address the daemon listens on. Requests must name it in `Host`,
+    /// or any of localhost's names if it's a loopback address.
+    pub addr: SocketAddr,
+    /// Other names requests may give in `Host`, on `addr`'s port unless
+    /// they say otherwise.
+    pub allow_hosts: Vec<auth::HostName>,
 }
 
 /// The daemon's state, shared by every request.
@@ -126,7 +137,8 @@ impl Server {
 type Shared = State<Arc<Server>>;
 
 /// The daemon's routes, over the store and settings in `config`. It starts
-/// watching the store for [`api::EVENTS`] straight away.
+/// watching the store for [`api::EVENTS`] straight away. Every route, the
+/// web UI's files included, is behind [`auth::guard`].
 pub fn router(config: Config) -> Router {
     let server = Arc::new(Server::new(config));
     let app = Router::new()
@@ -141,7 +153,13 @@ pub fn router(config: Config) -> Router {
         Some(dir) => app.fallback_service(ServeDir::new(dir)),
         None => app.fallback(placeholder),
     };
+    let config = &server.config;
+    let guard = auth::Guard::new(config.token.clone(), config.addr, &config.allow_hosts);
     app.layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(guard),
+            auth::guard,
+        ))
         .with_state(server)
 }
 
@@ -458,16 +476,32 @@ mod tests {
         project: PathBuf,
     }
 
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    const HOST: &str = "127.0.0.1:7878";
+
     fn fixture() -> Fixture {
+        fixture_with(false, HOST, &[])
+    }
+
+    /// A fixture listening on `addr` and also taking requests for
+    /// `allow_hosts`. With `web_ui`, it serves a web UI that's just an
+    /// `index.html`.
+    fn fixture_with(web_ui: bool, addr: &str, allow_hosts: &[&str]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store")).unwrap();
         let project = create_project_dir(&dir.path().join("proj")).unwrap();
+        let dist = dir.path().join("dist");
+        std::fs::create_dir(&dist).unwrap();
+        std::fs::write(dist.join("index.html"), "<p>web UI</p>").unwrap();
         let app = router(Config {
             store: store.clone(),
             settings_path: Some(dir.path().join("config/settings.json")),
             project: project.clone(),
             named: true,
-            static_dir: None,
+            static_dir: web_ui.then_some(dist),
+            token: TOKEN.into(),
+            addr: addr.parse().unwrap(),
+            allow_hosts: allow_hosts.iter().map(|h| h.parse().unwrap()).collect(),
         });
         Fixture {
             dir,
@@ -482,13 +516,32 @@ mod tests {
             self.send_as(method, uri, "application/json", body).await
         }
 
+        /// Sends a request as a script would: to the daemon's own address,
+        /// with the token as a bearer token.
         async fn send_as(&self, method: Method, uri: &str, ty: &str, body: Body) -> Response {
             let req = Request::builder()
                 .method(method)
                 .uri(uri)
+                .header(header::HOST, HOST)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
                 .header(header::CONTENT_TYPE, ty)
                 .body(body)
                 .unwrap();
+            self.app.clone().oneshot(req).await.unwrap()
+        }
+
+        /// GETs `uri` from `host` with only the `headers` given.
+        async fn get_raw(
+            &self,
+            uri: &str,
+            host: &str,
+            headers: &[(header::HeaderName, &str)],
+        ) -> Response {
+            let mut req = Request::builder().uri(uri).header(header::HOST, host);
+            for (name, value) in headers {
+                req = req.header(name, *value);
+            }
+            let req = req.body(Body::empty()).unwrap();
             self.app.clone().oneshot(req).await.unwrap()
         }
 
@@ -749,5 +802,165 @@ mod tests {
         let frame = tokio::time::timeout(wait, body.frame()).await.ok()?;
         let data = frame.unwrap().unwrap().into_data().unwrap();
         Some(String::from_utf8(data.to_vec()).unwrap())
+    }
+
+    fn static_fixture() -> Fixture {
+        fixture_with(true, HOST, &[])
+    }
+
+    async fn text(res: Response) -> String {
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn everything_needs_the_token() {
+        let f = static_fixture();
+        let id = f.add("t", &f.project);
+        let file = format!("{}/{id}/{}", api::FILES, Ulid::generate());
+        for uri in [api::BOARD, api::EVENTS, api::SETTINGS, &file] {
+            let res = f.get_raw(uri, HOST, &[]).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let ErrorBody { error } = read(res).await;
+            assert!(error.contains("token"), "{error}");
+        }
+        // Pages say where to find it.
+        for uri in ["/", "/index.html", "/nowhere"] {
+            let res = f.get_raw(uri, HOST, &[]).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert!(text(res).await.contains("printed"));
+        }
+        // Commands too.
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(api::COMMANDS)
+            .header(header::HOST, HOST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({"type": "delete", "id": id}).to_string()))
+            .unwrap();
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(f.store.load().unwrap().tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wrong_tokens_are_refused() {
+        let f = static_fixture();
+        let wrong = "0123456789abcdef0123456789abcdee";
+        let bearer = format!("Bearer {wrong}");
+        let cookie = format!("tb_token={wrong}");
+        // Right but cut short, and right but in the wrong cookie.
+        let short = format!("Bearer {}", &TOKEN[..16]);
+        let elsewhere = format!("other={TOKEN}");
+        for headers in [
+            [(header::AUTHORIZATION, bearer.as_str())],
+            [(header::COOKIE, cookie.as_str())],
+            [(header::AUTHORIZATION, short.as_str())],
+            [(header::COOKIE, elsewhere.as_str())],
+        ] {
+            let res = f.get_raw(api::BOARD, HOST, &headers).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{headers:?}");
+        }
+        let res = f.get_raw(&format!("/?token={wrong}"), HOST, &[]).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(!res.headers().contains_key(header::SET_COOKIE));
+    }
+
+    #[tokio::test]
+    async fn the_token_link_sets_a_cookie_that_then_works() {
+        let f = static_fixture();
+        let res = f.get_raw(&format!("/?token={TOKEN}"), HOST, &[]).await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()[header::LOCATION], "/");
+        let cookie = res.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(
+            cookie.starts_with(&format!("tb_token={TOKEN};")),
+            "{cookie}"
+        );
+        for attr in ["HttpOnly", "SameSite=Strict", "Path=/"] {
+            assert!(cookie.split("; ").any(|a| a == attr), "{cookie}");
+        }
+        // The rest of the query stays.
+        let uri = format!("/index.html?a=1&token={TOKEN}&b=2");
+        let res = f.get_raw(&uri, HOST, &[]).await;
+        assert_eq!(res.headers()[header::LOCATION], "/index.html?a=1&b=2");
+
+        let cookie = format!("theme=dark; tb_token={TOKEN}");
+        let with_cookie = [(header::COOKIE, cookie.as_str())];
+        let res = f.get_raw("/", HOST, &with_cookie).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(text(res).await, "<p>web UI</p>");
+        let res = f.get_raw(api::BOARD, HOST, &with_cookie).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = f.get_raw(api::EVENTS, HOST, &with_cookie).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let bearer = format!("Bearer {TOKEN}");
+        let res = f
+            .get_raw(api::BOARD, HOST, &[(header::AUTHORIZATION, &bearer)])
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn requests_must_name_the_daemon() {
+        let f = fixture();
+        let bearer = format!("Bearer {TOKEN}");
+        let auth = [(header::AUTHORIZATION, bearer.as_str())];
+        for host in [
+            "127.0.0.1:7878",
+            "localhost:7878",
+            "LocalHost:7878",
+            "[::1]:7878",
+        ] {
+            let res = f.get_raw(api::BOARD, host, &auth).await;
+            assert_eq!(res.status(), StatusCode::OK, "{host}");
+        }
+        // A rebound name, the wrong port, no port (so 80), and nonsense are
+        // turned away, token or no token, and before the token is checked.
+        for host in [
+            "evil.example:7878",
+            "127.0.0.1:9999",
+            "localhost",
+            "a b",
+            "",
+        ] {
+            let res = f.get_raw(api::BOARD, host, &auth).await;
+            assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST, "{host}");
+            let _: ErrorBody = read(res).await;
+            let uri = format!("/?token={TOKEN}");
+            let res = f.get_raw(&uri, host, &[]).await;
+            assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST, "{host}");
+            assert!(!res.headers().contains_key(header::SET_COOKIE));
+        }
+    }
+
+    #[tokio::test]
+    async fn other_hosts_can_be_allowed() {
+        let f = fixture_with(false, HOST, &["box.tailnet.ts.net", "localhost:9000"]);
+        let bearer = format!("Bearer {TOKEN}");
+        let auth = [(header::AUTHORIZATION, bearer.as_str())];
+        for host in [
+            "box.tailnet.ts.net:7878",
+            "localhost:9000",
+            "localhost:7878",
+        ] {
+            let res = f.get_raw(api::BOARD, host, &auth).await;
+            assert_eq!(res.status(), StatusCode::OK, "{host}");
+        }
+        for host in [
+            "box.tailnet.ts.net:9000",
+            "box.tailnet.ts.net",
+            "127.0.0.1:9000",
+        ] {
+            let res = f.get_raw(api::BOARD, host, &auth).await;
+            assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST, "{host}");
+        }
+
+        // Off loopback, only the address itself (and what's allowed) goes.
+        let f = fixture_with(false, "192.168.1.5:7878", &[]);
+        let res = f.get_raw(api::BOARD, "192.168.1.5:7878", &auth).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = f.get_raw(api::BOARD, "localhost:7878", &auth).await;
+        assert_eq!(res.status(), StatusCode::MISDIRECTED_REQUEST);
     }
 }

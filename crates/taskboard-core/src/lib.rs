@@ -45,6 +45,12 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// `$XDG_CONFIG_HOME/tb`, or `~/.config/tb`: where settings and the web
+/// daemon's token are kept. `None` if neither variable is set.
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
 /// `$<var>/tb`, falling back to `~/<fallback>/tb` as the XDG base directory
 /// spec says. `None` if neither variable is set.
 fn xdg_dir(var: &str, fallback: &str) -> Option<std::path::PathBuf> {
