@@ -7,7 +7,7 @@
 //! questions about paths, like whether a project's directory still exists:
 //! the answers are kept, and shown once they come.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use taskboard_core::ops::{Command, FileSource, Outcome, Output};
@@ -101,8 +101,9 @@ pub enum ProjectInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PathCheck {
     /// Notes what's at each path, like projects' directories or a typed
-    /// project's.
-    Refresh(Vec<PathBuf>),
+    /// project's. `stamp` tells it from earlier checks of the same paths,
+    /// whose answers may come after its own; see [`App::checked`].
+    Refresh { paths: Vec<PathBuf>, stamp: u64 },
     /// Adds the file at `path` to the new task's draft if it is a file, and
     /// the draft is still the `draft`th; see [`App::drafts`].
     DraftFile { path: PathBuf, draft: u64 },
@@ -118,7 +119,7 @@ pub enum PathCheck {
 impl PathCheck {
     pub fn paths(&self) -> Vec<PathBuf> {
         match self {
-            PathCheck::Refresh(paths) => paths.clone(),
+            PathCheck::Refresh { paths, .. } => paths.clone(),
             PathCheck::DraftFile { path, .. } => vec![path.clone()],
             PathCheck::Relocate { to, .. } => vec![to.clone()],
         }
@@ -264,14 +265,18 @@ pub struct App {
     pub missing_projects: Vec<PathBuf>,
     /// What the platform last found at the paths it was asked about.
     path_kinds: HashMap<PathBuf, PathKind>,
-    /// Paths in [`PathCheck::Refresh`] checks not yet done, so none is
-    /// asked about twice at once.
-    checking: HashSet<PathBuf>,
+    /// Paths in [`PathCheck::Refresh`] checks not yet answered, so none is
+    /// asked about twice at once, with the stamp of the check whose answer
+    /// is awaited; answers from other checks are out of date.
+    checking: HashMap<PathBuf, u64>,
+    /// How many [`PathCheck::Refresh`] checks have been made, for stamps.
+    refreshes: u64,
     /// How many new-task drafts have been started, so a file checked after
     /// its draft was saved or dropped isn't added to the next.
     drafts: u64,
-    /// How many [`PathCheck::DraftFile`] checks aren't done yet. A new
-    /// task isn't saved meanwhile, as its file would be left out.
+    /// How many of the current draft's [`PathCheck::DraftFile`] checks
+    /// aren't done yet. It isn't saved meanwhile, as its file would be left
+    /// out.
     draft_checks: usize,
     /// Effects waiting to be done, oldest first.
     pub(crate) outbox: VecDeque<Effect>,
@@ -308,7 +313,8 @@ impl App {
             default_project: None,
             missing_projects: Vec::new(),
             path_kinds: HashMap::new(),
-            checking: HashSet::new(),
+            checking: HashMap::new(),
+            refreshes: 0,
             drafts: 0,
             draft_checks: 0,
             outbox: VecDeque::new(),
@@ -373,35 +379,55 @@ impl App {
     }
 
     /// Asks the platform what's at `paths` now, leaving out those it's
-    /// already being asked about.
-    pub fn check_paths(&mut self, paths: Vec<PathBuf>) {
-        let paths: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|p| self.checking.insert(p.clone()))
-            .collect();
-        if !paths.is_empty() {
-            self.outbox
-                .push_back(Effect::CheckPaths(PathCheck::Refresh(paths)));
+    /// already being asked about. Whether any were left to ask about.
+    pub fn check_paths(&mut self, paths: Vec<PathBuf>) -> bool {
+        let stamp = self.refreshes + 1;
+        let mut asked = Vec::new();
+        for path in paths {
+            if !self.checking.contains_key(&path) {
+                self.checking.insert(path.clone(), stamp);
+                asked.push(path);
+            }
         }
+        if asked.is_empty() {
+            return false;
+        }
+        self.refreshes = stamp;
+        let check = PathCheck::Refresh {
+            paths: asked,
+            stamp,
+        };
+        self.outbox.push_back(Effect::CheckPaths(check));
+        true
     }
 
     /// Notes what the platform found at `check`'s paths, `kinds` in the
     /// same order, and does what the check was for.
     pub fn checked(&mut self, check: PathCheck, kinds: Vec<PathKind>) {
         let paths = check.paths();
-        match check {
-            PathCheck::Refresh(_) => {
-                for path in &paths {
-                    self.checking.remove(path);
-                }
-            }
-            PathCheck::DraftFile { .. } => self.draft_checks = self.draft_checks.saturating_sub(1),
-            PathCheck::Relocate { .. } => {}
-        }
         // A path left without an answer, as when a request failed, counts
         // as missing.
         let kind = kinds.first().copied().unwrap_or(PathKind::Missing);
-        self.path_kinds.extend(paths.into_iter().zip(kinds));
+        let answers = paths.into_iter().zip(kinds);
+        match check {
+            // Only the latest check's answer is kept: an earlier one can
+            // finish later, from before the path changed.
+            PathCheck::Refresh { stamp, .. } => {
+                for (path, kind) in answers {
+                    if self.checking.get(&path) == Some(&stamp) {
+                        self.checking.remove(&path);
+                        self.path_kinds.insert(path, kind);
+                    }
+                }
+            }
+            PathCheck::DraftFile { draft, .. } => {
+                if draft == self.drafts {
+                    self.draft_checks = self.draft_checks.saturating_sub(1);
+                }
+                self.path_kinds.extend(answers);
+            }
+            PathCheck::Relocate { .. } => self.path_kinds.extend(answers),
+        }
         self.note_missing();
         if let Err(e) = self.act_on(check, kind) {
             self.error = Some(e.to_string());
@@ -411,7 +437,7 @@ impl App {
     /// Does what a [`PathCheck`] was for, given what's at its first path.
     fn act_on(&mut self, check: PathCheck, kind: PathKind) -> taskboard_core::Result<()> {
         match check {
-            PathCheck::Refresh(_) => {}
+            PathCheck::Refresh { .. } => {}
             // A file dialog, or the check, can finish after the new task was
             // saved or cancelled; don't slip its file into the next draft.
             PathCheck::DraftFile { path, draft } => {
@@ -466,8 +492,8 @@ impl App {
     }
 
     /// Forgets that `path` wasn't a folder when last checked, as saving a
-    /// task in it makes it one; it's checked again with the projects, even
-    /// if a check from before is still being answered.
+    /// task in it makes it one; it's checked again with the projects, and
+    /// the answer to a check from before is ignored.
     fn forget_missing(&mut self, path: &Path) {
         if self.path_kinds.get(path) != Some(&PathKind::Dir) {
             self.path_kinds.remove(path);
@@ -1018,6 +1044,7 @@ impl App {
     fn new_draft(&mut self) {
         self.draft = Draft::default();
         self.drafts += 1;
+        self.draft_checks = 0;
     }
 }
 
@@ -1350,8 +1377,8 @@ mod tests {
         let folder = dir.path().canonicalize().unwrap();
         let paths = vec![folder.clone(), file.clone(), dir.path().join("nowhere")];
         // Not asked about twice at once.
-        app.app.check_paths(paths.clone());
-        app.app.check_paths(paths.clone());
+        assert!(app.app.check_paths(paths.clone()));
+        assert!(!app.app.check_paths(paths.clone()));
         assert_eq!(app.outbox.len(), 1);
         assert_eq!(
             app.project_input(&typed(&folder)),
@@ -1476,6 +1503,64 @@ mod tests {
         assert!(app.missing_projects.is_empty());
         app.run_effects();
         assert!(app.missing_projects.is_empty());
+    }
+
+    #[test]
+    fn a_late_answer_to_an_earlier_check_is_ignored() {
+        let (dir, mut app) = app();
+        let path = dir.path().join("fresh");
+        let typed = path.to_str().unwrap();
+        let take_check = |app: &mut Harness| match app.app.outbox.pop_back() {
+            Some(Effect::CheckPaths(check)) => check,
+            effect => panic!("not a check: {effect:?}"),
+        };
+        app.app.check_paths(vec![path.clone()]);
+        let first = take_check(&mut app);
+        // Asked again as saving a task there makes it, before the first
+        // check is answered.
+        app.forget_missing(&path);
+        assert!(app.app.check_paths(vec![path.clone()]));
+        let second = take_check(&mut app);
+        std::fs::create_dir(&path).unwrap();
+
+        // The first check's answer, from before, comes last...
+        app.app.checked(second, vec![PathKind::Dir]);
+        app.app.checked(first.clone(), vec![PathKind::Missing]);
+        assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
+
+        // ...or while a later check is still being answered, which it
+        // doesn't end, so the path isn't asked about twice at once.
+        assert!(app.app.check_paths(vec![path.clone()]));
+        let third = take_check(&mut app);
+        app.app.checked(first, vec![PathKind::Missing]);
+        assert!(!app.app.check_paths(vec![path.clone()]));
+        assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
+        app.app.checked(third, vec![PathKind::Dir]);
+        assert!(app.app.check_paths(vec![path]));
+    }
+
+    #[test]
+    fn a_check_left_from_an_earlier_draft_doesnt_hold_up_saving() {
+        let (dir, mut app) = app();
+        let src = dir.path().join("notes.md");
+        std::fs::write(&src, "").unwrap();
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Attach {
+            owner: Owner::Draft,
+            source: FileSource::Path { path: src },
+        });
+        app.app.apply(Action::CancelEdit);
+        app.app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.app.apply(Action::Save {
+            title: "alpha".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        assert_eq!(app.error, None);
+        app.settle();
+        assert_eq!(app.error, None);
+        let task = app.board.column(Status::Open)[0];
+        assert!(task.files.is_empty());
     }
 
     #[test]

@@ -364,8 +364,8 @@ impl Gui {
         if app.editing.is_some()
             && self.typed_check.is_none()
             && let ProjectInput::Unchecked(path) = app.project_input(&ui.edit_project)
+            && self.app.check_paths(vec![path.clone()])
         {
-            self.app.check_paths(vec![path.clone()]);
             self.typed_check = Some(path);
         }
         Task::batch([task, self.next_effect()])
@@ -379,7 +379,7 @@ impl Gui {
         let outbox = std::mem::take(&mut self.app.outbox);
         for effect in outbox {
             match effect {
-                Effect::CheckPaths(check @ PathCheck::Refresh(_)) => {
+                Effect::CheckPaths(check @ PathCheck::Refresh { .. }) => {
                     self.refreshing.push(check.clone());
                     let kinds = self.platform.path_kinds(check.paths());
                     tasks.push(Task::perform(kinds, move |kinds| {
@@ -634,7 +634,7 @@ impl Gui {
                 self.app.settings_saved(result);
             }
             Message::Checked(check, kinds) => {
-                if let PathCheck::Refresh(paths) = &check {
+                if let PathCheck::Refresh { paths, .. } = &check {
                     let Some(i) = self.refreshing.iter().position(|c| *c == check) else {
                         return Task::none();
                     };
@@ -642,7 +642,9 @@ impl Gui {
                     if self.typed_check.as_ref().is_some_and(|p| paths.contains(p)) {
                         self.typed_check = None;
                     }
-                } else if self.running.take() != Some(Effect::CheckPaths(check.clone())) {
+                } else if self.running.as_ref() == Some(&Effect::CheckPaths(check.clone())) {
+                    self.running = None;
+                } else {
                     return Task::none();
                 }
                 let relocating = match &check {
@@ -1100,6 +1102,27 @@ mod tests {
     /// tasks its updates returned: its effects, a reload of the board, and
     /// reading the file in the viewer.
     fn settle(gui: &mut Gui) {
+        run_effects(gui);
+        let stamp = gui.load_stamp();
+        let board = now(gui.platform.load_board());
+        let _ = gui.update(Message::Loaded(stamp, board));
+        run_effects(gui);
+        if let Some((task, file)) = gui.ui.file_shown
+            && gui.ui.file_text.is_none()
+            && gui.ui.file_image.is_none()
+            && let Some(att) = gui
+                .app
+                .board
+                .get(task)
+                .and_then(|t| t.files.iter().find(|f| f.id == file))
+        {
+            let contents = viewer::contents(att.kind, now(gui.platform.read_file(task, att)));
+            let _ = gui.update(Message::FileRead((task, file), contents));
+        }
+    }
+
+    /// Does the effects `gui` started, and those they lead to, oldest first.
+    fn run_effects(gui: &mut Gui) {
         while let Some(effect) = gui
             .running
             .clone()
@@ -1120,21 +1143,11 @@ mod tests {
             };
             let _ = gui.update(message);
         }
-        let stamp = gui.load_stamp();
-        let board = now(gui.platform.load_board());
-        let _ = gui.update(Message::Loaded(stamp, board));
-        if let Some((task, file)) = gui.ui.file_shown
-            && gui.ui.file_text.is_none()
-            && gui.ui.file_image.is_none()
-            && let Some(att) = gui
-                .app
-                .board
-                .get(task)
-                .and_then(|t| t.files.iter().find(|f| f.id == file))
-        {
-            let contents = viewer::contents(att.kind, now(gui.platform.read_file(task, att)));
-            let _ = gui.update(Message::FileRead((task, file), contents));
-        }
+    }
+
+    /// The path refresh `gui` started for `path` alone, if any.
+    fn refresh_of(gui: &Gui, path: &std::path::Path) -> Option<PathCheck> {
+        gui.refreshing.iter().find(|c| c.paths() == [path]).cloned()
     }
 
     fn view_file(gui: &mut Gui, file: (Ulid, Ulid)) {
@@ -1321,23 +1334,35 @@ mod tests {
         let _ = gui.update(Message::App(Action::Edit(EditTarget::New(Status::Open))));
         let folder = dir.path().canonicalize().unwrap();
         let _ = gui.update(Message::EditProject(folder.display().to_string()));
-        assert_eq!(gui.refreshing, [PathCheck::Refresh(vec![folder.clone()])]);
+        assert!(refresh_of(&gui, &folder).is_some());
         settle(&mut gui);
         let input = gui.app.project_input(&gui.ui.edit_project);
         assert_eq!(input, ProjectInput::New(folder.clone()));
 
         // Typed on while it's looked for, only the latest path is asked
-        // about next, and a save doesn't wait for it.
+        // about next, once the first is answered.
         let typed = folder.join("new");
         for text in [folder.join("n"), folder.join("ne"), typed.clone()] {
             let _ = gui.update(Message::EditProject(text.display().to_string()));
         }
-        let asked =
-            |gui: &Gui, path: PathBuf| gui.refreshing.contains(&PathCheck::Refresh(vec![path]));
-        assert!(asked(&gui, folder.join("n")));
-        assert!(!asked(&gui, folder.join("ne")) && !asked(&gui, typed.clone()));
+        let first = refresh_of(&gui, &folder.join("n")).unwrap();
+        assert!(refresh_of(&gui, &folder.join("ne")).is_none());
+        assert!(refresh_of(&gui, &typed).is_none());
+        let kinds = now(gui.platform.path_kinds(first.paths()));
+        let _ = gui.update(Message::Checked(first, kinds));
+        assert!(refresh_of(&gui, &typed).is_some());
+        run_effects(&mut gui);
+        let input = gui.app.project_input(&gui.ui.edit_project);
+        assert_eq!(input, ProjectInput::Missing(typed.clone()));
+
+        // A save doesn't wait for path checks.
+        let _ = gui.update(Message::EditProject(
+            folder.join("other").display().to_string(),
+        ));
+        let _ = gui.update(Message::EditProject(typed.display().to_string()));
         let _ = gui.update(Message::EditTitle("alpha".into()));
         let _ = gui.update(Message::Save);
+        assert!(!gui.refreshing.is_empty());
         assert!(matches!(
             gui.running,
             Some(Effect::Run(Command::Create { .. }))
@@ -1346,6 +1371,8 @@ mod tests {
         assert_eq!(gui.app.error, None);
         assert!(typed.is_dir());
         assert!(gui.app.missing_projects.is_empty());
+        assert!(gui.refreshing.is_empty());
+        assert_eq!(gui.typed_check, None);
     }
 
     #[test]
