@@ -4,19 +4,13 @@
 //! Without it, that's the git repo the current directory is in, if any (or
 //! the current directory, if it already has tasks).
 
-mod app;
-mod markdown;
-mod source_link;
-mod ui;
 mod watch;
 
 use std::path::PathBuf;
 
 use taskboard_core::{GlobalSettings, Store, project_path, project_root};
 
-use app::App;
-use ui::Gui;
-use ui::theme;
+use taskboard_ui::{App, Gui, theme};
 
 fn main() -> iced::Result {
     let named = std::env::args_os().nth(1).map(PathBuf::from);
@@ -40,7 +34,7 @@ fn main() -> iced::Result {
                 || project.join(".git").exists()
                 || app.board.project(&project).is_some();
             app.default_project = is_project.then(|| project.clone());
-            Gui::new(app)
+            Gui::new(app).watching(watch::subscription)
         },
         Gui::update,
         Gui::view,

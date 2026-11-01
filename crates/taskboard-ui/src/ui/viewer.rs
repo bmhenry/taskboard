@@ -155,6 +155,7 @@ fn dialog<'a>(p: Pal, content: iced::widget::Column<'a, Message>, window: Size) 
 
 /// Reads a text file for the viewer, or says why it couldn't, and whether
 /// the text can be edited: only UTF-8 survives being saved back unchanged.
+// TODO(Platform): becomes `Platform::read_file`.
 pub fn read_text(path: &std::path::Path) -> (String, bool) {
     match std::fs::read(path) {
         Ok(bytes) => match String::from_utf8(bytes) {

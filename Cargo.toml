@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/taskboard-core", "crates/tb", "crates/taskboard", "crates/taskboard-wasm-spike"]
+members = ["crates/taskboard-core", "crates/tb", "crates/taskboard-ui", "crates/taskboard", "crates/taskboard-wasm-spike"]
 # Vendored crates are patched dependencies, not workspace members.
 exclude = ["vendor"]
 

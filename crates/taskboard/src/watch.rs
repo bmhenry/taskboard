@@ -7,15 +7,7 @@ use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-
-/// What the watcher reports to the UI.
-#[derive(Debug, Clone)]
-pub enum WatchEvent {
-    /// `tasks.json` changed.
-    Changed,
-    /// The watcher couldn't start; live updates are off.
-    Failed(String),
-}
+use taskboard_ui::WatchEvent;
 
 /// Reports changes to `tasks_file`, which lives in `store_dir`.
 pub fn subscription(store_dir: &Path, tasks_file: &Path) -> Subscription<WatchEvent> {

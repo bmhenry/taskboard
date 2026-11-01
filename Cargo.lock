@@ -3883,14 +3883,10 @@ dependencies = [
 name = "taskboard"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "iced",
- "iced_drop",
- "image",
  "notify",
- "pulldown-cmark",
- "rfd",
  "taskboard-core",
+ "taskboard-ui",
  "tempfile",
 ]
 
@@ -3908,6 +3904,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskboard-ui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "iced",
+ "iced_drop",
+ "image",
+ "pulldown-cmark",
+ "rfd",
+ "taskboard-core",
+ "tempfile",
+]
+
+[[package]]
 name = "taskboard-wasm-spike"
 version = "0.1.0"
 dependencies = [
@@ -3915,12 +3925,10 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "iced",
- "iced_drop",
- "image",
  "js-sys",
  "log",
- "pulldown-cmark",
  "taskboard-core",
+ "taskboard-ui",
  "unicode-segmentation",
  "wasm-bindgen",
  "web-sys",
