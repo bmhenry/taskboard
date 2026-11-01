@@ -49,6 +49,39 @@ pub fn create_project_dir(dir: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(&dir)?)
 }
 
+/// What a typed project names; see [`resolve_project`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectInput {
+    Empty,
+    /// A project already on the board, by name or directory.
+    Known(PathBuf),
+    /// A directory that exists but has no tasks yet.
+    New(PathBuf),
+    /// A directory that doesn't exist yet; saving a task in it creates it.
+    Missing(PathBuf),
+}
+
+/// Reads a typed project: the name of a project on `board`, or a directory
+/// (normalized with [`project_path`], so `~/`, relative paths and symlinks
+/// work).
+pub fn resolve_project(board: &Board, text: &str) -> ProjectInput {
+    let text = text.trim();
+    if text.is_empty() {
+        return ProjectInput::Empty;
+    }
+    if let Some((p, _)) = board.project_names().into_iter().find(|(_, n)| n == text) {
+        return ProjectInput::Known(p.path.clone());
+    }
+    let path = project_path(Path::new(text));
+    if board.project(&path).is_some() {
+        ProjectInput::Known(path)
+    } else if path.is_dir() {
+        ProjectInput::New(path)
+    } else {
+        ProjectInput::Missing(path)
+    }
+}
+
 /// Handle on the directory holding every project's tasks.
 ///
 /// Readers never lock: writes replace `tasks.json` with an atomic rename, so a
@@ -177,11 +210,15 @@ impl Store {
 
     /// Stores `bytes` as a file named `name` and attaches it to task `id`,
     /// like [`Store::attach`] for a file that isn't on this machine (e.g. an
-    /// upload). `name` must be a plain file name, not a path.
+    /// upload). `name` must be a plain file name: not a path, blank, `.` or
+    /// `..`, and without `:`, `\\` or control characters.
     pub fn attach_bytes(&self, id: Ulid, name: &str, bytes: &[u8]) -> Result<Attachment> {
         let plain = Path::new(name).file_name().and_then(|n| n.to_str()) == Some(name);
-        if !plain || name.contains('\\') {
-            return Err(Error::Invalid(format!("bad file name: {name}")));
+        let bad_char = name
+            .chars()
+            .any(|c| matches!(c, ':' | '\\') || c.is_control());
+        if !plain || bad_char || name.trim().is_empty() {
+            return Err(Error::Invalid(format!("bad file name: {name:?}")));
         }
         self.add_file(id, name.to_string(), |dest| fs::write(dest, bytes))
     }

@@ -2,6 +2,10 @@
 //! and [`execute`], which applies one and runs the user's hooks. The desktop
 //! app and the web daemon both run commands through here, so they behave the
 //! same.
+//!
+//! On the wire every enum here is internally tagged with a snake_case
+//! `"type"` field, e.g. `{"type": "move", "id": "…", "status": "closed"}`,
+//! and file contents are base64 strings.
 
 use std::path::{Path, PathBuf};
 
@@ -9,63 +13,56 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::board::{NewTask, TaskPatch};
-use crate::hooks::{self, Hook, TaskEvent};
-use crate::model::{Attachment, Link, LinkKind, Status};
-use crate::settings::NewTaskPosition;
-use crate::store::{Store, create_project_dir, project_path};
+use crate::hooks::{self, TaskEvent};
+use crate::model::{Attachment, Board, Link, LinkKind, Status};
+use crate::settings::{GlobalSettings, NewTaskPosition};
+use crate::store::{ProjectInput, Store, create_project_dir, project_path, resolve_project};
 use crate::{Error, Result};
 
 /// A change to the store.
 ///
 /// Paths are on the machine that runs [`execute`]: for the web UI, the
-/// daemon's, not the browser's.
+/// daemon's, not the browser's. Commands that read files from that machine
+/// are trusted, local-only operations; see [`Command::is_remote_safe`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     /// Adds a task with its links, then attaches its files. A file that
     /// can't be attached doesn't undo the task; see
     /// [`Outcome::attach_failures`].
     Create {
         title: String,
-        /// The project's absolute directory.
-        project: PathBuf,
-        /// Create `project`'s directory first (the task's title is checked
-        /// before, so a bad one leaves no directory behind).
-        #[serde(default)]
-        create_project_dir: bool,
+        /// The project as typed: a project's name or a directory, which is
+        /// created if it doesn't exist; see [`resolve_project`].
+        project: String,
         #[serde(default)]
         description: String,
-        #[serde(default)]
         status: Option<Status>,
         #[serde(default)]
         links: Vec<Link>,
+        /// Files to attach. [`FileSource::Path`] reads a file on the machine
+        /// running [`execute`], so it's only for trusted, local callers.
         #[serde(default)]
         files: Vec<FileSource>,
-        #[serde(default)]
-        position: NewTaskPosition,
+        /// Top or bottom of the column; `None` uses
+        /// [`GlobalSettings::new_task_position`].
+        position: Option<NewTaskPosition>,
         #[serde(default)]
         epic: bool,
-        #[serde(default)]
         parent: Option<Ulid>,
     },
     /// Changes a task's title, project or description; `None` leaves one alone.
     Edit {
         id: Ulid,
-        #[serde(default)]
         title: Option<String>,
-        #[serde(default)]
-        project: Option<PathBuf>,
-        /// Create `project`'s directory first, as for [`Command::Create`].
-        #[serde(default)]
-        create_project_dir: bool,
-        #[serde(default)]
+        /// The project as typed, as for [`Command::Create`].
+        project: Option<String>,
         description: Option<String>,
     },
     /// Moves a task to `position` in `status`'s column (its end if `None`).
     Move {
         id: Ulid,
         status: Status,
-        #[serde(default)]
         position: Option<usize>,
     },
     /// Deletes a task and its files.
@@ -97,6 +94,8 @@ pub enum Command {
         task: Ulid,
         index: usize,
     },
+    /// Attaches a file. [`FileSource::Path`] reads a file on the machine
+    /// running [`execute`], so it's only for trusted, local callers.
     Attach {
         task: Ulid,
         source: FileSource,
@@ -118,33 +117,54 @@ pub enum Command {
         text: String,
     },
     /// Points a project and its tasks at the directory typed in `to`
-    /// (`~/` is expanded), which must exist.
+    /// (normalized with [`project_path`]), which must exist.
     RelocateProject {
         from: PathBuf,
         to: String,
     },
-    /// Deletes a project with all its tasks and their files.
+    /// Deletes a project with all its tasks and the store's copies of their
+    /// files, which can't be undone. It removes nothing outside the store:
+    /// the project's own directory is left alone.
     DeleteProject {
         path: PathBuf,
     },
 }
 
+impl Command {
+    /// Whether the command is safe to take from a remote client: it doesn't
+    /// read files from the machine running [`execute`] (no
+    /// [`FileSource::Path`]). The web daemon refuses the rest.
+    pub fn is_remote_safe(&self) -> bool {
+        match self {
+            Command::Create { files, .. } => files.iter().all(FileSource::is_remote_safe),
+            Command::Attach { source, .. } => source.is_remote_safe(),
+            _ => true,
+        }
+    }
+}
+
 /// Where a file to attach comes from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileSource {
     /// A file on the machine running [`execute`], copied into the store.
-    Path(PathBuf),
-    /// A file's contents, e.g. a browser upload. `name` must be a plain file
-    /// name, not a path.
-    Bytes { name: String, bytes: Vec<u8> },
+    /// Trusted, local callers only: a remote client could use it to read any
+    /// file the daemon can.
+    Path { path: PathBuf },
+    /// A file's contents, e.g. a browser upload; base64 on the wire. `name`
+    /// must be a plain file name; see [`Store::attach_bytes`].
+    Bytes {
+        name: String,
+        #[serde(with = "base64_bytes")]
+        bytes: Vec<u8>,
+    },
 }
 
 impl FileSource {
     /// The name the file is shown by.
     pub fn name(&self) -> String {
         match self {
-            FileSource::Path(path) => path
+            FileSource::Path { path } => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string()),
@@ -152,9 +172,14 @@ impl FileSource {
         }
     }
 
+    /// See [`Command::is_remote_safe`].
+    pub fn is_remote_safe(&self) -> bool {
+        matches!(self, FileSource::Bytes { .. })
+    }
+
     fn attach(&self, store: &Store, task: Ulid) -> Result<Attachment> {
         match self {
-            FileSource::Path(path) => store.attach(task, path),
+            FileSource::Path { path } => store.attach(task, path),
             FileSource::Bytes { name, bytes } => store.attach_bytes(task, name, bytes),
         }
     }
@@ -162,21 +187,30 @@ impl FileSource {
 
 /// What a command produced, beyond the change to the board.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Output {
     Done,
-    /// The new task's ID, from [`Command::Create`].
-    Created(Ulid),
+    /// The new task, from [`Command::Create`].
+    Created {
+        id: Ulid,
+    },
     /// The file added by [`Command::Attach`] or [`Command::NewFile`].
-    File(Attachment),
+    File {
+        file: Attachment,
+    },
     /// The project's new directory, from [`Command::RelocateProject`].
-    Relocated(PathBuf),
+    Relocated {
+        path: PathBuf,
+    },
     /// How many tasks [`Command::DeleteProject`] deleted.
-    ProjectDeleted(usize),
+    ProjectDeleted {
+        tasks: usize,
+    },
 }
 
 /// The result of a command that succeeded.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Outcome {
     pub output: Output,
     /// Tasks the command created or moved to another status; hooks were
@@ -189,15 +223,30 @@ pub struct Outcome {
     pub attach_failures: Vec<String>,
 }
 
-/// Applies `command` to the store, then starts the `hooks` matching what it
-/// did. If it fails, the board is left as it was and no hooks run.
-pub fn execute(store: &Store, hooks: &[Hook], command: Command) -> Result<Outcome> {
+impl Outcome {
+    /// What to show the user about hooks that didn't start and files that
+    /// weren't attached, if anything.
+    pub fn message(&self) -> Option<String> {
+        let mut parts = self.hook_failures.clone();
+        if !self.attach_failures.is_empty() {
+            parts.push(format!(
+                "Couldn't attach: {}",
+                self.attach_failures.join(", ")
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+/// Applies `command` to the store, then starts the hooks in `settings`
+/// matching what it did. If it fails, the store is left as it was (a
+/// project directory it created is removed again) and no hooks run.
+pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Result<Outcome> {
     let mut attach_failures = Vec::new();
     let (output, events) = match command {
         Command::Create {
             title,
             project,
-            create_project_dir: create_dir,
             description,
             status,
             links,
@@ -206,90 +255,114 @@ pub fn execute(store: &Store, hooks: &[Hook], command: Command) -> Result<Outcom
             epic,
             parent,
         } => {
-            // Checked before the project, so a bad title doesn't leave
-            // behind a newly created directory.
-            check_title(&title)?;
-            let project = project_dir(project, create_dir)?;
-            let new = NewTask {
-                title,
-                project,
-                description,
-                status,
-                links,
-                position,
-                epic,
-                parent,
-            };
-            let (id, events) = store.update_with_events(|b| b.create(new))?;
+            let position = position.unwrap_or(settings.new_task_position);
+            let mut made = MadeDirs::default();
+            let res = store.update_with_events(|b| {
+                // Checked before the project, so a bad title doesn't leave
+                // behind a newly created directory.
+                check_title(&title)?;
+                let project = task_project(b, &project, &mut made)?;
+                b.create(NewTask {
+                    title,
+                    project,
+                    description,
+                    status,
+                    links,
+                    position,
+                    epic,
+                    parent,
+                })
+            });
+            let (id, events) = made.keep_if(res)?;
             // Hooks run once the files are attached, so they see the whole task.
             for file in &files {
                 if let Err(e) = file.attach(store, id) {
                     attach_failures.push(format!("{} ({e})", file.name()));
                 }
             }
-            (Output::Created(id), events)
+            (Output::Created { id }, events)
         }
         Command::Edit {
             id,
             title,
             project,
-            create_project_dir: create_dir,
             description,
         } => {
-            if let Some(title) = &title {
-                check_title(title)?;
-            }
-            let project = project.map(|p| project_dir(p, create_dir)).transpose()?;
-            let patch = TaskPatch {
-                title,
-                project,
-                description,
-                ..Default::default()
-            };
-            done(store.update_with_events(|b| b.edit(id, patch))?)
+            let mut made = MadeDirs::default();
+            let res = store.update(|b| {
+                if let Some(title) = &title {
+                    check_title(title)?;
+                }
+                let project = match project {
+                    Some(text) => Some(task_project(b, &text, &mut made)?),
+                    None => None,
+                };
+                b.edit(
+                    id,
+                    TaskPatch {
+                        title,
+                        project,
+                        description,
+                        ..Default::default()
+                    },
+                )
+            });
+            made.keep_if(res)?;
+            no_events(Output::Done)
         }
         Command::Move {
             id,
             status,
             position,
-        } => done(store.update_with_events(|b| b.move_to(id, status, position))?),
+        } => {
+            let ((), events) = store.update_with_events(|b| b.move_to(id, status, position))?;
+            (Output::Done, events)
+        }
         Command::Delete { id } => {
             store.delete(id)?;
-            (Output::Done, Vec::new())
+            no_events(Output::Done)
         }
-        Command::Promote { id } => done(store.update_with_events(|b| b.promote(id))?),
-        Command::Demote { id } => done(store.update_with_events(|b| b.demote(id))?),
+        Command::Promote { id } => {
+            store.update(|b| b.promote(id))?;
+            no_events(Output::Done)
+        }
+        Command::Demote { id } => {
+            store.update(|b| b.demote(id))?;
+            no_events(Output::Done)
+        }
         Command::SetParent { id, parent } => {
-            done(store.update_with_events(|b| b.set_parent(id, parent))?)
+            store.update(|b| b.set_parent(id, parent))?;
+            no_events(Output::Done)
         }
         Command::AddLink { task, url, kind } => {
             let url = url.trim().to_string();
-            if url.is_empty() {
-                (Output::Done, Vec::new())
-            } else {
+            if !url.is_empty() {
                 let link = Link {
                     url,
                     label: None,
                     kind,
                 };
-                done(store.update_with_events(|b| b.add_link(task, link))?)
+                store.update(|b| b.add_link(task, link))?;
             }
+            no_events(Output::Done)
         }
         Command::RemoveLink { task, index } => {
-            let (_, events) = store.update_with_events(|b| b.remove_link(task, index))?;
-            (Output::Done, events)
+            store.update(|b| b.remove_link(task, index))?;
+            no_events(Output::Done)
         }
-        Command::Attach { task, source } => (Output::File(source.attach(store, task)?), Vec::new()),
+        Command::Attach { task, source } => no_events(Output::File {
+            file: source.attach(store, task)?,
+        }),
         Command::Detach { task, file } => {
             store.detach(task, file)?;
-            (Output::Done, Vec::new())
+            no_events(Output::Done)
         }
-        Command::NewFile { task, name } => {
-            (Output::File(store.create_file(task, &name)?), Vec::new())
-        }
+        Command::NewFile { task, name } => no_events(Output::File {
+            file: store.create_file(task, &name)?,
+        }),
         Command::WriteFile { task, file, text } => {
             store.write_file(task, file, text.as_bytes())?;
-            (Output::Done, Vec::new())
+            no_events(Output::Done)
         }
         Command::RelocateProject { from, to } => {
             let to = to.trim();
@@ -300,16 +373,15 @@ pub fn execute(store: &Store, hooks: &[Hook], command: Command) -> Result<Outcom
             if !to.is_dir() {
                 return Err(Error::Invalid(format!("no folder at {}", to.display())));
             }
-            let ((), events) =
-                store.update_with_events(|b| b.relocate_project(&from, to.clone()))?;
-            (Output::Relocated(to), events)
+            store.update(|b| b.relocate_project(&from, to.clone()))?;
+            no_events(Output::Relocated { path: to })
         }
         Command::DeleteProject { path } => {
-            let deleted = store.delete_project(&path)?;
-            (Output::ProjectDeleted(deleted), Vec::new())
+            let tasks = store.delete_project(&path)?;
+            no_events(Output::ProjectDeleted { tasks })
         }
     };
-    let hook_failures = hooks::run(hooks, &events);
+    let hook_failures = hooks::run(&settings.hooks, &events);
     Ok(Outcome {
         output,
         events,
@@ -318,8 +390,8 @@ pub fn execute(store: &Store, hooks: &[Hook], command: Command) -> Result<Outcom
     })
 }
 
-fn done(((), events): ((), Vec<TaskEvent>)) -> (Output, Vec<TaskEvent>) {
-    (Output::Done, events)
+fn no_events(output: Output) -> (Output, Vec<TaskEvent>) {
+    (output, Vec::new())
 }
 
 fn check_title(title: &str) -> Result<()> {
@@ -329,11 +401,55 @@ fn check_title(title: &str) -> Result<()> {
     Ok(())
 }
 
-fn project_dir(project: PathBuf, create: bool) -> Result<PathBuf> {
-    if create {
-        create_project_dir(&project)
-    } else {
-        Ok(project)
+/// The directory of the project typed in `text`, creating it if it doesn't
+/// exist and recording what was created in `made`.
+fn task_project(board: &Board, text: &str, made: &mut MadeDirs) -> Result<PathBuf> {
+    match resolve_project(board, text) {
+        ProjectInput::Empty => Err(Error::Invalid("choose a project for the task".into())),
+        ProjectInput::Known(path) | ProjectInput::New(path) => Ok(path),
+        ProjectInput::Missing(path) => {
+            // Deepest first, so they can be removed in order.
+            made.0 = path
+                .ancestors()
+                .take_while(|dir| !dir.exists())
+                .map(Path::to_path_buf)
+                .collect();
+            create_project_dir(&path)
+        }
+    }
+}
+
+/// Directories a command created for a new project, removed again if the
+/// command fails.
+#[derive(Default)]
+struct MadeDirs(Vec<PathBuf>);
+
+impl MadeDirs {
+    fn keep_if<T>(self, res: Result<T>) -> Result<T> {
+        if res.is_err() {
+            for dir in &self.0 {
+                // Only ever removes an empty directory.
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        res
+    }
+}
+
+/// Serializes bytes as a base64 string.
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        STANDARD.decode(text).map_err(D::Error::custom)
     }
 }
 
@@ -341,14 +457,17 @@ fn project_dir(project: PathBuf, create: bool) -> Result<PathBuf> {
 mod tests {
     use std::fs;
 
+    use serde_json::json;
+
     use super::*;
-    use crate::hooks::HookEvent;
-    use crate::model::{Board, FileKind};
+    use crate::hooks::{Hook, HookEvent};
+    use crate::model::FileKind;
 
     struct Fixture {
         dir: tempfile::TempDir,
         store: Store,
-        /// A project directory that exists.
+        settings: GlobalSettings,
+        /// A project directory that exists, canonical.
         project: PathBuf,
     }
 
@@ -358,22 +477,28 @@ mod tests {
         let project = dir.path().join("proj");
         fs::create_dir(&project).unwrap();
         Fixture {
-            dir,
             store,
-            project,
+            settings: GlobalSettings::default(),
+            project: fs::canonicalize(project).unwrap(),
+            dir,
         }
     }
 
     impl Fixture {
         fn run(&self, command: Command) -> Result<Outcome> {
-            execute(&self.store, &[], command)
+            execute(&self.store, &self.settings, command)
+        }
+
+        fn create_in(&self, title: &str, project: &str) -> Result<Ulid> {
+            match self.run(create(title, project))?.output {
+                Output::Created { id } => Ok(id),
+                other => panic!("expected Created, got {other:?}"),
+            }
         }
 
         fn create(&self, title: &str) -> Ulid {
-            match self.run(create(title, &self.project)).unwrap().output {
-                Output::Created(id) => id,
-                other => panic!("expected Created, got {other:?}"),
-            }
+            self.create_in(title, &self.project.display().to_string())
+                .unwrap()
         }
 
         fn board(&self) -> Board {
@@ -391,16 +516,15 @@ mod tests {
         }
     }
 
-    fn create(title: &str, project: &Path) -> Command {
+    fn create(title: &str, project: &str) -> Command {
         Command::Create {
             title: title.into(),
-            project: project.to_path_buf(),
-            create_project_dir: false,
+            project: project.into(),
             description: String::new(),
             status: None,
             links: Vec::new(),
             files: Vec::new(),
-            position: NewTaskPosition::Top,
+            position: None,
             epic: false,
             parent: None,
         }
@@ -408,8 +532,15 @@ mod tests {
 
     fn file(out: &Outcome) -> Attachment {
         match &out.output {
-            Output::File(att) => att.clone(),
+            Output::File { file } => file.clone(),
             other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    fn bytes(name: &str) -> FileSource {
+        FileSource::Bytes {
+            name: name.into(),
+            bytes: b"x".to_vec(),
         }
     }
 
@@ -426,33 +557,37 @@ mod tests {
         let out = f
             .run(Command::Create {
                 title: " first ".into(),
-                project: f.project.clone(),
-                create_project_dir: false,
+                project: f.project.display().to_string(),
                 description: "desc".into(),
                 status: Some(Status::Backlog),
                 links: vec![link.clone()],
                 files: vec![
-                    FileSource::Path(src),
+                    FileSource::Path { path: src },
                     FileSource::Bytes {
                         name: "shot.png".into(),
                         bytes: vec![1, 2, 3],
                     },
-                    FileSource::Path(f.dir.path().join("gone.txt")),
+                    FileSource::Path {
+                        path: f.dir.path().join("gone.txt"),
+                    },
                 ],
-                position: NewTaskPosition::Top,
+                position: None,
                 epic: false,
                 parent: None,
             })
             .unwrap();
-        let Output::Created(id) = out.output else {
+        let Output::Created { id } = out.output else {
             panic!("{out:?}");
         };
         assert_eq!(out.attach_failures.len(), 1);
         assert!(out.attach_failures[0].starts_with("gone.txt ("));
+        let msg = out.message().unwrap();
+        assert!(msg.starts_with("Couldn't attach: gone.txt ("), "{msg}");
 
         let board = f.board();
         let task = board.get(id).unwrap();
         assert_eq!(task.title, "first");
+        assert_eq!(task.project, f.project);
         assert_eq!(task.description, "desc");
         assert_eq!(task.status, Status::Backlog);
         assert_eq!(task.links, [link]);
@@ -466,54 +601,146 @@ mod tests {
     }
 
     #[test]
-    fn create_and_edit_can_create_the_project_dir() {
-        let f = fixture();
-        let new_dir = f.dir.path().join("new/proj");
-        let mut cmd = create("t", &new_dir);
-        if let Command::Create {
-            create_project_dir, ..
-        } = &mut cmd
-        {
-            *create_project_dir = true;
-        }
-        let id = match f.run(cmd).unwrap().output {
-            Output::Created(id) => id,
-            other => panic!("{other:?}"),
+    fn new_tasks_follow_the_position_setting_unless_given_one() {
+        let mut f = fixture();
+        let first = f.create("first");
+        let column = |f: &Fixture| -> Vec<Ulid> {
+            f.board()
+                .column(Status::Open)
+                .iter()
+                .map(|t| t.id)
+                .collect()
         };
+        let top = f.create("top");
+        assert_eq!(column(&f), [top, first]);
+
+        f.settings.new_task_position = NewTaskPosition::Bottom;
+        let bottom = f.create("bottom");
+        assert_eq!(column(&f), [top, first, bottom]);
+
+        let mut cmd = create("explicit top", &f.project.display().to_string());
+        if let Command::Create { position, .. } = &mut cmd {
+            *position = Some(NewTaskPosition::Top);
+        }
+        let Output::Created { id } = f.run(cmd).unwrap().output else {
+            panic!();
+        };
+        assert_eq!(column(&f), [id, top, first, bottom]);
+    }
+
+    #[test]
+    fn projects_are_resolved_like_the_editor_does() {
+        let f = fixture();
+        let a = f.create("a");
+
+        // By name.
+        let by_name = f.create_in("b", "proj").unwrap();
+        assert_eq!(f.board().get(by_name).unwrap().project, f.project);
+
+        // Through a symlink, stored as the real directory.
+        let link = f.dir.path().join("link");
+        std::os::unix::fs::symlink(&f.project, &link).unwrap();
+        let linked = f.create_in("c", &link.display().to_string()).unwrap();
+        assert_eq!(f.board().get(linked).unwrap().project, f.project);
+
+        // A relative path is taken from the current directory, whatever it is.
+        let rel = f.create_in("d", "./").unwrap();
+        assert_eq!(
+            f.board().get(rel).unwrap().project,
+            fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
+        );
+
+        // A blank project is refused with the editor's message.
+        for blank in ["", "  "] {
+            let err = f.create_in("e", blank).unwrap_err();
+            assert_eq!(err.to_string(), "choose a project for the task");
+            let err = f
+                .run(Command::Edit {
+                    id: a,
+                    title: None,
+                    project: Some(blank.into()),
+                    description: None,
+                })
+                .unwrap_err();
+            assert_eq!(err.to_string(), "choose a project for the task");
+        }
+
+        // A missing directory is created, nested ones included.
+        let new_dir = f.dir.path().join("new/nested");
+        let id = f
+            .create_in("f", &format!(" {} ", new_dir.display()))
+            .unwrap();
         assert!(new_dir.is_dir());
-        assert_eq!(f.board().get(id).unwrap().project, new_dir);
+        assert_eq!(
+            f.board().get(id).unwrap().project,
+            fs::canonicalize(&new_dir).unwrap()
+        );
 
         let other = f.dir.path().join("other");
         f.run(Command::Edit {
-            id,
+            id: a,
             title: Some("renamed".into()),
-            project: Some(other.clone()),
-            create_project_dir: true,
+            project: Some(other.display().to_string()),
             description: Some("d".into()),
         })
         .unwrap();
         let board = f.board();
-        let task = board.get(id).unwrap();
-        assert!(other.is_dir());
+        let task = board.get(a).unwrap();
         assert_eq!(
             (
                 task.title.as_str(),
                 &task.project,
                 task.description.as_str()
             ),
-            ("renamed", &other, "d")
+            ("renamed", &fs::canonicalize(&other).unwrap(), "d")
         );
 
         // Fields left as None are kept.
         f.run(Command::Edit {
-            id,
+            id: a,
             title: None,
             project: None,
-            create_project_dir: false,
             description: Some("e".into()),
         })
         .unwrap();
-        assert_eq!(f.board().get(id).unwrap().title, "renamed");
+        assert_eq!(f.board().get(a).unwrap().title, "renamed");
+    }
+
+    #[test]
+    fn a_failed_command_removes_the_project_dir_it_created() {
+        let f = fixture();
+        let not_epic = f.create("not an epic");
+        let tasks_json = fs::read(f.store.tasks_path()).unwrap();
+        let top = f.dir.path().join("made");
+        let new_dir = top.join("a/b");
+        let typed = new_dir.display().to_string();
+
+        // The board refuses the task only after the directory was made.
+        let mut bad_parent = create("child", &typed);
+        if let Command::Create { parent, .. } = &mut bad_parent {
+            *parent = Some(not_epic);
+        }
+        let bad_edit = Command::Edit {
+            id: Ulid::generate(),
+            title: None,
+            project: Some(typed.clone()),
+            description: None,
+        };
+        for cmd in [bad_parent, bad_edit] {
+            let desc = format!("{cmd:?}");
+            assert!(f.run(cmd).is_err(), "{desc}");
+            assert!(!top.exists(), "{desc}");
+            assert_eq!(fs::read(f.store.tasks_path()).unwrap(), tasks_json);
+        }
+
+        // A directory that was already there is kept.
+        fs::create_dir_all(&top).unwrap();
+        let mut bad_parent = create("child", &typed);
+        if let Command::Create { parent, .. } = &mut bad_parent {
+            *parent = Some(not_epic);
+        }
+        assert!(f.run(bad_parent).is_err());
+        assert!(top.is_dir() && !top.join("a").exists());
     }
 
     #[test]
@@ -550,10 +777,7 @@ mod tests {
         let att = file(
             &f.run(Command::Attach {
                 task: b,
-                source: FileSource::Bytes {
-                    name: "x.txt".into(),
-                    bytes: b"x".to_vec(),
-                },
+                source: bytes("x.txt"),
             })
             .unwrap(),
         );
@@ -600,17 +824,14 @@ mod tests {
         let from_path = file(
             &f.run(Command::Attach {
                 task: id,
-                source: FileSource::Path(src),
+                source: FileSource::Path { path: src },
             })
             .unwrap(),
         );
         let from_bytes = file(
             &f.run(Command::Attach {
                 task: id,
-                source: FileSource::Bytes {
-                    name: "b.json".into(),
-                    bytes: b"{}".to_vec(),
-                },
+                source: bytes("b.json"),
             })
             .unwrap(),
         );
@@ -657,6 +878,22 @@ mod tests {
     }
 
     #[test]
+    fn attach_bytes_takes_only_plain_file_names() {
+        let f = fixture();
+        let id = f.create("t");
+        for bad in [
+            "", " ", ".", "..", "a/b", "/a", "a/", "a\\b", "a:b", "a\nb", "a\0b", "a\u{7f}",
+        ] {
+            assert!(f.store.attach_bytes(id, bad, b"x").is_err(), "{bad:?}");
+        }
+        assert!(f.stored_files().is_empty());
+        for good in ["a.txt", ".env", "with space.md", "ünï.txt"] {
+            let att = f.store.attach_bytes(id, good, b"x").unwrap();
+            assert_eq!(att.name, good);
+        }
+    }
+
+    #[test]
     fn project_commands_apply() {
         let f = fixture();
         let a = f.create("a");
@@ -676,20 +913,25 @@ mod tests {
             })
             .unwrap();
         let moved = project_path(&moved);
-        assert_eq!(out.output, Output::Relocated(moved.clone()));
+        assert_eq!(
+            out.output,
+            Output::Relocated {
+                path: moved.clone()
+            }
+        );
         assert_eq!(f.board().get(a).unwrap().project, moved);
 
         let out = f.run(Command::DeleteProject { path: moved }).unwrap();
-        assert_eq!(out.output, Output::ProjectDeleted(1));
+        assert_eq!(out.output, Output::ProjectDeleted { tasks: 1 });
         assert!(f.board().tasks.is_empty());
         assert!(!f.store.file_path(&att).exists());
     }
 
     #[test]
     fn events_match_the_gui_and_start_hooks() {
-        let f = fixture();
+        let mut f = fixture();
         let log = f.dir.path().join("log");
-        let hooks: Vec<Hook> = [HookEvent::Created, HookEvent::Moved]
+        f.settings.hooks = [HookEvent::Created, HookEvent::Moved]
             .into_iter()
             .map(|event| Hook {
                 event,
@@ -697,44 +939,47 @@ mod tests {
                 pass_task_id: true,
             })
             .collect();
-        let run = |cmd| execute(&f.store, &hooks, cmd).unwrap();
         let event = |event, task| TaskEvent {
             event,
             task,
             project: f.project.clone(),
         };
 
-        let out = run(create("a", &f.project));
-        let Output::Created(a) = out.output else {
+        let out = f
+            .run(create("a", &f.project.display().to_string()))
+            .unwrap();
+        let Output::Created { id: a } = out.output else {
             panic!("{out:?}");
         };
         assert_eq!(out.events, [event(HookEvent::Created, a)]);
-        assert!(out.hook_failures.is_empty());
-        let b = match run(create("b", &f.project)).output {
-            Output::Created(b) => b,
-            other => panic!("{other:?}"),
-        };
+        assert_eq!(out.message(), None);
+        let b = f.create("b");
         // Reordering within a column isn't a move.
-        let out = run(Command::Move {
-            id: b,
-            status: Status::Open,
-            position: Some(1),
-        });
+        let out = f
+            .run(Command::Move {
+                id: b,
+                status: Status::Open,
+                position: Some(1),
+            })
+            .unwrap();
         assert!(out.events.is_empty());
-        let out = run(Command::Move {
-            id: a,
-            status: Status::Closed,
-            position: None,
-        });
+        let out = f
+            .run(Command::Move {
+                id: a,
+                status: Status::Closed,
+                position: None,
+            })
+            .unwrap();
         assert_eq!(out.events, [event(HookEvent::Moved, a)]);
         // Nothing else produces events.
-        let out = run(Command::Edit {
-            id: b,
-            title: Some("bb".into()),
-            project: None,
-            create_project_dir: false,
-            description: None,
-        });
+        let out = f
+            .run(Command::Edit {
+                id: b,
+                title: Some("bb".into()),
+                project: None,
+                description: None,
+            })
+            .unwrap();
         assert!(out.events.is_empty());
 
         // Hooks run concurrently, so compare the lines in any order.
@@ -760,18 +1005,28 @@ mod tests {
         assert_eq!(got, want);
 
         // A hook that can't start is reported, and the command still succeeds.
-        let broken = [Hook {
+        f.settings.hooks = vec![Hook {
             event: HookEvent::Created,
             command: "/nonexistent/hook".into(),
             pass_task_id: false,
         }];
-        let out = execute(&f.store, &broken, create("c", &f.project)).unwrap();
+        let mut cmd = create("c", &f.project.display().to_string());
+        if let Command::Create { files, .. } = &mut cmd {
+            files.push(bytes("../bad"));
+        }
+        let out = f.run(cmd).unwrap();
         assert_eq!(out.hook_failures.len(), 1);
+        let msg = out.message().unwrap();
+        assert!(
+            msg.starts_with("Hook `/nonexistent/hook` failed to start: ")
+                && msg.contains("; Couldn't attach: ../bad ("),
+            "{msg}"
+        );
     }
 
     #[test]
     fn errors_leave_the_store_unchanged() {
-        let f = fixture();
+        let mut f = fixture();
         let a = f.create("a");
         let epic = f.create("epic");
         f.run(Command::Promote { id: epic }).unwrap();
@@ -796,55 +1051,40 @@ mod tests {
 
         let missing = Ulid::generate();
         let new_dir = f.dir.path().join("never");
+        let typed_new = new_dir.display().to_string();
         let log = f.dir.path().join("log");
-        let hooks = [HookEvent::Created, HookEvent::Moved].map(|event| Hook {
-            event,
-            command: format!("sh -c 'echo ran >> {}'", log.display()),
-            pass_task_id: false,
-        });
+        f.settings.hooks = [HookEvent::Created, HookEvent::Moved]
+            .map(|event| Hook {
+                event,
+                command: format!("sh -c 'echo ran >> {}'", log.display()),
+                pass_task_id: false,
+            })
+            .to_vec();
         let tasks_json = fs::read(f.store.tasks_path()).unwrap();
         let files = f.stored_files();
 
+        let mut blank_title = create(" ", &typed_new);
+        if let Command::Create { files, .. } = &mut blank_title {
+            files.push(bytes("x.txt"));
+        }
+        let mut child_of_task = create("child", &f.project.display().to_string());
+        if let Command::Create { parent, .. } = &mut child_of_task {
+            *parent = Some(a);
+        }
         let failing = [
-            Command::Create {
-                title: " ".into(),
-                project: new_dir.clone(),
-                create_project_dir: true,
-                description: String::new(),
-                status: None,
-                links: Vec::new(),
-                files: vec![FileSource::Bytes {
-                    name: "x.txt".into(),
-                    bytes: b"x".to_vec(),
-                }],
-                position: NewTaskPosition::Top,
-                epic: false,
-                parent: None,
-            },
-            Command::Create {
-                title: "child of a non-epic".into(),
-                project: f.project.clone(),
-                create_project_dir: false,
-                description: String::new(),
-                status: None,
-                links: Vec::new(),
-                files: Vec::new(),
-                position: NewTaskPosition::Top,
-                epic: false,
-                parent: Some(a),
-            },
+            blank_title,
+            child_of_task,
+            create("no project", " "),
             Command::Edit {
                 id: a,
                 title: Some("".into()),
-                project: Some(new_dir.clone()),
-                create_project_dir: true,
+                project: Some(typed_new.clone()),
                 description: None,
             },
             Command::Edit {
                 id: missing,
                 title: Some("x".into()),
                 project: None,
-                create_project_dir: false,
                 description: None,
             },
             Command::Move {
@@ -867,21 +1107,17 @@ mod tests {
             Command::RemoveLink { task: a, index: 0 },
             Command::Attach {
                 task: missing,
-                source: FileSource::Bytes {
-                    name: "x.txt".into(),
-                    bytes: b"x".to_vec(),
-                },
+                source: bytes("x.txt"),
             },
             Command::Attach {
                 task: a,
-                source: FileSource::Bytes {
-                    name: "../x.txt".into(),
-                    bytes: b"x".to_vec(),
-                },
+                source: bytes("../x.txt"),
             },
             Command::Attach {
                 task: a,
-                source: FileSource::Path(f.dir.path().join("gone.txt")),
+                source: FileSource::Path {
+                    path: f.dir.path().join("gone.txt"),
+                },
             },
             Command::Detach {
                 task: a,
@@ -911,7 +1147,7 @@ mod tests {
             },
             Command::RelocateProject {
                 from: f.project.clone(),
-                to: new_dir.display().to_string(),
+                to: typed_new.clone(),
             },
             Command::DeleteProject {
                 path: f.dir.path().join("unknown"),
@@ -919,7 +1155,7 @@ mod tests {
         ];
         for cmd in failing {
             let desc = format!("{cmd:?}");
-            assert!(execute(&f.store, &hooks, cmd).is_err(), "{desc}");
+            assert!(f.run(cmd).is_err(), "{desc}");
             assert_eq!(
                 fs::read(f.store.tasks_path()).unwrap(),
                 tasks_json,
@@ -934,14 +1170,52 @@ mod tests {
     }
 
     #[test]
-    fn commands_round_trip_through_json() {
+    fn only_local_file_sources_are_unsafe_remotely() {
         let id = Ulid::generate();
-        let file = Ulid::generate();
-        let commands = [
+        let path = || FileSource::Path {
+            path: "/etc/passwd".into(),
+        };
+        let mut with_path = create("t", "/p");
+        if let Command::Create { files, .. } = &mut with_path {
+            files.extend([bytes("a"), path()]);
+        }
+        assert!(!with_path.is_remote_safe());
+        assert!(
+            !Command::Attach {
+                task: id,
+                source: path()
+            }
+            .is_remote_safe()
+        );
+        assert!(
+            Command::Attach {
+                task: id,
+                source: bytes("a")
+            }
+            .is_remote_safe()
+        );
+        assert!(create("t", "/p").is_remote_safe());
+        assert!(Command::DeleteProject { path: "/p".into() }.is_remote_safe());
+    }
+
+    /// Checks `value` serializes to `golden` and back.
+    fn golden<T>(value: T, golden: serde_json::Value)
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(serde_json::to_value(&value).unwrap(), golden);
+        assert_eq!(serde_json::from_value::<T>(golden).unwrap(), value);
+    }
+
+    #[test]
+    fn commands_have_a_stable_wire_shape() {
+        let id: Ulid = "01M69ST9AGGGYR0TPT2Q3SH85N".parse().unwrap();
+        let file: Ulid = "01M69ST9AGGGYR0TPT2Q3SH85P".parse().unwrap();
+        let (i, f) = (id.to_string(), file.to_string());
+        golden(
             Command::Create {
                 title: "t".into(),
-                project: "/p".into(),
-                create_project_dir: true,
+                project: "~/p".into(),
                 description: "d".into(),
                 status: Some(Status::InProgress),
                 links: vec![Link {
@@ -950,80 +1224,189 @@ mod tests {
                     kind: LinkKind::Source,
                 }],
                 files: vec![
-                    FileSource::Path("/tmp/a.md".into()),
+                    FileSource::Path {
+                        path: "/tmp/a.md".into(),
+                    },
                     FileSource::Bytes {
                         name: "b.png".into(),
-                        bytes: vec![0, 255],
+                        bytes: vec![0, 255, 1],
                     },
                 ],
-                position: NewTaskPosition::Bottom,
+                position: Some(NewTaskPosition::Bottom),
                 epic: true,
                 parent: Some(file),
             },
+            json!({
+                "type": "create", "title": "t", "project": "~/p", "description": "d",
+                "status": "in_progress",
+                "links": [{"url": "https://x", "label": "x", "kind": "source"}],
+                "files": [
+                    {"type": "path", "path": "/tmp/a.md"},
+                    {"type": "bytes", "name": "b.png", "bytes": "AP8B"},
+                ],
+                "position": "bottom", "epic": true, "parent": f,
+            }),
+        );
+        golden(
             Command::Edit {
                 id,
                 title: Some("t".into()),
                 project: None,
-                create_project_dir: false,
                 description: Some(String::new()),
             },
+            json!({"type": "edit", "id": i, "title": "t", "project": null, "description": ""}),
+        );
+        golden(
             Command::Move {
                 id,
                 status: Status::Closed,
                 position: Some(2),
             },
-            Command::Delete { id },
-            Command::Promote { id },
-            Command::Demote { id },
+            json!({"type": "move", "id": i, "status": "closed", "position": 2}),
+        );
+        golden(Command::Delete { id }, json!({"type": "delete", "id": i}));
+        golden(Command::Promote { id }, json!({"type": "promote", "id": i}));
+        golden(Command::Demote { id }, json!({"type": "demote", "id": i}));
+        golden(
             Command::SetParent { id, parent: None },
+            json!({"type": "set_parent", "id": i, "parent": null}),
+        );
+        golden(
             Command::AddLink {
                 task: id,
                 url: "u".into(),
-                kind: LinkKind::Source,
+                kind: LinkKind::Context,
             },
+            json!({"type": "add_link", "task": i, "url": "u", "kind": "context"}),
+        );
+        golden(
             Command::RemoveLink { task: id, index: 3 },
+            json!({"type": "remove_link", "task": i, "index": 3}),
+        );
+        golden(
             Command::Attach {
                 task: id,
-                source: FileSource::Path("/a".into()),
+                source: FileSource::Bytes {
+                    name: "a.txt".into(),
+                    bytes: b"hi".to_vec(),
+                },
             },
+            json!({"type": "attach", "task": i,
+                   "source": {"type": "bytes", "name": "a.txt", "bytes": "aGk="}}),
+        );
+        golden(
             Command::Detach { task: id, file },
+            json!({"type": "detach", "task": i, "file": f}),
+        );
+        golden(
             Command::NewFile {
                 task: id,
                 name: "n".into(),
             },
+            json!({"type": "new_file", "task": i, "name": "n"}),
+        );
+        golden(
             Command::WriteFile {
                 task: id,
                 file,
                 text: "x".into(),
             },
+            json!({"type": "write_file", "task": i, "file": f, "text": "x"}),
+        );
+        golden(
             Command::RelocateProject {
                 from: "/a".into(),
                 to: "~/b".into(),
             },
+            json!({"type": "relocate_project", "from": "/a", "to": "~/b"}),
+        );
+        golden(
             Command::DeleteProject { path: "/a".into() },
-        ];
-        for cmd in commands {
-            let json = serde_json::to_string(&cmd).unwrap();
-            let back: Command = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, cmd, "{json}");
+            json!({"type": "delete_project", "path": "/a"}),
+        );
+
+        // Optional fields can be left out...
+        let cmd: Command =
+            serde_json::from_value(json!({"type": "create", "title": "t", "project": "/p"}))
+                .unwrap();
+        assert_eq!(cmd, create("t", "/p"));
+        let cmd: Command = serde_json::from_value(json!({"type": "edit", "id": i})).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Edit {
+                id,
+                title: None,
+                project: None,
+                description: None
+            }
+        );
+        // ...but unknown ones and bad base64 are refused.
+        for bad in [
+            json!({"type": "delete", "id": i, "force": true}),
+            json!({"type": "create", "title": "t", "project": "/p", "postion": "top"}),
+            json!({"type": "attach", "task": i,
+                   "source": {"type": "bytes", "name": "a", "bytes": "aGk=", "x": 1}}),
+            json!({"type": "attach", "task": i,
+                   "source": {"type": "bytes", "name": "a", "bytes": "not base64!"}}),
+            json!({"type": "nope"}),
+        ] {
+            assert!(
+                serde_json::from_value::<Command>(bad.clone()).is_err(),
+                "{bad}"
+            );
         }
+    }
 
-        // Optional fields can be left out.
-        let json = r#"{"op": "create", "title": "t", "project": "/p"}"#;
-        let cmd: Command = serde_json::from_str(json).unwrap();
-        assert_eq!(cmd, create("t", Path::new("/p")));
-
-        let outcome = Outcome {
-            output: Output::Created(id),
-            events: vec![TaskEvent {
-                event: crate::HookEvent::Created,
-                task: id,
-                project: "/p".into(),
-            }],
-            hook_failures: vec!["h".into()],
-            attach_failures: Vec::new(),
-        };
-        let json = serde_json::to_string(&outcome).unwrap();
-        assert_eq!(serde_json::from_str::<Outcome>(&json).unwrap(), outcome);
+    #[test]
+    fn outcomes_have_a_stable_wire_shape() {
+        let id: Ulid = "01M69ST9AGGGYR0TPT2Q3SH85N".parse().unwrap();
+        let i = id.to_string();
+        golden(Output::Done, json!({"type": "done"}));
+        golden(Output::Created { id }, json!({"type": "created", "id": i}));
+        golden(
+            Output::File {
+                file: Attachment {
+                    id,
+                    name: "a.md".into(),
+                    kind: FileKind::Markdown,
+                    path: format!("files/{id}.md"),
+                },
+            },
+            json!({"type": "file", "file": {
+                "id": i, "name": "a.md", "kind": "markdown", "path": format!("files/{i}.md"),
+            }}),
+        );
+        golden(
+            Output::Relocated { path: "/b".into() },
+            json!({"type": "relocated", "path": "/b"}),
+        );
+        golden(
+            Output::ProjectDeleted { tasks: 2 },
+            json!({"type": "project_deleted", "tasks": 2}),
+        );
+        golden(
+            Outcome {
+                output: Output::Created { id },
+                events: vec![TaskEvent {
+                    event: HookEvent::Created,
+                    task: id,
+                    project: "/p".into(),
+                }],
+                hook_failures: vec!["h".into()],
+                attach_failures: Vec::new(),
+            },
+            json!({
+                "output": {"type": "created", "id": i},
+                "events": [{"event": "created", "task": i, "project": "/p"}],
+                "hook_failures": ["h"],
+                "attach_failures": [],
+            }),
+        );
+        // serde enforces deny_unknown_fields on struct variants only; the unit
+        // variant `Done` ignores extra fields.
+        assert!(
+            serde_json::from_value::<Output>(json!({"type": "created", "id": i, "x": 1})).is_err()
+        );
+        assert!(serde_json::from_value::<Output>(json!({"type": "done", "x": 1})).is_ok());
     }
 }
