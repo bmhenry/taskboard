@@ -30,7 +30,7 @@ const PASS_ID_HELP: &[(&str, bool)] = &[
 
 pub fn settings(gui: &Gui, window: Size) -> El<'_> {
     let (app, p, ui) = (&gui.app, gui.pal(), &gui.ui);
-    let size = app.settings.font_size;
+    let size = app.device.font_size;
     let (title, toggle) = if ui.show_keybindings {
         ("Keybindings", "⚙ Settings")
     } else {
@@ -69,7 +69,7 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
             .spacing(8)
             .align_y(Alignment::Center);
         for (theme, name) in [(Theme::Dark, "Dark"), (Theme::Light, "Light")] {
-            let style = if app.settings.theme == theme {
+            let style = if app.device.theme == theme {
                 Style::Primary
             } else {
                 Style::Normal
@@ -128,11 +128,13 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
             ("Off", Style::Normal)
         };
         body = body
-            .push(section_title(p, "Global"))
+            .push(section_title(p, "This device"))
             .push(theme_row)
             .push(size_row)
-            .push(label(p, "Ctrl+= / Ctrl+- also change the font size."));
+            .push(label(p, "Ctrl+= / Ctrl+- also change the font size."))
+            .push(saved_to(p, gui.platform.device_settings_location()));
         body = body
+            .push(section_title(p, "Global"))
             .push(
                 row![
                     setting_name("Collapse empty columns"),
@@ -156,10 +158,7 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
                 "Where a new task lands in its column, whether made here or with tb add.",
             ));
         body = hooks_settings(gui, body);
-        body = body.push(match gui.platform.settings_location() {
-            Some(path) => path_label(p, "Saved to", &path),
-            None => label(p, "Not saved: neither XDG_CONFIG_HOME nor HOME is set."),
-        });
+        body = body.push(saved_to(p, gui.platform.settings_location()));
     }
 
     container(
@@ -180,6 +179,14 @@ pub fn settings(gui: &Gui, window: Size) -> El<'_> {
         ..theme::fill(p.panel, 10.0)
     })
     .into()
+}
+
+/// Where a group of settings is saved, from the platform.
+fn saved_to<'a>(p: Pal, location: Option<String>) -> El<'a> {
+    match location {
+        Some(path) => path_label(p, "Saved to", &path),
+        None => label(p, "Not saved: neither XDG_CONFIG_HOME nor HOME is set."),
+    }
 }
 
 fn setting_name(name: &str) -> El<'_> {

@@ -701,7 +701,10 @@ fn project_field(gui: &Gui) -> El<'_> {
             let name = app.board.project_name(&path);
             path_label(p, &format!("{name} ·"), &path.display().to_string())
         }
-        ProjectInput::New(path) => path_label(p, "New project:", &path.display().to_string()),
+        // Until it's known whether the folder exists, it's at least new.
+        ProjectInput::New(path) | ProjectInput::Unchecked(path) => {
+            path_label(p, "New project:", &path.display().to_string())
+        }
         ProjectInput::Missing(path) => path_label(
             p,
             "New folder, created on save:",

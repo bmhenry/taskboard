@@ -1,12 +1,12 @@
 //! The desktop [`Platform`]: the task store on the local filesystem, native
 //! file dialogs, and the system's browser.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use iced::Subscription;
 use taskboard_core::ops::{self, Command, FileSource, Outcome};
-use taskboard_core::{Attachment, Board, GlobalSettings, Store, Ulid};
+use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Store, Ulid};
 use taskboard_ui::{BoxFuture, PathKind, Platform, WatchEvent};
 
 use crate::watch;
@@ -18,14 +18,21 @@ pub struct Desktop {
     settings_path: Option<PathBuf>,
     /// The settings last loaded or saved, which commands run hooks from.
     settings: Arc<Mutex<GlobalSettings>>,
+    /// Where device settings are saved; `None` keeps them in memory only.
+    device_path: Option<PathBuf>,
 }
 
 impl Desktop {
-    pub fn new(store: Store, settings_path: Option<PathBuf>) -> Desktop {
+    pub fn new(
+        store: Store,
+        settings_path: Option<PathBuf>,
+        device_path: Option<PathBuf>,
+    ) -> Desktop {
         Desktop {
             store,
             settings_path,
             settings: Arc::default(),
+            device_path,
         }
     }
 
@@ -38,6 +45,17 @@ impl Desktop {
         };
         *self.settings() = loaded.clone();
         Ok(loaded)
+    }
+
+    /// Reads device settings, as [`Platform::load_device_settings`] does
+    /// but without waiting, for starting up.
+    pub fn load_device_settings_now(&self) -> Result<DeviceSettings, String> {
+        match &self.device_path {
+            Some(path) => {
+                DeviceSettings::load(path, self.settings_path.as_deref()).map_err(|e| e.to_string())
+            }
+            None => Ok(DeviceSettings::default()),
+        }
     }
 
     fn settings(&self) -> std::sync::MutexGuard<'_, GlobalSettings> {
@@ -109,14 +127,16 @@ impl Platform for Desktop {
         cmd.arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 
-    fn path_kind(&self, path: &Path) -> BoxFuture<PathKind> {
-        let path = path.to_path_buf();
+    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
         Box::pin(async move {
-            match std::fs::metadata(path) {
-                Ok(m) if m.is_dir() => PathKind::Dir,
-                Ok(_) => PathKind::File,
-                Err(_) => PathKind::Missing,
-            }
+            paths
+                .iter()
+                .map(|path| match std::fs::metadata(path) {
+                    Ok(m) if m.is_dir() => PathKind::Dir,
+                    Ok(_) => PathKind::File,
+                    Err(_) => PathKind::Missing,
+                })
+                .collect()
         })
     }
 
@@ -139,5 +159,24 @@ impl Platform for Desktop {
 
     fn settings_location(&self) -> Option<String> {
         self.settings_path.as_ref().map(|p| p.display().to_string())
+    }
+
+    fn load_device_settings(&self) -> BoxFuture<Result<DeviceSettings, String>> {
+        let loaded = self.load_device_settings_now();
+        Box::pin(async move { loaded })
+    }
+
+    fn save_device_settings(&self, settings: DeviceSettings) -> BoxFuture<Result<(), String>> {
+        let path = self.device_path.clone();
+        Box::pin(async move {
+            match path {
+                Some(path) => settings.save(&path).map_err(|e| e.to_string()),
+                None => Ok(()),
+            }
+        })
+    }
+
+    fn device_settings_location(&self) -> Option<String> {
+        self.device_path.as_ref().map(|p| p.display().to_string())
     }
 }

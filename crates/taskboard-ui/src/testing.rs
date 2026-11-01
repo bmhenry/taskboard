@@ -2,13 +2,13 @@
 //! [`Store`], and a [`Harness`] that runs an [`App`]'s effects on it.
 
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use iced::Subscription;
 use taskboard_core::ops::{self, Command, FileSource, Outcome};
-use taskboard_core::{Attachment, Board, GlobalSettings, Store, Ulid};
+use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Store, Ulid};
 
 use crate::app::{Action, App, Effect};
 use crate::platform::{BoxFuture, PathKind, Platform, WatchEvent};
@@ -20,17 +20,26 @@ pub struct TestPlatform {
     pub settings_path: Option<PathBuf>,
     /// The settings last saved, which commands run hooks from.
     settings: Arc<Mutex<GlobalSettings>>,
+    /// Where device settings are saved; `None` keeps them in memory only.
+    pub device_path: Option<PathBuf>,
+    /// Every batch of paths asked about, oldest first.
+    pub path_checks: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     /// While set, every command fails with this error without running, as
     /// when the store can't be written or a web request is refused.
     pub failure: Arc<Mutex<Option<String>>>,
 }
 
 impl TestPlatform {
+    /// Device settings are saved in `device.json` beside `settings_path`.
     pub fn new(store: Store, settings_path: Option<PathBuf>) -> TestPlatform {
         TestPlatform {
+            device_path: settings_path
+                .as_ref()
+                .map(|p| p.with_file_name("device.json")),
             store,
             settings_path,
             settings: Arc::default(),
+            path_checks: Arc::default(),
             failure: Arc::default(),
         }
     }
@@ -75,13 +84,17 @@ impl Platform for TestPlatform {
         Ok(())
     }
 
-    fn path_kind(&self, path: &Path) -> BoxFuture<PathKind> {
-        let kind = match std::fs::metadata(path) {
-            Ok(m) if m.is_dir() => PathKind::Dir,
-            Ok(_) => PathKind::File,
-            Err(_) => PathKind::Missing,
-        };
-        Box::pin(async move { kind })
+    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
+        let kinds = paths
+            .iter()
+            .map(|path| match std::fs::metadata(path) {
+                Ok(m) if m.is_dir() => PathKind::Dir,
+                Ok(_) => PathKind::File,
+                Err(_) => PathKind::Missing,
+            })
+            .collect();
+        self.path_checks.lock().unwrap().push(paths);
+        Box::pin(async move { kinds })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {
@@ -109,6 +122,30 @@ impl Platform for TestPlatform {
     fn settings_location(&self) -> Option<String> {
         self.settings_path.as_ref().map(|p| p.display().to_string())
     }
+
+    fn load_device_settings(&self) -> BoxFuture<Result<DeviceSettings, String>> {
+        let loaded = match &self.device_path {
+            Some(path) => {
+                DeviceSettings::load(path, self.settings_path.as_deref()).map_err(|e| e.to_string())
+            }
+            None => Ok(DeviceSettings::default()),
+        };
+        Box::pin(async move { loaded })
+    }
+
+    fn save_device_settings(&self, settings: DeviceSettings) -> BoxFuture<Result<(), String>> {
+        let path = self.device_path.clone();
+        Box::pin(async move {
+            match path {
+                Some(path) => settings.save(&path).map_err(|e| e.to_string()),
+                None => Ok(()),
+            }
+        })
+    }
+
+    fn device_settings_location(&self) -> Option<String> {
+        self.device_path.as_ref().map(|p| p.display().to_string())
+    }
 }
 
 /// The output of one of [`TestPlatform`]'s futures, which never wait.
@@ -132,11 +169,14 @@ pub struct Harness {
 impl Harness {
     pub fn new(platform: TestPlatform) -> Harness {
         let settings = now(platform.load_settings());
+        let device = now(platform.load_device_settings());
         let board = now(platform.load_board());
-        Harness {
-            app: App::new(settings, board),
+        let mut harness = Harness {
+            app: App::new(settings, device, board),
             platform,
-        }
+        };
+        harness.run_effects();
+        harness
     }
 
     /// Applies `action` and runs what it queued; see [`Harness::settle`].
@@ -148,6 +188,19 @@ impl Harness {
     /// Runs the app's queued effects in order, then reloads the board, as
     /// `Gui` does.
     pub fn settle(&mut self) {
+        self.run_effects();
+        self.reload();
+    }
+
+    /// Loads the board, as when a change made elsewhere is noticed, and
+    /// runs what that queued, like checking new projects' folders.
+    pub fn reload(&mut self) {
+        self.app.loaded(now(self.platform.load_board()));
+        self.run_effects();
+    }
+
+    /// Runs the app's queued effects in order, including any they queue.
+    pub fn run_effects(&mut self) {
         while let Some(effect) = self.app.outbox.pop_front() {
             match effect {
                 Effect::Run(command) => {
@@ -158,14 +211,16 @@ impl Harness {
                     let result = now(self.platform.save_settings(settings));
                     self.app.settings_saved(result);
                 }
+                Effect::SaveDeviceSettings(settings) => {
+                    let result = now(self.platform.save_device_settings(settings));
+                    self.app.settings_saved(result);
+                }
+                Effect::CheckPaths(check) => {
+                    let kinds = now(self.platform.path_kinds(check.paths()));
+                    self.app.checked(check, kinds);
+                }
             }
         }
-        self.reload();
-    }
-
-    /// Loads the board, as when a change made elsewhere is noticed.
-    pub fn reload(&mut self) {
-        self.app.loaded(now(self.platform.load_board()));
     }
 }
 

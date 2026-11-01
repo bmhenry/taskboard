@@ -1,14 +1,15 @@
 //! The spike's [`Platform`]: commands run in the browser against the
 //! in-memory store. There's no filesystem, so attached files can't be read,
-//! nothing is watched (Phase 2 uses SSE), and settings aren't saved.
+//! every path counts as a folder, nothing is watched (Phase 2 uses SSE), and
+//! settings aren't saved.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use iced::Subscription;
 use taskboard_core::ops::{self, Command, FileSource, Outcome};
-use taskboard_core::{Attachment, Board, GlobalSettings, Store, Ulid};
+use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Store, Ulid};
 use taskboard_ui::{BoxFuture, PathKind, Platform, WatchEvent};
 
 pub struct Spike {
@@ -62,8 +63,9 @@ impl Platform for Spike {
             .map_err(|e| format!("couldn't open {url}: {e:?}"))
     }
 
-    fn path_kind(&self, _path: &Path) -> BoxFuture<PathKind> {
-        Box::pin(async { PathKind::Missing })
+    /// Folders, so the fixture's projects aren't shown as missing.
+    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
+        Box::pin(async move { vec![PathKind::Dir; paths.len()] })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {
@@ -77,6 +79,18 @@ impl Platform for Spike {
     }
 
     fn settings_location(&self) -> Option<String> {
+        None
+    }
+
+    fn load_device_settings(&self) -> BoxFuture<Result<DeviceSettings, String>> {
+        Box::pin(async { Ok(DeviceSettings::default()) })
+    }
+
+    fn save_device_settings(&self, _settings: DeviceSettings) -> BoxFuture<Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn device_settings_location(&self) -> Option<String> {
         None
     }
 }
