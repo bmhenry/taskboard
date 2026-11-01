@@ -128,16 +128,7 @@ impl Platform for Desktop {
     }
 
     fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
-        Box::pin(async move {
-            paths
-                .iter()
-                .map(|path| match std::fs::metadata(path) {
-                    Ok(m) if m.is_dir() => PathKind::Dir,
-                    Ok(_) => PathKind::File,
-                    Err(_) => PathKind::Missing,
-                })
-                .collect()
-        })
+        Box::pin(async move { paths.iter().map(|path| PathKind::of(path)).collect() })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {

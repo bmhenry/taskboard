@@ -1,7 +1,8 @@
-//! Shared core for `taskboard` (GUI) and `tb` (CLI): the task model, pure
-//! board operations, search filters, and the on-disk store shared by every
-//! project.
+//! Shared core for `taskboard` (GUI), `tb` (CLI) and `taskboard-web`
+//! (daemon): the task model, pure board operations, search filters, the
+//! on-disk store shared by every project, and the web API's types.
 
+pub mod api;
 pub mod board;
 pub mod filter;
 pub mod hooks;
@@ -9,6 +10,8 @@ pub mod model;
 pub mod ops;
 pub mod settings;
 pub mod store;
+#[cfg(feature = "watch")]
+pub mod watch;
 
 pub use board::{NewTask, Progress, TaskPatch};
 pub use filter::{DateField, Filter, parse_date};

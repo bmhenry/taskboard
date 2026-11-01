@@ -11,6 +11,11 @@ ulid.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 base64.workspace = true
+notify = { version = "8", optional = true }
+
+[features]
+# `watch`: the store watcher, for the desktop app and the web daemon.
+watch = ["dep:notify"]
 
 # ulid/rand use getrandom 0.4, which needs its JS backend in the browser
 # (wasm spike; no effect on native builds).
