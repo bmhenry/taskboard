@@ -28,7 +28,7 @@
 //! Mouse input never focuses the textarea, so desktop browsers behave as
 //! before, and the native app doesn't compile this module at all.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crate::text_diff::diff;
 use iced::advanced::layout::{self, Layout};
@@ -279,8 +279,11 @@ impl Operation for FindFocused {
 
 /// The canvas losing focus to the textarea mustn't count as the window losing
 /// focus, or iced's text widgets stop drawing their caret.
+/// While the textarea is being focused, the canvas's blur arrives before
+/// `document.activeElement` names the textarea, hence `FOCUSING`.
 fn hides_caret(event: &Event) -> bool {
-    matches!(event, Event::Window(window::Event::Unfocused)) && with_state(|s| s.is_active())
+    matches!(event, Event::Window(window::Event::Unfocused))
+        && (FOCUSING.get() || with_state(|s| s.is_active()))
 }
 
 #[derive(Clone, Copy)]
@@ -311,15 +314,19 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// Whether `install` has run, so a failure isn't retried on every event.
+    static INSTALLED: Cell<bool> = const { Cell::new(false) };
+    /// The textarea is taking the focus right now.
+    static FOCUSING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Runs `f` on the bridge state, setting it up first if the canvas exists.
+/// Runs `f` on the bridge state, setting it up on the first call.
 /// DOM calls that can fire events back into winit (focus, blur, dispatching
 /// keys) must happen outside `f`, since they re-enter the bridge.
 fn with_state<R: Default>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if slot.is_none() {
+        if !INSTALLED.replace(true) {
             *slot = install();
             log::info!("keyboard: install -> {}", slot.is_some());
         }
@@ -427,7 +434,9 @@ fn run(action: Action) {
         Action::Focus(input) => {
             let options = FocusOptions::new();
             options.set_prevent_scroll(true);
+            FOCUSING.set(true);
             let _ = input.focus_with_options(&options);
+            FOCUSING.set(false);
         }
         Action::Release(input, canvas) => {
             let _ = input.blur();

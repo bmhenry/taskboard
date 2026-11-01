@@ -40,3 +40,8 @@ web-sys = { version = "0.3", features = [
   "VisualViewport",
   "Window",
 ] }
+unicode-segmentation = "1"
+
+# src/text_diff.rs is also unit tested natively.
+[dev-dependencies]
+unicode-segmentation = "1"

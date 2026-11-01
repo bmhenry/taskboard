@@ -229,6 +229,32 @@ after a touch. It lives in this crate and patches nothing in iced.
 - Mouse pointers never focus the textarea, so desktop browsers work as
   before, and the native app doesn't compile any of this.
 
+Known limits:
+
+- The diff counts grapheme clusters, since a backspace or arrow press moves
+  over one in both the browser and iced. Insertions are replayed one `char`
+  at a time, because iced inserts only the first `char` of a key's text.
+- Edits are applied at iced's caret, which is assumed to sit where the
+  textarea's caret does (at the end of its value). If the textarea's caret
+  moves on its own (iOS's space-bar trackpad, caret handles, Gboard's cursor
+  swipe), the next edit is still replayed relative to iced's caret and moving
+  the caret itself isn't mirrored. A selection made inside the textarea isn't
+  mirrored either: typing over it is replayed as deletes and inserts at
+  iced's caret, which can remove the wrong text.
+- Focus that comes from a task rather than the tap itself (the "+" button
+  focusing the new title) is seen inside the `pointerup` today because iced
+  runs the task synchronously. Any focus that lands later is applied at the
+  next redraw, outside the gesture. Chrome on Android still opens the
+  keyboard then, because the tap's user activation hasn't expired, but iOS
+  Safari only opens it from inside the gesture, so there the field would need
+  a second tap.
+- Whether the keyboard is open is guessed from the visual viewport being
+  shorter than 85% of the window (it decides whether tapping an already
+  focused field should blur and refocus to reopen the keyboard). A floating
+  or split keyboard, or a resizes-content viewport, doesn't shrink it, so
+  there every tap in a focused field blurs and refocuses, which may flicker
+  the keyboard.
+
 Verified in headless Chrome over CDP in phone emulation (390x844, DPR 3,
 touch events from `Input.dispatchTouchEvent`). Tapping the search field, the
 new task's title and description, and the new-file popup's name field

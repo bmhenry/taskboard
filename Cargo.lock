@@ -3921,6 +3921,7 @@ dependencies = [
  "log",
  "pulldown-cmark",
  "taskboard-core",
+ "unicode-segmentation",
  "wasm-bindgen",
  "web-sys",
 ]
