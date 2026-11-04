@@ -10,61 +10,88 @@ use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::widgets::{El, btn, chip, grow, label, save_keys};
 use super::{FILE_EDITOR, Gui, Message, dialog_width};
 use crate::app::Action;
-use crate::markdown::{self, BlockKind};
+use crate::markdown::{self, Block, BlockKind};
 
 pub fn markdown<'a>(p: Pal, src: &str) -> El<'a> {
-    let blocks = markdown::parse(src).into_iter().map(|block| -> El<'a> {
-        match block.kind {
-            BlockKind::Heading(level) => {
-                let size = match level {
-                    1 => 20,
-                    2 => 17,
-                    _ => 15,
-                };
-                container(text(block.text).size(size).font(BOLD))
-                    .padding(Padding::ZERO.top(4))
-                    .into()
-            }
-            BlockKind::Paragraph => text(block.text).size(14).line_height(20.0 / 14.0).into(),
-            BlockKind::ListItem { depth, marker } => row![
-                container(text(marker).size(14).color(rgb(p.muted))).width(18),
-                container(text(block.text).size(14).line_height(20.0 / 14.0)).width(Length::Fill),
-            ]
-            .spacing(6)
-            .padding(Padding::ZERO.left(4.0 + 16.0 * depth as f32))
-            .into(),
-            BlockKind::Code => container(
-                text(block.text)
-                    .size(13)
-                    .font(MONO)
-                    .line_height(18.0 / 13.0),
-            )
+    blocks(p, markdown::parse(src))
+}
+
+fn blocks<'a>(p: Pal, blocks: Vec<Block>) -> El<'a> {
+    column(blocks.into_iter().map(|b| md_block(p, b)))
+        .spacing(10)
+        .into()
+}
+
+/// A block, with its children under it: a heading's section flush with it,
+/// a list item's indented to line up with its text, or for a sub-list,
+/// with its own marker.
+fn md_block<'a>(p: Pal, block: Block) -> El<'a> {
+    let section = matches!(block.kind, BlockKind::Heading(_));
+    let own = md_leaf(p, block.kind, block.text);
+    if block.children.is_empty() {
+        return own;
+    }
+    let children = block.children.into_iter().map(|child| -> El<'a> {
+        let indent = match child.kind {
+            _ if section => 0.0,
+            BlockKind::ListItem { .. } => 16.0,
+            _ => 28.0,
+        };
+        container(md_block(p, child))
+            .padding(Padding::ZERO.left(indent))
+            .into()
+    });
+    column![own, column(children).spacing(10)]
+        .spacing(10)
+        .into()
+}
+
+/// A block's own text, without its children.
+fn md_leaf<'a>(p: Pal, kind: BlockKind, body: String) -> El<'a> {
+    match kind {
+        BlockKind::Heading(level) => {
+            let size = match level {
+                1 => 20,
+                2 => 17,
+                _ => 15,
+            };
+            container(text(body).size(size).font(BOLD))
+                .padding(Padding::ZERO.top(4))
+                .into()
+        }
+        BlockKind::Paragraph => text(body).size(14).line_height(20.0 / 14.0).into(),
+        BlockKind::ListItem { marker } => row![
+            container(text(marker).size(14).color(rgb(p.muted))).width(18),
+            container(text(body).size(14).line_height(20.0 / 14.0)).width(Length::Fill),
+        ]
+        .spacing(6)
+        .padding(Padding::ZERO.left(4))
+        .into(),
+        BlockKind::Code => container(text(body).size(13).font(MONO).line_height(18.0 / 13.0))
             .width(Length::Fill)
             .padding(10)
             .style(move |_| theme::fill(p.input, 6.0))
             .into(),
-            BlockKind::Quote => row![
-                container(iced::widget::Space::new())
-                    .width(3)
-                    .height(Length::Fill)
-                    .style(move |_| theme::fill(p.border, 0.0)),
-                text(block.text)
-                    .size(14)
-                    .line_height(20.0 / 14.0)
-                    .color(rgb(p.muted)),
-            ]
-            .spacing(12)
-            .height(Length::Shrink)
-            .padding([2, 0])
+        BlockKind::Quote => row![
+            container(iced::widget::Space::new())
+                .width(3)
+                .height(Length::Fill)
+                .style(move |_| theme::fill(p.border, 0.0)),
+            text(body)
+                .size(14)
+                .line_height(20.0 / 14.0)
+                .color(rgb(p.muted)),
+        ]
+        .spacing(12)
+        .height(Length::Shrink)
+        .padding([2, 0])
+        .into(),
+        BlockKind::Rule => container(iced::widget::Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(move |_| theme::fill(p.border, 0.0))
             .into(),
-            BlockKind::Rule => container(iced::widget::Space::new())
-                .width(Length::Fill)
-                .height(1)
-                .style(move |_| theme::fill(p.border, 0.0))
-                .into(),
-        }
-    });
-    column(blocks).spacing(10).into()
+    }
 }
 
 pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a> {
