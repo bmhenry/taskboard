@@ -286,20 +286,23 @@ impl Builder {
         }
     }
 
-    /// The table cell being collected, if there's a table.
-    fn cell(&mut self) -> Option<&mut String> {
-        let (_, row) = self.table.as_mut()?;
+    /// The table cell being collected; only called while there's a table.
+    fn cell(&mut self) -> &mut String {
+        let (_, row) = self.table.get_or_insert_default();
         if row.is_empty() {
             row.push(String::new());
         }
-        row.last_mut()
+        let last = row.len() - 1;
+        &mut row[last]
     }
 
     /// Where inline text goes: the table cell being collected, else the
     /// current leaf, else the open item's first line, else a new paragraph.
     fn text(&mut self) -> &mut String {
+        // Checked before borrowing: returning a borrow from inside an
+        // `if let` would keep `self` borrowed for the rest of the function.
         if self.table.is_some() {
-            return self.cell().unwrap();
+            return self.cell();
         }
         if self.current.is_none() && self.item_line().is_some() {
             return &mut self.item_line().unwrap().text;
