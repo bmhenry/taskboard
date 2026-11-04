@@ -2,48 +2,121 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, image, row, scrollable, text, text_editor};
-use iced::{Border, Length, Padding, Size};
-use taskboard_core::{Attachment, FileKind};
+use std::collections::HashSet;
+
+use iced::widget::{
+    button, column, container, image, mouse_area, row, scrollable, text, text_editor,
+};
+use iced::{Border, Length, Padding, Size, mouse};
+use taskboard_core::{Attachment, FileKind, Ulid};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
 use super::widgets::{El, btn, chip, grow, label, save_keys};
 use super::{FILE_EDITOR, Gui, Message, dialog_width};
 use crate::app::Action;
-use crate::markdown::{self, Block, BlockKind};
+use crate::markdown::{self, Block, BlockId, BlockKind};
 
-pub fn markdown<'a>(p: Pal, src: &str) -> El<'a> {
-    blocks(p, markdown::parse(src))
+/// Which rendered markdown a block is in, for keeping which of its
+/// collapsible blocks are open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Doc {
+    /// The viewed file.
+    File,
+    /// A task's description.
+    Description(Ulid),
 }
 
-fn blocks<'a>(p: Pal, blocks: Vec<Block>) -> El<'a> {
-    column(blocks.into_iter().map(|b| md_block(p, b)))
-        .spacing(10)
-        .into()
+/// `src` rendered, as part of `doc`.
+pub fn markdown<'a>(gui: &Gui, doc: Doc, src: &str) -> El<'a> {
+    let md = Md {
+        p: gui.pal(),
+        doc,
+        toggled: &gui.ui.toggled,
+    };
+    md.blocks(markdown::parse(src))
 }
 
-/// A block, with its children under it: a heading's section flush with it,
-/// a list item's indented to line up with its text, or for a sub-list,
-/// with its own marker.
-fn md_block<'a>(p: Pal, block: Block) -> El<'a> {
-    let section = matches!(block.kind, BlockKind::Heading(_));
-    let own = md_leaf(p, block.kind, block.text);
-    if block.children.is_empty() {
-        return own;
-    }
-    let children = block.children.into_iter().map(|child| -> El<'a> {
-        let indent = match child.kind {
-            _ if section => 0.0,
-            BlockKind::ListItem { .. } => 16.0,
-            _ => 28.0,
-        };
-        container(md_block(p, child))
-            .padding(Padding::ZERO.left(indent))
+/// What rendering a markdown document needs.
+#[derive(Clone, Copy)]
+struct Md<'g> {
+    p: Pal,
+    doc: Doc,
+    toggled: &'g HashSet<(Doc, BlockId)>,
+}
+
+impl Md<'_> {
+    fn blocks<'a>(self, blocks: Vec<Block>) -> El<'a> {
+        column(blocks.into_iter().map(|b| self.block(b)))
+            .spacing(10)
             .into()
-    });
-    column![own, column(children).spacing(10)]
-        .spacing(10)
-        .into()
+    }
+
+    /// A block, with its children under it: a heading's section flush with
+    /// it, a list item's indented to line up with its text, or for a
+    /// sub-list, with its own marker.
+    fn block<'a>(self, block: Block) -> El<'a> {
+        let p = self.p;
+        if let BlockKind::Details { open } = block.kind {
+            return self.details(block, open);
+        }
+        let section = matches!(block.kind, BlockKind::Heading(_));
+        let own = md_leaf(p, block.kind, block.text);
+        if block.children.is_empty() {
+            return own;
+        }
+        let children = block.children.into_iter().map(|child| -> El<'a> {
+            let indent = match child.kind {
+                _ if section => 0.0,
+                BlockKind::ListItem { .. } => 16.0,
+                _ => 28.0,
+            };
+            container(self.block(child))
+                .padding(Padding::ZERO.left(indent))
+                .into()
+        });
+        column![own, column(children).spacing(10)]
+            .spacing(10)
+            .into()
+    }
+
+    /// A details block: its summary, which opens and closes it, over what
+    /// it holds when open, boxed together.
+    fn details<'a>(self, block: Block, starts_open: bool) -> El<'a> {
+        let p = self.p;
+        let key = (self.doc, block.id);
+        let open = starts_open != self.toggled.contains(&key);
+        let summary = if block.text.is_empty() {
+            "Details".to_string()
+        } else {
+            block.text
+        };
+        let chevron = if open { "▾" } else { "▸" };
+        let head = button(
+            row![
+                container(text(chevron).size(13).color(rgb(p.muted))).width(14),
+                text(summary).size(14).font(BOLD).color(rgb(p.text)),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
+        )
+        .on_press(Message::ToggleSection(key.0, key.1))
+        .padding([6, 10])
+        .width(Length::Fill)
+        .style(theme::bare_button);
+        let head = mouse_area(head).interaction(mouse::Interaction::Pointer);
+        let mut body = column![head];
+        if open && !block.children.is_empty() {
+            body = body.push(
+                container(self.blocks(block.children))
+                    .padding(Padding::ZERO.left(30).right(10).bottom(10)),
+            );
+        }
+        container(body)
+            .width(Length::Fill)
+            .style(move |_| theme::boxed(p.panel, p.border, 6.0))
+            .into()
+    }
 }
 
 /// A block's own text, without its children.
@@ -86,6 +159,8 @@ fn md_leaf<'a>(p: Pal, kind: BlockKind, body: String) -> El<'a> {
         .height(Length::Shrink)
         .padding([2, 0])
         .into(),
+        // Drawn by `Md::details`.
+        BlockKind::Details { .. } => text(body).into(),
         BlockKind::Rule => container(iced::widget::Space::new())
             .width(Length::Fill)
             .height(1)
@@ -172,7 +247,7 @@ fn file_contents<'a>(
         _ => {
             let content = gui.ui.file_text.as_deref().unwrap_or_default();
             if rendered {
-                markdown(p, content)
+                markdown(gui, Doc::File, content)
             } else {
                 text(content)
                     .size(13)

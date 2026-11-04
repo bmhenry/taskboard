@@ -15,6 +15,7 @@ mod widgets;
 mod zones;
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ use crate::app::{
     Action, App, EditTarget, Effect, Owner, PathCheck, ProjectInput, View, drop_index,
     drop_position,
 };
+use crate::markdown::BlockId;
 use crate::platform::{Platform, ResolvedPath, WatchEvent};
 use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
@@ -117,6 +119,11 @@ struct UiState {
     /// The viewed file's text is shown as rendered Markdown rather than as
     /// plain text. Markdown files start out rendered, other files plain.
     file_rendered: bool,
+    /// Collapsible markdown blocks the user opened or closed, so they're
+    /// shown the other way from how they start. Those in the viewed file
+    /// are forgotten when it changes, those in a description when another
+    /// task is picked.
+    toggled: HashSet<(viewer::Doc, BlockId)>,
     /// The task whose new-file popup is open.
     new_file_for: Option<Ulid>,
     /// The name typed in the new-file popup.
@@ -211,6 +218,8 @@ pub enum Message {
     CancelFileEdit,
     /// Shows the viewed file's text rendered as Markdown, or as plain text.
     RenderFile(bool),
+    /// Opens or closes a collapsible block of rendered markdown.
+    ToggleSection(viewer::Doc, BlockId),
     /// Closes the file viewer, unless it has unsaved changes.
     CloseViewer,
     /// The viewed (task, file) was read.
@@ -395,6 +404,7 @@ impl Gui {
             ui.file_image = None;
             ui.file_edit = None;
             ui.file_rendered = false;
+            ui.toggled.retain(|(doc, _)| *doc != viewer::Doc::File);
             if let Some((task_id, file)) = app.viewing_file
                 && let Some(att) = app
                     .board
@@ -411,6 +421,7 @@ impl Gui {
         }
         // A missing project's fix belongs to the task it was started on.
         if app.selected != was_selected {
+            ui.toggled.retain(|(doc, _)| *doc == viewer::Doc::File);
             ui.relocate_path.clear();
             ui.confirm_delete_project = None;
             ui.copied_id = None;
@@ -638,6 +649,12 @@ impl Gui {
             }
             Message::CancelFileEdit => ui.file_edit = None,
             Message::RenderFile(rendered) => ui.file_rendered = rendered,
+            Message::ToggleSection(doc, id) => {
+                let key = (doc, id);
+                if !ui.toggled.remove(&key) {
+                    ui.toggled.insert(key);
+                }
+            }
             Message::FileRead(shown, contents) => {
                 if ui.file_shown == Some(shown) {
                     match contents {
@@ -937,6 +954,7 @@ impl Gui {
                     ui.file_editable = true;
                     ui.file_image = None;
                     ui.file_edit = Some(text_editor::Content::new());
+                    ui.toggled.retain(|(doc, _)| *doc != viewer::Doc::File);
                     ui.file_rendered = self.app.viewing_file.is_some_and(|(task, file)| {
                         self.app.board.get(task).is_some_and(|t| {
                             t.files
@@ -1521,6 +1539,29 @@ mod tests {
         settle(&mut gui);
         assert!(gui.ui.file_edit.is_none());
         assert_eq!(gui.ui.file_text.as_deref(), Some("xone"));
+    }
+
+    #[test]
+    fn toggled_sections_reset_with_their_document() {
+        let (_dir, mut gui, file) = in_progress_with_file("x");
+        let desc = viewer::Doc::Description(file.0);
+        view_file(&mut gui, file);
+        for doc in [viewer::Doc::File, desc] {
+            let _ = gui.update(Message::ToggleSection(doc, vec![0]));
+        }
+        let _ = gui.update(Message::ToggleSection(viewer::Doc::File, vec![1]));
+        let _ = gui.update(Message::ToggleSection(viewer::Doc::File, vec![1]));
+        assert_eq!(gui.ui.toggled.len(), 2);
+
+        // Closing the file forgets its sections, not the description's.
+        let _ = gui.update(Message::App(Action::ViewFile(None)));
+        assert_eq!(
+            gui.ui.toggled.iter().collect::<Vec<_>>(),
+            [&(desc, vec![0])]
+        );
+        // Picking another task forgets the description's.
+        let _ = gui.update(Message::App(Action::Select(None)));
+        assert!(gui.ui.toggled.is_empty());
     }
 
     #[test]

@@ -203,7 +203,11 @@ fn detail_body<'a>(gui: &'a Gui, task: &'a Task) -> Column<'a, Message> {
     body = if task.description.trim().is_empty() {
         body.push(label(p, "No description."))
     } else {
-        body.push(markdown(p, &task.description))
+        body.push(markdown(
+            gui,
+            viewer::Doc::Description(task.id),
+            &task.description,
+        ))
     };
     body = if task.epic {
         epic_children(gui, body, task)

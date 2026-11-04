@@ -4,7 +4,12 @@
 //! A block's `children` are the blocks nested inside it: for a list item,
 //! its sub-lists and any paragraphs or code after its first line; for a
 //! heading, its section: everything up to the next heading of the same or a
-//! higher level, or the end of the list item or quote the heading is in.
+//! higher level, or the end of the list item, quote or details the heading
+//! is in; for a details block, what's between its summary and `</details>`.
+//!
+//! `<details>`, `<summary>…</summary>` and `</details>` are understood when
+//! they're HTML blocks of their own (as GitHub writes them); any other HTML,
+//! and these tags when they don't pair up, is shown as text.
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -20,6 +25,11 @@ pub enum BlockKind {
     Code,
     Quote,
     Rule,
+    /// A `<details>` block, whose text is its summary. `open` is whether it
+    /// starts expanded.
+    Details {
+        open: bool,
+    },
 }
 
 /// Where a block is in the tree: its index among its siblings, after those
@@ -57,6 +67,9 @@ struct Builder {
     /// For each open quote, how many containers were open when it started:
     /// sections started inside it end with it.
     quotes: Vec<usize>,
+    /// For each open details block, the HTML that opened it, shown instead
+    /// if it's never closed.
+    details: Vec<String>,
 }
 
 impl Builder {
@@ -108,15 +121,103 @@ impl Builder {
         }
     }
 
+    /// How many open containers are outside the innermost quote.
+    fn floor(&self) -> usize {
+        self.quotes.last().copied().unwrap_or(0)
+    }
+
     /// Ends the open sections of `level` or deeper, back to the innermost
-    /// list item or quote.
+    /// list item, quote or details.
     fn close_sections(&mut self, level: u8) {
         self.flush();
-        let floor = self.quotes.last().copied().unwrap_or(0);
-        while self.open.len() > floor
+        while self.open.len() > self.floor()
             && matches!(self.open.last(), Some(Block { kind: BlockKind::Heading(l), .. }) if *l >= level)
         {
             self.close();
+        }
+    }
+
+    /// Ends what was opened inside the innermost list item or quote, which
+    /// is ending: its sections, and any details never closed.
+    fn close_inner(&mut self) {
+        self.flush();
+        while self.open.len() > self.floor() {
+            match self.open.last().map(|b| &b.kind) {
+                Some(BlockKind::Heading(_)) => self.close(),
+                Some(BlockKind::Details { .. }) => self.unwrap_details(),
+                _ => break,
+            }
+        }
+    }
+
+    /// Adds `raw` as a paragraph of its own.
+    fn literal(&mut self, raw: &str) {
+        self.text().push_str(raw.trim());
+        self.flush();
+    }
+
+    /// Handles an HTML block: details tags become blocks, anything else is
+    /// shown as text.
+    fn html_block(&mut self, html: &str) {
+        let Some(tokens) = details_tokens(html) else {
+            return self.literal(html);
+        };
+        for token in tokens {
+            match token {
+                Html::Open { open, raw } => {
+                    self.open(BlockKind::Details { open });
+                    self.details.push(raw.to_string());
+                }
+                Html::Summary { text, raw } => match self.open.last_mut() {
+                    // Only a details' first block can be its summary.
+                    Some(b)
+                        if matches!(b.kind, BlockKind::Details { .. })
+                            && b.text.is_empty()
+                            && b.children.is_empty()
+                            && self.current.is_none() =>
+                    {
+                        b.text = text;
+                        if let Some(opening) = self.details.last_mut() {
+                            opening.push('\n');
+                            opening.push_str(raw);
+                        }
+                    }
+                    _ => self.literal(raw),
+                },
+                Html::Close { raw } => self.close_details(raw),
+                Html::Text(t) => self.literal(t),
+            }
+        }
+    }
+
+    /// Ends the innermost details, with its sections, if it was opened
+    /// inside the innermost list item or quote; otherwise `</details>`
+    /// (`raw`) doesn't pair up, and is shown as text.
+    fn close_details(&mut self, raw: &str) {
+        self.flush();
+        let inner = self
+            .open
+            .iter()
+            .rposition(|b| !matches!(b.kind, BlockKind::Heading(_)))
+            .filter(|&i| i >= self.floor());
+        if inner.is_some_and(|i| matches!(self.open[i].kind, BlockKind::Details { .. })) {
+            self.close_sections(1);
+            self.close();
+            self.details.pop();
+        } else {
+            self.literal(raw);
+        }
+    }
+
+    /// Replaces the innermost container, a details that was never closed,
+    /// by the HTML that opened it, followed by what it holds.
+    fn unwrap_details(&mut self) {
+        self.flush();
+        let Some(b) = self.open.pop() else { return };
+        let opening = self.details.pop().unwrap_or_default();
+        self.literal(&opening);
+        for child in b.children {
+            self.push(child);
         }
     }
 
@@ -147,13 +248,96 @@ impl Builder {
     }
 
     fn finish(mut self) -> Vec<Block> {
-        while !self.open.is_empty() {
-            self.close();
+        while let Some(b) = self.open.last() {
+            if matches!(b.kind, BlockKind::Details { .. }) {
+                self.unwrap_details();
+            } else {
+                self.close();
+            }
         }
         self.flush();
         number(&mut self.roots, &[]);
         self.roots
     }
+}
+
+/// A piece of an HTML block made only of details tags and text.
+#[derive(Debug, PartialEq)]
+enum Html<'a> {
+    /// `<details>`, or `<details open>`.
+    Open {
+        open: bool,
+        raw: &'a str,
+    },
+    /// `<summary>…</summary>`, with its text.
+    Summary {
+        text: String,
+        raw: &'a str,
+    },
+    Close {
+        raw: &'a str,
+    },
+    Text(&'a str),
+}
+
+/// Splits `html` into details tags and the text between them, or None if it
+/// holds any other tag.
+fn details_tokens(html: &str) -> Option<Vec<Html<'_>>> {
+    let mut out = Vec::new();
+    let mut rest = html.trim();
+    while !rest.is_empty() {
+        if !rest.starts_with('<') {
+            let end = rest.find('<').unwrap_or(rest.len());
+            out.push(Html::Text(rest[..end].trim()));
+            rest = rest[end..].trim_start();
+            continue;
+        }
+        let end = rest.find('>')? + 1;
+        let tag = &rest[1..end - 1];
+        let (name, attrs) = tag
+            .split_once(|c: char| c.is_ascii_whitespace())
+            .unwrap_or((tag, ""));
+        let raw;
+        match name.to_ascii_lowercase().as_str() {
+            "details" => {
+                raw = &rest[..end];
+                let open = attrs.split_ascii_whitespace().any(|a| {
+                    a.split('=')
+                        .next()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("open"))
+                });
+                out.push(Html::Open { open, raw });
+            }
+            "/details" if attrs.trim().is_empty() => {
+                raw = &rest[..end];
+                out.push(Html::Close { raw });
+            }
+            "summary" => {
+                let close = rest.to_ascii_lowercase().find("</summary>")?;
+                raw = &rest[..close + "</summary>".len()];
+                let text = strip_tags(&rest[end..close]);
+                out.push(Html::Summary { text, raw });
+            }
+            _ => return None,
+        }
+        rest = rest[raw.len()..].trim_start();
+    }
+    Some(out)
+}
+
+/// `html`'s text without its tags, with its whitespace collapsed.
+fn strip_tags(html: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn number(blocks: &mut [Block], parent: &[usize]) {
@@ -168,6 +352,8 @@ pub fn parse(src: &str) -> Vec<Block> {
     // Each open list's next number, or None for bullet lists.
     let mut lists: Vec<Option<u64>> = Vec::new();
     let mut quote_depth = 0;
+    // The HTML block being collected.
+    let mut html: Option<String> = None;
 
     let options = Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
     for event in Parser::new_ext(src, options) {
@@ -195,7 +381,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                 quote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                tree.close_sections(1);
+                tree.close_inner();
                 tree.quotes.pop();
                 quote_depth -= 1;
             }
@@ -218,7 +404,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                 tree.open(BlockKind::ListItem { marker });
             }
             Event::End(TagEnd::Item) => {
-                tree.close_sections(1);
+                tree.close_inner();
                 tree.close();
             }
             Event::End(TagEnd::Paragraph | TagEnd::CodeBlock) => tree.flush(),
@@ -236,6 +422,13 @@ pub fn parse(src: &str) -> Vec<Block> {
                     *marker = if done { "☑" } else { "☐" }.to_string();
                 }
             }
+            Event::Start(Tag::HtmlBlock) => html = Some(String::new()),
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(h) = html.take() {
+                    tree.html_block(&h);
+                }
+            }
+            Event::Html(t) if html.is_some() => html.as_mut().unwrap().push_str(&t),
             Event::Text(t) | Event::Code(t) | Event::InlineHtml(t) | Event::Html(t) => {
                 tree.text().push_str(&t)
             }
@@ -375,6 +568,118 @@ under empty
                 (vec![3], BlockKind::Paragraph, "after quote".into()),
                 // An empty heading is dropped and starts no section.
                 (vec![4], BlockKind::Paragraph, "under empty".into()),
+            ]
+        );
+    }
+
+    fn details(open: bool) -> BlockKind {
+        BlockKind::Details { open }
+    }
+
+    #[test]
+    fn details_hold_their_contents() {
+        let blocks = parse(
+            "<details>
+<summary>More <b>info</b></summary>
+
+hidden
+
+## Inside
+
+under it
+
+</details>
+
+<details open><summary>Shown</summary>
+
+- a
+
+</details>
+after
+",
+        );
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], details(false), "More info".into()),
+                (vec![0, 0], BlockKind::Paragraph, "hidden".into()),
+                (vec![0, 1], BlockKind::Heading(2), "Inside".into()),
+                (vec![0, 1, 0], BlockKind::Paragraph, "under it".into()),
+                (vec![1], details(true), "Shown".into()),
+                (vec![1, 0], item("•"), "a".into()),
+                (vec![2], BlockKind::Paragraph, "after".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn details_nest_in_sections_and_each_other() {
+        let blocks = parse(
+            "# A
+
+<DETAILS OPEN=\"\">
+
+<summary>outer</summary>
+
+<details>
+<summary></summary>
+
+inner
+
+</details>
+
+</details>
+
+b
+",
+        );
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], BlockKind::Heading(1), "A".into()),
+                (vec![0, 0], details(true), "outer".into()),
+                (vec![0, 0, 0], details(false), String::new()),
+                (vec![0, 0, 0, 0], BlockKind::Paragraph, "inner".into()),
+                (vec![0, 1], BlockKind::Paragraph, "b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unpaired_details_tags_are_text() {
+        let blocks = parse(
+            "</details>
+
+- <details>
+  <summary>never closed</summary>
+
+  in item
+
+after
+
+<details><summary>s</summary>with text</details>
+
+<div>other</div>
+
+<details>
+",
+        );
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], BlockKind::Paragraph, "</details>".into()),
+                // Shown as the item's own line, the HTML it began with.
+                (
+                    vec![1],
+                    item("•"),
+                    "<details>\n<summary>never closed</summary>".into()
+                ),
+                (vec![1, 0], BlockKind::Paragraph, "in item".into()),
+                (vec![2], BlockKind::Paragraph, "after".into()),
+                (vec![3], details(false), "s".into()),
+                (vec![3, 0], BlockKind::Paragraph, "with text".into()),
+                (vec![4], BlockKind::Paragraph, "<div>other</div>".into()),
+                (vec![5], BlockKind::Paragraph, "<details>".into()),
             ]
         );
     }
