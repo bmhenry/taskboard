@@ -82,6 +82,11 @@ fn storage() -> Result<web_sys::Storage, String> {
 impl Platform for Web {
     fn run(&self, command: Command) -> BoxFuture<Result<Outcome, String>> {
         Box::pin(async move {
+            // The UI offers no typed paths here, but a path would name a
+            // file on the daemon's machine; it refuses these too.
+            if !command.is_remote_safe() {
+                return Err(api::REMOTE_UNSAFE.to_string());
+            }
             match command {
                 // Sent raw rather than as base64 in a command.
                 Command::Attach {

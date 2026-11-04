@@ -212,8 +212,7 @@ async fn command(
     if !command.is_remote_safe() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
-            message: "files on the server can't be attached from the web; upload them instead"
-                .into(),
+            message: api::REMOTE_UNSAFE.into(),
         });
     }
     blocking(move || server.run(command).map(Json)).await

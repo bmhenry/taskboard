@@ -45,6 +45,12 @@ pub const RESOLVE_PATHS: &str = "/api/resolve-paths";
 pub const SETTINGS: &str = "/api/settings";
 pub const EVENTS: &str = "/api/events";
 
+/// Why a command that isn't [remote safe](crate::Command::is_remote_safe)
+/// is refused: the daemon's answer to one, and the web client's, which
+/// refuses them before sending.
+pub const REMOTE_UNSAFE: &str =
+    "files on the server can't be attached from the web; upload them instead";
+
 /// What `GET` [`BOARD`] returns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardResponse {
