@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use taskboard_core::ops::{Command, FileSource, Outcome, Output};
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, NewTaskPosition, Theme};
 use taskboard_core::{
-    Board, DateField, DeviceSettings, Error, FileKind, Filter, GlobalSettings, Hook, HookEvent,
-    Link, LinkKind, NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
+    Assignee, Board, DateField, DeviceSettings, Error, FileKind, Filter, GlobalSettings, Hook,
+    HookEvent, Link, LinkKind, NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
 };
 
 use crate::platform::PathKind;
@@ -34,7 +34,7 @@ pub enum EditTarget {
     New(Status),
 }
 
-/// Whose links and files an action changes: a saved task, or the [`Draft`]
+/// Whose assignee, links and files an action changes: a saved task, or the [`Draft`]
 /// of the new task being written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
@@ -42,11 +42,13 @@ pub enum Owner {
     Draft,
 }
 
-/// Links and files added to a new task before it's saved; they're saved with it.
+/// An assignee, links and files chosen for a new task before it's saved;
+/// they're saved with it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
     pub links: Vec<Link>,
     pub files: Vec<DraftFile>,
+    pub assignee: Assignee,
 }
 
 /// A file to attach once the new task is saved.
@@ -156,6 +158,10 @@ pub enum Action {
     SetParent {
         id: Ulid,
         parent: Option<Ulid>,
+    },
+    SetAssignee {
+        owner: Owner,
+        assignee: Assignee,
     },
     AddLink {
         owner: Owner,
@@ -777,6 +783,7 @@ impl App {
                             status: Some(status),
                             links: self.draft.links.clone(),
                             position,
+                            assignee: self.draft.assignee.clone(),
                             ..Default::default()
                         };
                         let command = Command::Create {
@@ -789,6 +796,7 @@ impl App {
                             position: Some(position),
                             epic: false,
                             parent: None,
+                            assignee: self.draft.assignee.clone(),
                             id: Some(id),
                         };
                         self.change(command, |b| b.create(new))?;
@@ -823,6 +831,16 @@ impl App {
                 let command = Command::SetParent { id, parent };
                 self.change(command, |b| b.set_parent(id, parent))?;
             }
+            Action::SetAssignee { owner, assignee } => match owner {
+                Owner::Task(id) => {
+                    let command = Command::SetAssignee {
+                        id,
+                        assignee: assignee.clone(),
+                    };
+                    self.change(command, |b| b.set_assignee(id, assignee))?;
+                }
+                Owner::Draft => self.draft.assignee = assignee,
+            },
             Action::AddLink { owner, url, kind } => {
                 let url = url.trim().to_string();
                 if !url.is_empty() {
@@ -1232,6 +1250,35 @@ mod tests {
         app.apply(Action::Demote(epic));
         assert_eq!(app.error, None);
         assert!(!app.board.get(epic).unwrap().epic);
+    }
+
+    #[test]
+    fn assignees_are_set_on_tasks_and_saved_with_drafts() {
+        let (_dir, mut app) = app();
+        let task = add(&mut app, "task");
+        let alice = Assignee::Named("Alice".into());
+        app.apply(Action::SetAssignee {
+            owner: Owner::Task(task),
+            assignee: alice.clone(),
+        });
+        let stored = app.platform.store.load().unwrap();
+        assert_eq!(stored.get(task).unwrap().assignee, alice);
+
+        app.apply(Action::Edit(EditTarget::New(Status::Open)));
+        app.apply(Action::SetAssignee {
+            owner: Owner::Draft,
+            assignee: Assignee::Named("alice".into()),
+        });
+        app.apply(Action::Save {
+            title: "drafted".into(),
+            project: app.new_task_project(),
+            description: String::new(),
+        });
+        assert_eq!(app.error, None);
+        // Takes the board's spelling, and the next draft starts afresh.
+        let stored = app.platform.store.load().unwrap();
+        assert_eq!(stored.column(Status::Open)[0].assignee, alice);
+        assert_eq!(app.draft.assignee, Assignee::Inherited);
     }
 
     #[test]

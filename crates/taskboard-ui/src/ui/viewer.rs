@@ -7,7 +7,7 @@ use iced::{Border, Length, Padding, Size};
 use taskboard_core::{Attachment, FileKind};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
-use super::widgets::{El, btn, grow, label, save_keys};
+use super::widgets::{El, btn, chip, grow, label, save_keys};
 use super::{FILE_EDITOR, Gui, Message, dialog_width};
 use crate::app::Action;
 use crate::markdown::{self, BlockKind};
@@ -69,9 +69,36 @@ pub fn markdown<'a>(p: Pal, src: &str) -> El<'a> {
 
 pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a> {
     let p = gui.pal();
-    let mut header = row![text(&att.name).size(16).font(BOLD), grow()]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+    let header = row![text(&att.name).size(16).font(BOLD), grow()];
+    let close = btn(
+        p,
+        "Close",
+        Style::Normal,
+        Message::App(Action::ViewFile(None)),
+    );
+    dialog(p, file_contents(gui, att, header, Some(close)), window)
+}
+
+/// A file open in a tab of the task's details, which name it.
+pub fn file_tab<'a>(gui: &'a Gui, att: &'a Attachment) -> El<'a> {
+    let header = row![grow()];
+    container(file_contents(gui, att, header, None))
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// `header`, with the viewer's buttons added and then `close` unless the
+/// file is being edited, over the viewed file or its editor.
+fn file_contents<'a>(
+    gui: &'a Gui,
+    att: &'a Attachment,
+    header: iced::widget::Row<'a, Message>,
+    close: Option<El<'a>>,
+) -> iced::widget::Column<'a, Message> {
+    let p = gui.pal();
+    let mut header = header.spacing(8).align_y(iced::Alignment::Center);
     if let Some(content) = &gui.ui.file_edit {
         if gui.file_edit_dirty() {
             header = header.push(label(p, "Unsaved changes"));
@@ -89,26 +116,35 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
             .height(Length::Fill)
             .key_binding(save_keys)
             .style(move |_, status| theme::editor_style(p, status));
-        return dialog(p, column![header, editor].spacing(12), window);
+        return column![header, editor].spacing(12);
     }
-    if att.kind != FileKind::Image && gui.ui.file_editable {
-        header = header.push(btn(p, "Edit", Style::Normal, Message::EditFile));
+    let rendered = gui.ui.file_rendered;
+    if att.kind != FileKind::Image {
+        header = header.extend([
+            chip(
+                p,
+                "Plain text",
+                p.accent,
+                !rendered,
+                Message::RenderFile(false),
+            ),
+            chip(p, "Markdown", p.accent, rendered, Message::RenderFile(true)),
+        ]);
+        if gui.ui.file_editable {
+            header = header.push(btn(p, "Edit", Style::Normal, Message::EditFile));
+        }
     }
-    header = header.push(btn(
-        p,
-        "Close",
-        Style::Normal,
-        Message::App(Action::ViewFile(None)),
-    ));
+    header = header.push(close);
+    let plain = att.kind != FileKind::Image && !rendered;
     let body: El = match att.kind {
         // Until it's read, or why it couldn't be.
         FileKind::Image => match &gui.ui.file_image {
             Some(handle) => image(handle.clone()).into(),
             None => label(p, gui.ui.file_text.as_deref().unwrap_or_default()),
         },
-        kind => {
+        _ => {
             let content = gui.ui.file_text.as_deref().unwrap_or_default();
-            if kind == FileKind::Markdown {
+            if rendered {
                 markdown(p, content)
             } else {
                 text(content)
@@ -123,19 +159,20 @@ pub fn file_viewer<'a>(gui: &'a Gui, att: &'a Attachment, window: Size) -> El<'a
     let bar = || Scrollbar::new().width(6).scroller_width(6);
     // Only plain text, which isn't wrapped, scrolls sideways; markdown needs
     // a width to wrap in.
-    let direction = match att.kind {
-        FileKind::Text => Direction::Both {
+    let direction = if plain {
+        Direction::Both {
             vertical: bar(),
             horizontal: bar(),
-        },
-        _ => Direction::Vertical(bar()),
+        }
+    } else {
+        Direction::Vertical(bar())
     };
     let body = scrollable(container(body).padding(iced::Padding::ZERO.right(8).bottom(8)))
         .direction(direction)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_, s| theme::scroll_style(p, s));
-    dialog(p, column![header, body].spacing(12), window)
+    column![header, body].spacing(12)
 }
 
 /// The viewer's frame around `content`, sized to the window.

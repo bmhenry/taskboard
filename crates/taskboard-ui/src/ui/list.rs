@@ -8,7 +8,9 @@ use taskboard_core::{Status, Task};
 
 use super::board::card_body;
 use super::theme::{self, BOLD, MONO, Pal, rgb};
-use super::widgets::{El, count_badge, epic_badge, label, missing_project_badge, parent_label};
+use super::widgets::{
+    El, assignee_label, count_badge, epic_badge, label, missing_project_badge, parent_label,
+};
 use super::{Gui, Message, panels};
 use crate::app::Action;
 
@@ -40,6 +42,9 @@ pub fn list(gui: &Gui, compact: bool) -> El<'_> {
             .board
             .parent_of(task)
             .map(|epic| parent_label(p, &epic.title));
+        let assignee = app.board.assignee_of(task).map(|n| assignee_label(p, n));
+        let under: Vec<El> = parent.into_iter().chain(assignee).collect();
+        let under = (!under.is_empty()).then(|| column(under).spacing(2).into());
         let badge = (!badges.is_empty()).then(|| row(badges).spacing(6).into());
         let cells = [
             task.status.label().to_string(),
@@ -49,9 +54,9 @@ pub fn list(gui: &Gui, compact: bool) -> El<'_> {
             updated,
         ];
         let cells = if compact {
-            compact_row(p, task.status, badge, parent, cells)
+            compact_row(p, task.status, badge, under, cells)
         } else {
-            list_row(p, Some(task.status), badge, parent, cells)
+            list_row(p, Some(task.status), badge, under, cells)
         };
         rows = rows.push(
             button(cells)
@@ -102,12 +107,12 @@ pub fn list(gui: &Gui, compact: bool) -> El<'_> {
 }
 
 /// One row of the list table; `status` is `None` for the header. `badge` goes
-/// before the title, and `parent` under it.
+/// before the title, and `under` under it.
 fn list_row<'a>(
     p: Pal,
     status: Option<Status>,
     badge: Option<El<'a>>,
-    parent: Option<El<'a>>,
+    under: Option<El<'a>>,
     cells: [String; 5],
 ) -> El<'a> {
     let header = status.is_none();
@@ -129,7 +134,7 @@ fn list_row<'a>(
                     .spacing(6)
                     .align_y(Alignment::Center)
             ]
-            .push(parent)
+            .push(under)
             .spacing(2)
         )
         .width(Length::Fill),
@@ -150,12 +155,12 @@ fn list_row<'a>(
 }
 
 /// One row of the compact list: the title, with `badge` before it and
-/// `parent` under it, above the status and the rest in a clipped line.
+/// `under` under it, above the status and the rest in a clipped line.
 fn compact_row<'a>(
     p: Pal,
     status: Status,
     badge: Option<El<'a>>,
-    parent: Option<El<'a>>,
+    under: Option<El<'a>>,
     cells: [String; 5],
 ) -> El<'a> {
     let [status_cell, id, title, project, updated] = cells;
@@ -182,7 +187,7 @@ fn compact_row<'a>(
             .spacing(6)
             .align_y(Alignment::Center)
     ]
-    .push(parent)
+    .push(under)
     .push(container(meta).clip(true))
     .spacing(4)
     .padding([8, 10])

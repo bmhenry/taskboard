@@ -314,6 +314,18 @@ pub fn parent_label<'a>(p: Pal, title: &'a str) -> El<'a> {
     .into()
 }
 
+/// Names who a task is assigned to, on one line clipped to the space there is.
+pub fn assignee_label<'a>(p: Pal, name: &str) -> El<'a> {
+    container(
+        text(format!("@{name}"))
+            .size(11)
+            .color(rgb(p.muted))
+            .wrapping(Wrapping::None),
+    )
+    .clip(true)
+    .into()
+}
+
 /// A column's task count, in a small pill next to its title.
 pub fn count_badge<'a>(p: Pal, count: usize) -> El<'a> {
     container(

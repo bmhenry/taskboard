@@ -61,6 +61,13 @@ tasks. Epics and their children stay on the board in the normal columns.
 - An epic's status is yours to set; its children never change it. Closing an epic
   doesn't touch its children, and `tb rm` on an epic keeps them, clearing their `parent`.
 
+## Assignees
+
+A task or epic can be assigned to a person or agent by name. A child follows its epic's
+assignee, including later changes to it, unless it has its own, which can be nobody. A
+name that differs from a remembered one only by case takes the remembered spelling. Names
+are remembered once used, even after no task has them.
+
 ## Commands
 
 ```sh
@@ -99,6 +106,12 @@ tb --json demote 7F3TPKKW                       # back to a task; it must have n
 tb --json edit 8M2QKRTW --parent 7F3TPKKW       # make a task a child of an epic
 tb --json edit 8M2QKRTW --no-parent             # take it out of its epic
 
+# Assignees
+tb --json add "Login page" --assignee Alice     # assign when adding
+tb --json edit 8M2QKRTW --assignee Bob          # assign or reassign
+tb --json edit 8M2QKRTW --no-assignee           # nobody, even if its epic has an assignee
+tb --json edit 8M2QKRTW --inherit-assignee      # follow its epic again
+
 # Projects
 tb --json project ls                            # path, name, task count, "missing" if its folder is gone
 tb --json project mv ~/src/old ~/src/new        # point a moved project's tasks at its new folder
@@ -135,7 +148,9 @@ tb --json file rm 7F3TPKKW notes.md
   "links": [{ "url": "https://…", "label": null, "kind": "source" }],
   "files": [{ "id": "01M…", "name": "notes.md", "path": "files/01M….md", "kind": "markdown" }],
   "epic": false,
-  "parent": "01M5X724HRT6FPK984034NF3M4"
+  "parent": "01M5X724HRT6FPK984034NF3M4",
+  "assignee": null,
+  "assigned_to": "Alice"
 }
 ```
 
@@ -146,6 +161,10 @@ board order: grouped by status (open → closed), then by `order` within each st
 `epic` is true for epics, and `parent` is the full ID of a task's epic, or null. A
 `parent` that no longer resolves is ignored rather than an error. `show --json` adds
 what those point at: `parent_task` on a child, and `children` and `progress` on an epic.
+
+`assigned_to` is who the task is assigned to once its epic is counted, or null: read this
+one to see whose a task is. `assignee` is what was chosen for the task itself: a name,
+`""` for nobody, or null to follow its epic.
 
 ```json
 {

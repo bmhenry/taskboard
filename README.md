@@ -20,8 +20,11 @@ Taskboard tasks are powerful:
     - arbitrary URLs: clickable links which can be tagged as a "source" or as "context"
     - arbitrary files, which may be images, markdown, or plain text which is useful for the task
     - whether it's an epic, and the epic it's a child of, if any
+    - optionally, the person or agent it's assigned to
 
 Epics are promoted tasks for larger, longer running work. An epic has everything a task has, and stays on the board like one, with a status you set yourself and an order in its column; it can also have child tasks, which stay on the board as normal cards. Epics are one level deep: an epic can't have a parent, and only an epic can be one. A child is always in the same project as its epic, so moving an epic to another project takes its children along, and a child has to leave its epic to move on its own. Only an epic without children can be demoted. Closing an epic doesn't touch its children, and deleting one keeps them, without a parent.
+
+A task or epic can be assigned to anyone by name. A child follows its epic's assignee, including later changes to it, until it's given its own, which can be nobody. Names are remembered once used, even after no task has them, in the `assignees` list at the top of `tasks.json`; delete one there to forget it, unless a task still has it.
 
 Tasks for every project are stored together in `$XDG_DATA_HOME/tb/` (`~/.local/share/tb/` by default) in a single JSON file, `tasks.json`, which also lists the known projects. Each task names its project by absolute directory; a project's name is its directory's name, with parent directories added in front (`work/app`, `src/app`) when it's needed to tell same-named projects apart. Tasks can reference other files, which are copied into `$XDG_DATA_HOME/tb/files/` under ULIDs; the task JSON stores their original names, so they can be displayed as such in the UI instead of the ULID. The task JSON includes a schema version so it can be migrated later if necessary. Settings shared by the GUI and `tb` (where new tasks go, hooks, which board columns are collapsed) are kept in `$XDG_CONFIG_HOME/tb/settings.json` (`~/.config/tb/` by default); the GUI's font size and theme are per device, in `device.json` beside it.
 
@@ -67,6 +70,29 @@ cargo test --workspace
 ```
 
 On Linux the GUI needs the usual X11/OpenGL development libraries (e.g. `libx11-dev libxi-dev libgl1-mesa-dev` on Debian/Ubuntu).
+
+
+## Development
+
+To run the web UI from a debug build (it needs `trunk` and the `wasm32-unknown-unknown` target):
+
+```sh
+(cd crates/taskboard-wasm && trunk build)
+cargo run -p taskboard-web -- --static crates/taskboard-wasm/dist
+```
+
+Then open the `http://127.0.0.1:7878/?token=…` link the daemon prints.
+
+To have trunk rebuild the client while working on it, run the daemon and `trunk serve` side by side:
+
+```sh
+cargo run -p taskboard-web -- --allow-host 127.0.0.1:8080
+cd crates/taskboard-wasm && trunk serve
+```
+
+Open the daemon's link once for the sign-in cookie, then use `http://127.0.0.1:8080`. Trunk proxies `/api/` to the daemon on port 7878 (see `Trunk.toml`).
+
+A dev daemon uses your real task store, the same one as `tb` and the desktop app. If the systemd service is running, it already holds port 7878, so stop it first.
 
 
 ## Install
@@ -115,6 +141,7 @@ taskboard ~/src/app  # ...or to another one
 - `+` on a column (or `Ctrl+N`) creates a task, at the top of the column (Settings → New tasks can make it the bottom, for `tb add` too); `Ctrl+S` saves, `Esc` cancels or closes
 - `Ctrl+F` focuses search; status and project chips and the date range filter what's shown
 - Epics have a colored edge and a badge with how many of their children are closed, and child cards name their epic
+- The dropdown next to a task's status assigns it: pick a name, Unassigned, or the epic's assignee, or type a new name; the new-task editor has the same dropdown, and cards and list rows show the name
 - In the task panel, Promote to epic makes a task an epic and Choose epic ▾ makes it a child of one in its project; an epic lists its children, which open on a click, and × takes a child out of its epic
 - Add links and attach files (by path) from the task panel; click a file to view it
 - New… in the task panel's Files creates an empty file in the store (a name without an extension gets `.md`) and opens it for editing
@@ -141,6 +168,8 @@ tb add "Login page" --parent 7F3TPKKW   # a child, in its epic's project unless 
 tb edit 8M2QKRTW --parent 7F3TPKKW      # make a task a child of an epic
 tb edit 8M2QKRTW --no-parent            # take it out again
 tb list --parent 7F3TPKKW    # an epic's children, whichever project you're in; closed ones need -a
+tb add "Login page" --assignee Alice    # assign to a person or agent; children otherwise follow their epic
+tb edit 8M2QKRTW --assignee Bob         # assign or reassign; --no-assignee for nobody, --inherit-assignee to follow the epic again
 tb project ls                # projects, flagging any whose folder is missing
 tb project mv ~/src/old ~/src/new   # after moving a project's folder
 tb project rm ~/src/old      # delete a project and all its tasks

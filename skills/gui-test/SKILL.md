@@ -1,6 +1,7 @@
 ---
 name: gui-test
 description: Drive the taskboard GUI headlessly to check a UI change works — launch it in an invisible Xvfb display, click, drag, scroll and type with xdotool, and read screenshots. Use when asked to test, try, click through, screenshot, or visually verify the taskboard app (crates/taskboard), or after changing its UI code (crates/taskboard-ui).
+model: sonnet
 ---
 
 # Headless GUI testing

@@ -24,7 +24,7 @@ use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{column, container, mouse_area, opaque, row, stack, text_editor};
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Subscription, Task, event};
 use taskboard_core::ops::{Command, FileSource, Outcome};
-use taskboard_core::{Board, LinkKind, Status, Ulid};
+use taskboard_core::{Assignee, Board, FileKind, LinkKind, Status, Ulid, short_id};
 
 use crate::app::{
     Action, App, EditTarget, Effect, Owner, PathCheck, ProjectInput, View, drop_index,
@@ -57,6 +57,7 @@ const HOOK_SAVE_DELAY: Duration = Duration::from_secs(1);
 const EDIT_TITLE: &str = "edit_title";
 const SEARCH: &str = "search";
 const NEW_FILE_NAME: &str = "new_file_name";
+const NEW_ASSIGNEE: &str = "new_assignee";
 const FILE_EDITOR: &str = "file_editor";
 
 /// Shown in the settings modal's keybindings page.
@@ -98,6 +99,8 @@ pub struct Gui {
 #[derive(Default)]
 struct UiState {
     confirm_delete: Option<Ulid>,
+    /// The task whose ID was just copied, until another task is picked.
+    copied_id: Option<Ulid>,
     /// Link kind the user toggled to for a task or the draft; otherwise the
     /// add-link row uses [`taskboard_core::default_link_kind`].
     link_kind: Option<(Owner, LinkKind)>,
@@ -111,6 +114,9 @@ struct UiState {
     file_image: Option<iced::widget::image::Handle>,
     /// The viewed file's text being edited, while the viewer is in edit mode.
     file_edit: Option<text_editor::Content>,
+    /// The viewed file's text is shown as rendered Markdown rather than as
+    /// plain text. Markdown files start out rendered, other files plain.
+    file_rendered: bool,
     /// The task whose new-file popup is open.
     new_file_for: Option<Ulid>,
     /// The name typed in the new-file popup.
@@ -123,6 +129,10 @@ struct UiState {
     status_open: Option<Ulid>,
     /// The task whose list of epics to join in the detail panel is open.
     epic_open: Option<Ulid>,
+    /// Whose list of assignees is open.
+    assignee_open: Option<Owner>,
+    /// The name typed in the list of assignees.
+    new_assignee: String,
     /// The new folder typed for the selected task's missing project.
     relocate_path: String,
     /// The missing project whose Delete button was pressed once.
@@ -169,7 +179,15 @@ pub enum Message {
     CloseEpicMenu,
     /// An epic was picked from the task's list: (task, epic).
     ChooseEpic(Ulid, Ulid),
+    ToggleAssigneeMenu(Owner),
+    CloseAssigneeMenu,
+    ChooseAssignee(Owner, Assignee),
+    NewAssignee(String),
+    /// Assigns the name typed in the list of assignees, if there is one.
+    AddAssignee(Owner),
     ConfirmDelete(Ulid),
+    /// Copies the task's short ID, as shown in its details, to the clipboard.
+    CopyId(Ulid),
     SetLinkKind(Owner, LinkKind),
     LinkUrl(String),
     AttachPath(String),
@@ -191,6 +209,8 @@ pub enum Message {
     SaveFile,
     /// Leaves edit mode, dropping unsaved changes.
     CancelFileEdit,
+    /// Shows the viewed file's text rendered as Markdown, or as plain text.
+    RenderFile(bool),
     /// Closes the file viewer, unless it has unsaved changes.
     CloseViewer,
     /// The viewed (task, file) was read.
@@ -307,7 +327,18 @@ impl Gui {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let was_editing = self.app.editing.is_some();
         let was_selected = self.app.selected;
+        let was_tab = self.file_tab();
         let mut task = self.handle(message);
+        // A file open in a tab closes along with the tabs, like when another
+        // task is picked, unless it has unsaved changes; then the viewer
+        // shows it instead, so they can still be saved.
+        if let Some(tab) = was_tab
+            && self.app.viewing_file == Some(tab)
+            && self.file_tab() != Some(tab)
+            && !self.file_edit_dirty()
+        {
+            self.app.apply(Action::ViewFile(None));
+        }
         // The viewer can't be closed with unsaved changes, so they're only
         // lost when the file or its task is removed elsewhere.
         if self.app.viewing_file != self.ui.file_shown
@@ -336,6 +367,15 @@ impl Gui {
         if app.editing.is_some() || app.selected != ui.epic_open || !can_join_epic {
             ui.epic_open = None;
         }
+        let assignee_open = match ui.assignee_open {
+            Some(Owner::Task(id)) => app.editing.is_none() && app.selected == Some(id),
+            Some(Owner::Draft) => matches!(app.editing, Some(EditTarget::New(_))),
+            None => false,
+        };
+        if !assignee_open {
+            ui.assignee_open = None;
+            ui.new_assignee.clear();
+        }
         if app.editing.is_none() {
             ui.project_menu_open = false;
         }
@@ -354,6 +394,7 @@ impl Gui {
             ui.file_editable = false;
             ui.file_image = None;
             ui.file_edit = None;
+            ui.file_rendered = false;
             if let Some((task_id, file)) = app.viewing_file
                 && let Some(att) = app
                     .board
@@ -361,6 +402,7 @@ impl Gui {
                     .and_then(|t| t.files.iter().find(|f| f.id == file))
             {
                 let kind = att.kind;
+                ui.file_rendered = kind == FileKind::Markdown;
                 let read = Task::perform(self.platform.read_file(task_id, att), move |bytes| {
                     Message::FileRead((task_id, file), viewer::contents(kind, bytes))
                 });
@@ -371,6 +413,7 @@ impl Gui {
         if app.selected != was_selected {
             ui.relocate_path.clear();
             ui.confirm_delete_project = None;
+            ui.copied_id = None;
         }
         // Don't leave a new task's unadded link or file in the detail panel.
         if was_editing && app.editing.is_none() {
@@ -446,6 +489,12 @@ impl Gui {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        if let Message::App(action) = &message
+            && self.unsaved_blocks(action)
+        {
+            self.app.error = Some("Save or cancel the file's changes first.".into());
+            return Task::none();
+        }
         let ui = &mut self.ui;
         match message {
             Message::App(action) => return self.apply(action),
@@ -497,7 +546,29 @@ impl Gui {
                     parent: Some(epic),
                 });
             }
+            Message::ToggleAssigneeMenu(owner) => {
+                ui.assignee_open = match ui.assignee_open {
+                    Some(_) => None,
+                    None => Some(owner),
+                }
+            }
+            Message::CloseAssigneeMenu => ui.assignee_open = None,
+            Message::ChooseAssignee(owner, assignee) => {
+                ui.assignee_open = None;
+                self.app.apply(Action::SetAssignee { owner, assignee });
+            }
+            Message::NewAssignee(name) => ui.new_assignee = name,
+            Message::AddAssignee(owner) => {
+                let name = ui.new_assignee.trim().to_string();
+                if !name.is_empty() {
+                    return self.handle(Message::ChooseAssignee(owner, Assignee::Named(name)));
+                }
+            }
             Message::ConfirmDelete(id) => ui.confirm_delete = Some(id),
+            Message::CopyId(id) => {
+                ui.copied_id = Some(id);
+                return iced::clipboard::write(short_id(&id));
+            }
             Message::SetLinkKind(owner, kind) => ui.link_kind = Some((owner, kind)),
             Message::LinkUrl(s) => ui.link_url = s,
             Message::AttachPath(s) => ui.attach_path = s,
@@ -566,6 +637,7 @@ impl Gui {
                 }
             }
             Message::CancelFileEdit => ui.file_edit = None,
+            Message::RenderFile(rendered) => ui.file_rendered = rendered,
             Message::FileRead(shown, contents) => {
                 if ui.file_shown == Some(shown) {
                     match contents {
@@ -863,6 +935,13 @@ impl Gui {
                     ui.file_editable = true;
                     ui.file_image = None;
                     ui.file_edit = Some(text_editor::Content::new());
+                    ui.file_rendered = self.app.viewing_file.is_some_and(|(task, file)| {
+                        self.app.board.get(task).is_some_and(|t| {
+                            t.files
+                                .iter()
+                                .any(|f| f.id == file && f.kind == FileKind::Markdown)
+                        })
+                    });
                     return iced::widget::operation::focus(FILE_EDITOR);
                 }
             }
@@ -887,6 +966,36 @@ impl Gui {
             .file_edit
             .as_ref()
             .is_some_and(|c| Some(c.text()) != self.ui.file_text)
+    }
+
+    /// The selected task's details show in tabs: one for the details, then
+    /// one for each of its files, open in place rather than in the viewer.
+    fn tabbed(&self) -> bool {
+        self.app.view == View::InProgress
+    }
+
+    /// The (task, file) open in a tab of the selected task's details.
+    fn file_tab(&self) -> Option<(Ulid, Ulid)> {
+        let app = &self.app;
+        app.viewing_file.filter(|(task, file)| {
+            self.tabbed()
+                && app.editing.is_none()
+                && app.selected == Some(*task)
+                && app
+                    .selected_task()
+                    .is_some_and(|t| t.files.iter().any(|f| f.id == *file))
+        })
+    }
+
+    /// `action` would put away a file with unsaved changes, by opening
+    /// another tab or task.
+    fn unsaved_blocks(&self, action: &Action) -> bool {
+        self.file_edit_dirty()
+            && match action {
+                Action::ViewFile(file) => *file != self.app.viewing_file,
+                Action::Select(id) => self.file_tab().is_some() && *id != self.app.selected,
+                _ => false,
+            }
     }
 
     /// The ids of a column's visible tasks, leaving out the dragged one.
@@ -960,6 +1069,8 @@ impl Gui {
                     ui.status_open = None;
                 } else if ui.epic_open.is_some() {
                     ui.epic_open = None;
+                } else if ui.assignee_open.is_some() {
+                    ui.assignee_open = None;
                 } else if ui.new_file_for.is_some() {
                     ui.new_file_for = None;
                 } else if ui.file_edit.is_some() {
@@ -1039,6 +1150,7 @@ impl Gui {
             layers = layers.push(self.sheet());
         }
         if let Some((task_id, file_id)) = app.viewing_file
+            && self.file_tab().is_none()
             && let Some(att) = app
                 .board
                 .get(task_id)
@@ -1329,6 +1441,84 @@ mod tests {
         assert_eq!(gui.app.selected, None);
     }
 
+    /// [`gui_with_file`], in the In Progress view with its task selected.
+    fn in_progress_with_file(text: &str) -> (tempfile::TempDir, Gui, (Ulid, Ulid)) {
+        let (dir, mut gui, file) = gui_with_file(text);
+        let _ = gui.update(Message::App(Action::Move {
+            id: file.0,
+            status: Status::InProgress,
+            position: None,
+        }));
+        settle(&mut gui);
+        let _ = gui.update(Message::App(Action::SetView(View::InProgress)));
+        let _ = gui.update(Message::App(Action::Select(Some(file.0))));
+        (dir, gui, file)
+    }
+
+    #[test]
+    fn in_progress_files_open_in_tabs_that_close_with_the_task() {
+        let (_dir, mut gui, file) = in_progress_with_file("one");
+        view_file(&mut gui, file);
+        assert_eq!(gui.file_tab(), Some(file));
+        assert_eq!(gui.ui.file_text.as_deref(), Some("one"));
+
+        // The Details tab, and Esc, go back to the details.
+        let _ = gui.update(Message::App(Action::ViewFile(None)));
+        assert_eq!(gui.file_tab(), None);
+        view_file(&mut gui, file);
+        esc(&mut gui);
+        assert_eq!(gui.app.viewing_file, None);
+
+        // Picking another task, or view, doesn't leave the file in a viewer.
+        view_file(&mut gui, file);
+        let _ = gui.update(Message::App(Action::Select(None)));
+        assert_eq!(gui.app.viewing_file, None);
+        let _ = gui.update(Message::App(Action::Select(Some(file.0))));
+        view_file(&mut gui, file);
+        let _ = gui.update(Message::App(Action::SetView(View::Board)));
+        assert_eq!(gui.app.viewing_file, None);
+    }
+
+    #[test]
+    fn unsaved_changes_keep_their_tab_open() {
+        let (_dir, mut gui, file) = in_progress_with_file("one");
+        view_file(&mut gui, file);
+        let _ = gui.update(Message::EditFile);
+        type_x(&mut gui);
+        let _ = gui.update(Message::App(Action::ViewFile(None)));
+        let _ = gui.update(Message::App(Action::Select(None)));
+        assert_eq!(gui.file_tab(), Some(file));
+        assert!(gui.file_edit_dirty());
+        assert!(gui.app.error.is_some());
+
+        // Leaving the view keeps them too, in the viewer.
+        let _ = gui.update(Message::App(Action::SetView(View::Board)));
+        assert_eq!(gui.app.viewing_file, Some(file));
+        assert!(gui.file_edit_dirty());
+
+        let _ = gui.update(Message::SaveFile);
+        settle(&mut gui);
+        assert!(gui.ui.file_edit.is_none());
+        assert_eq!(gui.ui.file_text.as_deref(), Some("xone"));
+    }
+
+    #[test]
+    fn only_markdown_files_start_out_rendered() {
+        let (_dir, mut gui, file) = in_progress_with_file("# one");
+        view_file(&mut gui, file);
+        assert!(!gui.ui.file_rendered);
+        let _ = gui.update(Message::RenderFile(true));
+        assert!(gui.ui.file_rendered);
+
+        let _ = gui.update(Message::App(Action::NewFile {
+            task: file.0,
+            name: "plan".into(),
+        }));
+        settle(&mut gui);
+        assert_ne!(gui.app.viewing_file, Some(file));
+        assert!(gui.ui.file_rendered);
+    }
+
     #[test]
     fn unedited_file_is_clean_whatever_its_line_endings() {
         for text in [
@@ -1407,6 +1597,29 @@ mod tests {
         assert_eq!(gui.ui.new_file_for, Some(task));
         esc(&mut gui);
         assert_eq!(gui.ui.new_file_for, None);
+        assert_eq!(gui.app.selected, Some(task));
+    }
+
+    #[test]
+    fn assignee_menu_takes_a_new_name_and_closes_on_esc() {
+        let (_dir, mut gui, (task, _)) = gui_with_file("");
+        let owner = Owner::Task(task);
+        let _ = gui.update(Message::ToggleAssigneeMenu(owner));
+        let _ = gui.update(Message::NewAssignee("  ".into()));
+        let _ = gui.update(Message::AddAssignee(owner));
+        assert_eq!(gui.ui.assignee_open, Some(owner)); // nothing to add yet
+
+        let _ = gui.update(Message::NewAssignee(" Alice ".into()));
+        let _ = gui.update(Message::AddAssignee(owner));
+        assert_eq!(gui.ui.assignee_open, None);
+        assert_eq!(gui.ui.new_assignee, "");
+        assert_eq!(gui.app.board.assignee_names(), ["Alice"]);
+
+        let _ = gui.update(Message::ToggleAssigneeMenu(owner));
+        let _ = gui.update(Message::NewAssignee("half typed".into()));
+        esc(&mut gui);
+        assert_eq!(gui.ui.assignee_open, None);
+        assert_eq!(gui.ui.new_assignee, "");
         assert_eq!(gui.app.selected, Some(task));
     }
 

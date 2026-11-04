@@ -17,7 +17,8 @@ pub use board::{NewTask, Progress, TaskPatch};
 pub use filter::{DateField, Filter, parse_date};
 pub use hooks::{Hook, HookEvent, TaskEvent};
 pub use model::{
-    Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task, default_link_kind, short_id,
+    Assignee, Attachment, Board, FileKind, Link, LinkKind, Project, Status, Task,
+    default_link_kind, short_id,
 };
 pub use ops::{Command, FileSource, Outcome, Output};
 pub use settings::{DeviceSettings, GlobalSettings};

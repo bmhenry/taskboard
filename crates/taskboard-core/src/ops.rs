@@ -14,7 +14,7 @@ use ulid::Ulid;
 
 use crate::board::{NewTask, TaskPatch};
 use crate::hooks::{self, TaskEvent};
-use crate::model::{Attachment, Board, Link, LinkKind, Status};
+use crate::model::{Assignee, Attachment, Board, Link, LinkKind, Status};
 use crate::settings::{GlobalSettings, NewTaskPosition};
 use crate::store::{ProjectInput, Store, create_project_dir, project_path, resolve_project};
 use crate::{Error, Result};
@@ -50,6 +50,8 @@ pub enum Command {
         #[serde(default)]
         epic: bool,
         parent: Option<Ulid>,
+        #[serde(default)]
+        assignee: Assignee,
         /// The new task's id, chosen by the caller so it can show the task
         /// before this runs; a new one if `None`. It must be unused.
         id: Option<Ulid>,
@@ -84,6 +86,11 @@ pub enum Command {
     SetParent {
         id: Ulid,
         parent: Option<Ulid>,
+    },
+    /// Assigns a task; see [`Assignee`].
+    SetAssignee {
+        id: Ulid,
+        assignee: Assignee,
     },
     /// Adds a link; the URL is trimmed, and a blank one is ignored.
     AddLink {
@@ -257,6 +264,7 @@ pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Re
             position,
             epic,
             parent,
+            assignee,
             id,
         } => {
             let position = position.unwrap_or(settings.new_task_position);
@@ -275,6 +283,7 @@ pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Re
                     position,
                     epic,
                     parent,
+                    assignee,
                     id,
                 })
             });
@@ -337,6 +346,10 @@ pub fn execute(store: &Store, settings: &GlobalSettings, command: Command) -> Re
         }
         Command::SetParent { id, parent } => {
             store.update(|b| b.set_parent(id, parent))?;
+            no_events(Output::Done)
+        }
+        Command::SetAssignee { id, assignee } => {
+            store.update(|b| b.set_assignee(id, assignee))?;
             no_events(Output::Done)
         }
         Command::AddLink { task, url, kind } => {
@@ -532,6 +545,7 @@ mod tests {
             position: None,
             epic: false,
             parent: None,
+            assignee: Assignee::Inherited,
             id: None,
         }
     }
@@ -580,6 +594,7 @@ mod tests {
                 position: None,
                 epic: false,
                 parent: None,
+                assignee: Assignee::Named("Alice".into()),
                 id: None,
             })
             .unwrap();
@@ -598,6 +613,7 @@ mod tests {
         assert_eq!(task.description, "desc");
         assert_eq!(task.status, Status::Backlog);
         assert_eq!(task.links, [link]);
+        assert_eq!(task.assignee, Assignee::Named("Alice".into()));
         let names: Vec<_> = task.files.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["notes.md", "shot.png"]);
         assert_eq!(task.files[1].kind, FileKind::Image);
@@ -1262,6 +1278,7 @@ mod tests {
                 position: Some(NewTaskPosition::Bottom),
                 epic: true,
                 parent: Some(file),
+                assignee: Assignee::Named("Alice".into()),
                 id: Some(id),
             },
             json!({
@@ -1272,7 +1289,7 @@ mod tests {
                     {"type": "path", "path": "/tmp/a.md"},
                     {"type": "bytes", "name": "b.png", "bytes": "AP8B"},
                 ],
-                "position": "bottom", "epic": true, "parent": f, "id": i,
+                "position": "bottom", "epic": true, "parent": f, "assignee": "Alice", "id": i,
             }),
         );
         golden(
@@ -1298,6 +1315,13 @@ mod tests {
         golden(
             Command::SetParent { id, parent: None },
             json!({"type": "set_parent", "id": i, "parent": null}),
+        );
+        golden(
+            Command::SetAssignee {
+                id,
+                assignee: Assignee::Nobody,
+            },
+            json!({"type": "set_assignee", "id": i, "assignee": ""}),
         );
         golden(
             Command::AddLink {

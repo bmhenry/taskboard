@@ -19,7 +19,8 @@ use taskboard_core::{Board, LinkKind, Status, Task, Ulid};
 use super::drag::{CARD_GAP, Slot};
 use super::theme::{self, BOLD, Pal, Style, rgb, status_index};
 use super::widgets::{
-    El, btn, count_badge, dot, epic_badge, grow, missing_project_badge, parent_label, plural,
+    El, assignee_label, btn, count_badge, dot, epic_badge, grow, missing_project_badge,
+    parent_label, plural,
 };
 use super::{Gui, Message, edge, side_width};
 use crate::app::{Action, DRAG_THRESHOLD, EditTarget, View};
@@ -371,8 +372,8 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     container(droppable).id(card_id(id)).into()
 }
 
-/// A card's title, counts and source link, its epic badge or parent epic,
-/// plus its project's name if given, and a warning if its project's folder is
+/// A card's title, counts and source link, its epic badge or parent epic, its
+/// assignee, plus its project's name if given, and a warning if its project's folder is
 /// `missing`.
 pub fn card_body<'a>(
     p: Pal,
@@ -401,6 +402,9 @@ pub fn card_body<'a>(
     body = body.push(text(&task.title).size(14));
     if let Some(epic) = board.parent_of(task) {
         body = body.push(parent_label(p, &epic.title));
+    }
+    if let Some(name) = board.assignee_of(task) {
+        body = body.push(assignee_label(p, name));
     }
     body = body.push(meta);
     if let Some(link) = task.links.iter().find(|l| l.kind == LinkKind::Source) {

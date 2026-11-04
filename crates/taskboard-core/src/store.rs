@@ -364,7 +364,9 @@ pub fn parse_board(text: &str) -> Result<Board> {
         return Err(Error::UnsupportedSchema(version));
     }
     // Migrations from older versions go here, each upgrading `value` by one step.
-    Ok(serde_json::from_value(value)?)
+    let mut board: Board = serde_json::from_value(value)?;
+    board.remember_assignees_in_use();
+    Ok(board)
 }
 
 #[cfg(test)]
@@ -531,6 +533,31 @@ mod tests {
         assert!(!board.tasks[0].epic && board.tasks[0].parent.is_none());
         assert!(board.tasks[1].parent.is_some());
         assert!(board.parent_of(&board.tasks[1]).is_none());
+        assert_eq!(board.tasks[0].assignee, crate::Assignee::Inherited);
+    }
+
+    #[test]
+    fn names_assigned_but_not_remembered_are_remembered_on_load() {
+        // As if hand-edited, or saved before names were remembered.
+        let text = r#"{"schema_version": 2, "assignees": ["Bob"], "tasks": [
+            {"id": "01M5X724HRT6FPK984034NF3M2", "title": "t", "project": "/p",
+             "status": "open", "order": 0, "assignee": "Alice",
+             "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"}]}"#;
+        let board = parse_board(text).unwrap();
+        assert_eq!(board.assignees, ["Bob", "Alice"]);
+    }
+
+    #[test]
+    fn assignees_round_trip_as_a_string_or_null() {
+        use crate::Assignee;
+        for (assignee, json) in [
+            (Assignee::Inherited, serde_json::Value::Null),
+            (Assignee::Nobody, "".into()),
+            (Assignee::Named("Alice".into()), "Alice".into()),
+        ] {
+            assert_eq!(serde_json::to_value(&assignee).unwrap(), json);
+            assert_eq!(serde_json::from_value::<Assignee>(json).unwrap(), assignee);
+        }
     }
 
     #[test]

@@ -18,6 +18,11 @@ pub struct Board {
     /// Every project a task has been filed under, in the order first used.
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Every name a task has been assigned to, in the order first used. A
+    /// name stays after no task has it, to be picked again; delete it here
+    /// to forget it.
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub tasks: Vec<Task>,
 }
 
@@ -26,6 +31,7 @@ impl Default for Board {
         Board {
             schema_version: SCHEMA_VERSION,
             projects: Vec::new(),
+            assignees: Vec::new(),
             tasks: Vec::new(),
         }
     }
@@ -64,6 +70,10 @@ pub struct Task {
     /// The epic this task is a child of; see [`Board::parent_of`].
     #[serde(default)]
     pub parent: Option<Ulid>,
+    /// Who the task was assigned to; see [`Board::assignee_of`] for who that
+    /// makes it.
+    #[serde(default)]
+    pub assignee: Assignee,
 }
 
 impl Task {
@@ -86,6 +96,40 @@ pub fn default_link_kind(links: &[Link]) -> LinkKind {
         LinkKind::Context
     } else {
         LinkKind::Source
+    }
+}
+
+/// Who a task has been assigned to. On disk and on the wire it's a string or
+/// null: a name, `""` for [`Assignee::Nobody`], or null for
+/// [`Assignee::Inherited`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "Option<String>", into = "Option<String>")]
+pub enum Assignee {
+    /// Nothing chosen: a child follows its epic, and other tasks have nobody.
+    #[default]
+    Inherited,
+    /// Nobody, whoever the task's epic is assigned to.
+    Nobody,
+    Named(String),
+}
+
+impl From<Option<String>> for Assignee {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            None => Assignee::Inherited,
+            Some(name) if name.is_empty() => Assignee::Nobody,
+            Some(name) => Assignee::Named(name),
+        }
+    }
+}
+
+impl From<Assignee> for Option<String> {
+    fn from(value: Assignee) -> Self {
+        match value {
+            Assignee::Inherited => None,
+            Assignee::Nobody => Some(String::new()),
+            Assignee::Named(name) => Some(name),
+        }
     }
 }
 

@@ -630,6 +630,7 @@ mod tests {
                 position: None,
                 epic: false,
                 parent: None,
+                assignee: taskboard_core::Assignee::Inherited,
                 id: None,
             };
             match ops::execute(&self.store, &GlobalSettings::default(), command)

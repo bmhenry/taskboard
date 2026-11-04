@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::Serialize;
 use ulid::Ulid;
 
-use crate::model::{Board, Link, Project, Status, Task};
+use crate::model::{Assignee, Board, Link, Project, Status, Task};
 use crate::settings::NewTaskPosition;
 use crate::{Error, Result};
 
@@ -25,6 +25,7 @@ pub struct NewTask {
     pub epic: bool,
     /// The epic it's a child of, which must be in the same project.
     pub parent: Option<Ulid>,
+    pub assignee: Assignee,
     /// The task's id, if the caller chose it (as the GUI does, to show a
     /// task before the store has it); otherwise a new one. It must be unused.
     pub id: Option<Ulid>,
@@ -40,6 +41,7 @@ pub struct TaskPatch {
     pub status: Option<Status>,
     /// Sets or, with `Some(None)`, clears the task's epic.
     pub parent: Option<Option<Ulid>>,
+    pub assignee: Option<Assignee>,
 }
 
 /// How far through its child tasks an epic is.
@@ -230,6 +232,74 @@ impl Board {
         epics
     }
 
+    /// Who `task` is assigned to: the name it was given, or else its epic's.
+    pub fn assignee_of<'a>(&'a self, task: &'a Task) -> Option<&'a str> {
+        let chosen = match &task.assignee {
+            Assignee::Inherited => &self.parent_of(task)?.assignee,
+            chosen => chosen,
+        };
+        match chosen {
+            Assignee::Named(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Every name that can be assigned, sorted: those in
+    /// [`Board::assignees`].
+    pub fn assignee_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.assignees.iter().map(String::as_str).collect();
+        names.sort_by_key(|name| (name.to_lowercase(), *name));
+        names.dedup();
+        names
+    }
+
+    /// The remembered spelling of `name`, whatever its case.
+    fn known_assignee(&self, name: &str) -> Option<&str> {
+        let name = name.to_lowercase();
+        self.assignees
+            .iter()
+            .find(|known| known.to_lowercase() == name)
+            .map(String::as_str)
+    }
+
+    /// Adds the name `assignee` gives, if any, to [`Board::assignees`]
+    /// unless it's there already.
+    fn remember_assignee(&mut self, assignee: &Assignee) {
+        if let Assignee::Named(name) = assignee
+            && self.known_assignee(name).is_none()
+        {
+            self.assignees.push(name.clone());
+        }
+    }
+
+    /// Remembers every name a task is assigned to, such as one typed into
+    /// `tasks.json` by hand or by a version that didn't remember names.
+    pub(crate) fn remember_assignees_in_use(&mut self) {
+        let used: Vec<Assignee> = self.tasks.iter().map(|t| t.assignee.clone()).collect();
+        for assignee in &used {
+            self.remember_assignee(assignee);
+        }
+    }
+
+    /// `assignee` as it's stored on a task that's a child of an epic or not.
+    /// A name is trimmed and takes the spelling of one already remembered,
+    /// whatever its case, so "alice" doesn't become a second Alice. Only a
+    /// child has an epic to turn down, so for others nobody is the default.
+    fn normalized_assignee(&self, assignee: Assignee, child: bool) -> Result<Assignee> {
+        match assignee {
+            Assignee::Named(name) => {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(Error::Invalid("an assignee's name can't be blank".into()));
+                }
+                let known = self.known_assignee(name);
+                Ok(Assignee::Named(known.unwrap_or(name).to_string()))
+            }
+            Assignee::Nobody if !child => Ok(Assignee::Inherited),
+            other => Ok(other),
+        }
+    }
+
     /// Checks that a task in `project` can be a child of `parent`. Epics are
     /// one level deep: only they can be parents, and they can't have one.
     fn check_parent(&self, epic: bool, parent: Ulid, project: &Path) -> Result<()> {
@@ -271,7 +341,9 @@ impl Board {
         if let Some(parent) = new.parent {
             self.check_parent(new.epic, parent, &new.project)?;
         }
+        let assignee = self.normalized_assignee(new.assignee, new.parent.is_some())?;
         self.add_project(&new.project)?;
+        self.remember_assignee(&assignee);
         let status = new.status.unwrap_or(Status::Open);
         let now = Utc::now();
         let task = Task {
@@ -288,6 +360,7 @@ impl Board {
             files: Vec::new(),
             epic: new.epic,
             parent: new.parent,
+            assignee,
         };
         let id = task.id;
         let mut ids: Vec<Ulid> = self.column(status).iter().map(|t| t.id).collect();
@@ -324,6 +397,10 @@ impl Board {
         if let Some(parent) = parent {
             self.check_parent(task.epic, parent, project)?;
         }
+        let assignee = patch
+            .assignee
+            .map(|a| self.normalized_assignee(a, parent.is_some()))
+            .transpose()?;
         let children: Vec<Ulid> = if project == task.project {
             Vec::new()
         } else {
@@ -331,6 +408,9 @@ impl Board {
         };
         if let Some(project) = &patch.project {
             self.add_project(project)?;
+        }
+        if let Some(assignee) = &assignee {
+            self.remember_assignee(assignee);
         }
         let task = self.get_mut(id)?;
         if let Some(title) = patch.title {
@@ -348,6 +428,9 @@ impl Board {
         }
         if let Some(parent) = patch.parent {
             task.parent = parent;
+        }
+        if let Some(assignee) = assignee {
+            task.assignee = assignee;
         }
         let now = Utc::now();
         task.updated = now;
@@ -408,6 +491,17 @@ impl Board {
             id,
             TaskPatch {
                 parent: Some(parent),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Assigns a task; see [`Assignee`].
+    pub fn set_assignee(&mut self, id: Ulid, assignee: Assignee) -> Result<()> {
+        self.edit(
+            id,
+            TaskPatch {
+                assignee: Some(assignee),
                 ..Default::default()
             },
         )
@@ -726,6 +820,58 @@ mod tests {
         b.edit(x, to("/p", Some(None))).unwrap();
         assert_eq!(b.get(x).unwrap().project, Path::new("/p"));
         assert_eq!(b.get(x).unwrap().parent, None);
+    }
+
+    #[test]
+    fn children_follow_their_epics_assignee_unless_overridden() {
+        let mut b = Board::default();
+        let e = epic(&mut b, "e");
+        let child = titled(&mut b, "c", Status::Backlog);
+        b.set_parent(child, Some(e)).unwrap();
+        let assignee = |b: &Board, id| b.assignee_of(b.get(id).unwrap()).map(str::to_string);
+        let named = |name: &str| Assignee::Named(name.into());
+        assert_eq!(assignee(&b, child), None);
+
+        b.set_assignee(e, named(" Alice ")).unwrap();
+        assert_eq!(assignee(&b, child).as_deref(), Some("Alice"));
+
+        // An override stays through changes to the epic, and can be undone.
+        b.set_assignee(child, named("Bob")).unwrap();
+        b.set_assignee(e, named("Carol")).unwrap();
+        assert_eq!(assignee(&b, child).as_deref(), Some("Bob"));
+        b.set_assignee(child, Assignee::Nobody).unwrap();
+        assert_eq!(assignee(&b, child), None);
+        b.set_assignee(child, Assignee::Inherited).unwrap();
+        assert_eq!(assignee(&b, child).as_deref(), Some("Carol"));
+
+        // A child that leaves its epic stops following it.
+        b.set_parent(child, None).unwrap();
+        assert_eq!(assignee(&b, child), None);
+    }
+
+    #[test]
+    fn assignee_names_are_remembered_and_shared_whatever_their_case() {
+        let mut b = Board::default();
+        let x = titled(&mut b, "x", Status::Backlog);
+        let y = titled(&mut b, "y", Status::Backlog);
+        let z = titled(&mut b, "z", Status::Backlog);
+        b.set_assignee(x, Assignee::Named("zed".into())).unwrap();
+        b.set_assignee(y, Assignee::Named("Alice".into())).unwrap();
+        b.set_assignee(z, Assignee::Named("alice ".into())).unwrap();
+        assert_eq!(b.assignee_names(), ["Alice", "zed"]);
+
+        // A name no task has any more is still offered.
+        b.set_assignee(x, Assignee::Named("ALICE".into())).unwrap();
+        assert_eq!(b.get(x).unwrap().assignee, Assignee::Named("Alice".into()));
+        assert_eq!(b.assignee_names(), ["Alice", "zed"]);
+
+        assert!(b.set_assignee(z, Assignee::Named("  ".into())).is_err());
+        assert_eq!(b.get(z).unwrap().assignee, Assignee::Named("Alice".into()));
+
+        // Outside an epic there's nothing to turn down, so joining one later
+        // follows it as usual.
+        b.set_assignee(z, Assignee::Nobody).unwrap();
+        assert_eq!(b.get(z).unwrap().assignee, Assignee::Inherited);
     }
 
     #[test]

@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use taskboard_core::{
-    Board, DateField, Error, Filter, GlobalSettings, Link, LinkKind, NewTask, Progress, Status,
-    Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date, project_path,
-    project_root, short_id,
+    Assignee, Board, DateField, Error, Filter, GlobalSettings, Link, LinkKind, NewTask, Progress,
+    Status, Store, Task, TaskEvent, TaskPatch, Ulid, create_project_dir, hooks, parse_date,
+    project_path, project_root, short_id,
 };
 
 #[derive(Parser, Debug)]
@@ -58,13 +58,16 @@ enum Command {
         /// Make it a child of this epic, in the epic's project unless --project is given.
         #[arg(long, value_name = "EPIC")]
         parent: Option<String>,
+        /// Assign it to this person or agent, rather than to its epic's assignee.
+        #[arg(long, value_name = "NAME")]
+        assignee: Option<String>,
     },
     /// List the project's tasks, grouped by status. Closed tasks are hidden unless asked for.
     #[command(alias = "ls")]
     List(ListArgs),
     /// Show one task in full.
     Show { id: String },
-    /// Change a task's title, description, status, project, or epic.
+    /// Change a task's title, description, status, project, epic, or assignee.
     Edit {
         id: String,
         #[arg(short, long)]
@@ -84,6 +87,15 @@ enum Command {
         /// Take the task out of its epic.
         #[arg(long)]
         no_parent: bool,
+        /// Assign the task to this person or agent.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["no_assignee", "inherit_assignee"])]
+        assignee: Option<String>,
+        /// Assign the task to nobody, whoever its epic is assigned to.
+        #[arg(long, conflicts_with = "inherit_assignee")]
+        no_assignee: bool,
+        /// Drop the task's own assignee, so it follows its epic's.
+        #[arg(long)]
+        inherit_assignee: bool,
     },
     /// Make a task an epic, which other tasks can be children of.
     Promote { id: String },
@@ -256,6 +268,7 @@ fn run(
             file,
             epic,
             parent,
+            assignee,
         } => {
             let links = source
                 .into_iter()
@@ -291,6 +304,7 @@ fn run(
                 position: settings.new_task_position,
                 epic,
                 parent: parent.map(|(id, _)| id),
+                assignee: assignee.map_or(Assignee::Inherited, Assignee::Named),
                 id: None,
             };
             let (id, events) = store.update_with_events(|b| b.create(new))?;
@@ -303,7 +317,7 @@ fn run(
             let board = store.load()?;
             let task = board.get(id).expect("task was just created");
             if json {
-                print_json(out, task)?;
+                print_json(out, &TaskJson::new(&board, task))?;
             } else {
                 writeln!(out, "Created {}  {}", task.short_id(), task.title)?;
             }
@@ -330,6 +344,7 @@ fn run(
                 .filter(|t| filter.matches(t) && is_listed(t))
                 .collect();
             if json {
+                let tasks: Vec<_> = tasks.iter().map(|t| TaskJson::new(&board, t)).collect();
                 print_json(out, &tasks)?;
             } else {
                 write_list(out, &tasks, &board, args.all_projects)?;
@@ -352,13 +367,23 @@ fn run(
             to_project,
             parent,
             no_parent,
+            assignee,
+            no_assignee,
+            inherit_assignee,
         } => {
+            let assignee = match (assignee, no_assignee, inherit_assignee) {
+                (Some(name), ..) => Some(Assignee::Named(name)),
+                (None, true, _) => Some(Assignee::Nobody),
+                (None, false, true) => Some(Assignee::Inherited),
+                (None, false, false) => None,
+            };
             let mut patch = TaskPatch {
                 title,
                 project: to_project.as_deref().map(create_project_dir).transpose()?,
                 description: description.map(read_text).transpose()?,
                 status,
                 parent: no_parent.then_some(None),
+                assignee,
             };
             let (id, events) = store.update_with_events(|b| {
                 let id = b.resolve(&id)?;
@@ -605,7 +630,7 @@ fn report(
     let board = store.load()?;
     let task = board.get(id).expect("task exists after update");
     if json {
-        print_json(out, task)
+        print_json(out, &TaskJson::new(&board, task))
     } else {
         writeln!(
             out,
@@ -618,11 +643,29 @@ fn report(
     }
 }
 
+/// A task as `--json` prints it, with who it's assigned to once its epic is
+/// taken into account.
+#[derive(serde::Serialize)]
+struct TaskJson<'a> {
+    #[serde(flatten)]
+    task: &'a Task,
+    assigned_to: Option<&'a str>,
+}
+
+impl<'a> TaskJson<'a> {
+    fn new(board: &'a Board, task: &'a Task) -> TaskJson<'a> {
+        TaskJson {
+            task,
+            assigned_to: board.assignee_of(task),
+        }
+    }
+}
+
 /// What `show --json` prints: the task, plus its epic or its children.
 #[derive(serde::Serialize)]
 struct TaskDetails<'a> {
     #[serde(flatten)]
-    task: &'a Task,
+    task: TaskJson<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_task: Option<TaskSummary<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -635,7 +678,7 @@ impl<'a> TaskDetails<'a> {
     fn new(board: &'a Board, task: &'a Task) -> TaskDetails<'a> {
         let children = board.children(task.id).into_iter();
         TaskDetails {
-            task,
+            task: TaskJson::new(board, task),
             parent_task: board.parent_of(task).map(TaskSummary::of),
             children: task.epic.then(|| children.map(TaskSummary::of).collect()),
             progress: task.epic.then(|| board.progress(task.id)),
@@ -693,6 +736,9 @@ fn write_list(
         if let Some(epic) = board.parent_of(task) {
             extras.push(format!("in {}  {}", epic.short_id(), epic.title));
         }
+        if let Some(name) = board.assignee_of(task) {
+            extras.push(format!("@{name}"));
+        }
         if !task.links.is_empty() {
             extras.push(plural(task.links.len(), "link"));
         }
@@ -735,6 +781,11 @@ fn write_task(out: &mut impl Write, task: &Task, board: &Board) -> io::Result<()
     let project_name = board.project_name(&task.project);
     writeln!(out, "project:  {project_name} ({})", task.project.display())?;
     writeln!(out, "status:   {}", task.status)?;
+    if let Some(name) = board.assignee_of(task) {
+        let from_epic = task.assignee == Assignee::Inherited;
+        let note = if from_epic { " (from its epic)" } else { "" };
+        writeln!(out, "assignee: {name}{note}")?;
+    }
     if task.epic {
         let progress = progress_text(board.progress(task.id));
         writeln!(out, "epic:     yes, children {progress}")?;
@@ -945,6 +996,39 @@ mod tests {
         tb(&store, &["edit", &child.short_id(), "--no-parent"]);
         let board = store.load().unwrap();
         assert_eq!(board.get(child.id).unwrap().parent, None);
+    }
+
+    #[test]
+    fn assignees_from_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let epic: Task = serde_json::from_str(&tb(
+            &store,
+            &["--json", "add", "Epic", "--epic", "--assignee", "Alice"],
+        ))
+        .unwrap();
+        let child: Task = serde_json::from_str(&tb(
+            &store,
+            &["--json", "add", "Child", "--parent", &epic.short_id()],
+        ))
+        .unwrap();
+        let id = child.short_id();
+        let shown = |store: &Store| -> serde_json::Value {
+            serde_json::from_str(&tb(store, &["--json", "show", &id])).unwrap()
+        };
+
+        let json = shown(&store);
+        assert_eq!(json["assignee"], serde_json::Value::Null);
+        assert_eq!(json["assigned_to"], "Alice");
+        assert!(tb(&store, &["show", &id]).contains("assignee: Alice (from its epic)"));
+        assert!(tb(&store, &["list"]).contains("@Alice"));
+
+        tb(&store, &["edit", &id, "--assignee", "bob"]);
+        assert_eq!(shown(&store)["assigned_to"], "bob");
+        tb(&store, &["edit", &id, "--no-assignee"]);
+        assert_eq!(shown(&store)["assigned_to"], serde_json::Value::Null);
+        tb(&store, &["edit", &id, "--inherit-assignee"]);
+        assert_eq!(shown(&store)["assigned_to"], "Alice");
     }
 
     #[test]

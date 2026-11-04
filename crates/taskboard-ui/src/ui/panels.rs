@@ -2,20 +2,22 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
-use iced::widget::{Column, Space, button, column, container, row, scrollable, text};
-use iced::{Alignment, Background, Border, Length};
+use iced::widget::{
+    Column, Space, button, column, container, mouse_area, row, scrollable, text, tooltip,
+};
+use iced::{Alignment, Background, Border, Length, Padding, mouse};
 use taskboard_core::{
-    FileKind, Link, LinkKind, Status, Task, Ulid, default_link_kind, new_file_name,
+    Assignee, FileKind, Link, LinkKind, Status, Task, Ulid, default_link_kind, new_file_name,
 };
 
 use super::popup::popup;
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
-use super::viewer::markdown;
+use super::viewer::{self, markdown};
 use super::widgets::{
     El, LINE_HEIGHT, btn, epic_badge, grow, input, label, link, path_label, save_keys,
     section_title, shorten_path, status_dot, warning_icon,
 };
-use super::{EDIT_TITLE, Gui, Message, NEW_FILE_NAME};
+use super::{EDIT_TITLE, Gui, Message, NEW_ASSIGNEE, NEW_FILE_NAME};
 use crate::app::{Action, EditTarget, Owner, ProjectInput};
 
 /// Unscaled minimum width of the status dropdown's list.
@@ -25,23 +27,122 @@ const PROJECT_MENU_WIDTH: f32 = 360.0;
 const PROJECT_MENU_MAX_HEIGHT: f32 = 320.0;
 /// The longest project path shown in the list of projects.
 const PROJECT_MENU_PATH_CHARS: usize = 48;
+/// Unscaled width of the list of assignees, and of its names' greatest height.
+const ASSIGNEE_MENU_WIDTH: f32 = 260.0;
+const ASSIGNEE_NAMES_MAX_HEIGHT: f32 = 240.0;
+/// The longest name shown on the assignee dropdown, so its arrow stays in view.
+const ASSIGNEE_FACE_CHARS: usize = 24;
 
 pub fn side_panel<'a>(p: Pal, width: Length, body: Column<'a, Message>) -> El<'a> {
-    container(
-        scrollable(container(body.spacing(10)).padding(16))
-            .direction(Direction::Vertical(
-                Scrollbar::new().width(4).scroller_width(4),
-            ))
-            .height(Length::Fill)
-            .style(move |_, s| theme::scroll_style(p, s)),
-    )
+    container(panel_scroll(p, body))
+        .width(width)
+        .height(Length::Fill)
+        .style(move |_| theme::fill(p.panel, 8.0))
+        .into()
+}
+
+/// A panel's `body`, scrolling if it's too tall.
+fn panel_scroll<'a>(p: Pal, body: Column<'a, Message>) -> El<'a> {
+    scrollable(container(body.spacing(10)).padding(16))
+        .direction(Direction::Vertical(
+            Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .height(Length::Fill)
+        .style(move |_, s| theme::scroll_style(p, s))
+        .into()
+}
+
+/// A task's details. Where the details are [`Gui::tabbed`], they're the
+/// first of a row of tabs, followed by one for each of the task's files.
+pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
+    let p = gui.pal();
+    if !gui.tabbed() {
+        return side_panel(p, width, detail_body(gui, task));
+    }
+    let open = gui
+        .file_tab()
+        .and_then(|(_, file)| task.files.iter().find(|f| f.id == file));
+    let dirty = gui.file_edit_dirty();
+    let details = tab(p, "Details".into(), open.is_none(), Action::ViewFile(None));
+    let files = task.files.iter().map(|f| {
+        let shown = open.is_some_and(|o| o.id == f.id);
+        let mut name = shorten_name(&f.name, TAB_NAME_CHARS);
+        if shown && dirty {
+            name.push_str(" •");
+        }
+        tab(p, name, shown, Action::ViewFile(Some((task.id, f.id))))
+    });
+    let tabs = row(std::iter::once(details).chain(files))
+        .spacing(2)
+        .wrap()
+        .vertical_spacing(2);
+    let rule = container(Space::new())
+        .width(Length::Fill)
+        .height(1)
+        .style(move |_| theme::fill(p.border, 0.0));
+    let content = match open {
+        Some(att) => viewer::file_tab(gui, att),
+        None => panel_scroll(p, detail_body(gui, task)),
+    };
+    container(column![
+        container(tabs).padding(Padding::new(8.0).bottom(0)),
+        rule,
+        content
+    ])
     .width(width)
     .height(Length::Fill)
     .style(move |_| theme::fill(p.panel, 8.0))
     .into()
 }
 
-pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
+/// The longest file name shown on a tab.
+const TAB_NAME_CHARS: usize = 28;
+
+/// `name`, cut short with an ellipsis if it's longer than `max` characters.
+fn shorten_name(name: &str, max: usize) -> String {
+    if name.chars().count() > max {
+        let start: String = name.chars().take(max - 1).collect();
+        format!("{start}…")
+    } else {
+        name.to_string()
+    }
+}
+
+/// A tab over the task's details, underlined when it's `shown`.
+fn tab<'a>(p: Pal, name: String, shown: bool, on_press: Action) -> El<'a> {
+    let face = text(name)
+        .size(13)
+        .wrapping(Wrapping::None)
+        .color(rgb(if shown { p.text } else { p.muted }));
+    let face = button(face)
+        .padding([p.pad_y(13.0 * LINE_HEIGHT, 6.0), 12.0])
+        .style(move |_, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: (hovered && !shown).then(|| Background::Color(rgb(p.card_hover))),
+                border: Border {
+                    radius: 6.0.into(),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            }
+        })
+        .on_press(Message::App(on_press));
+    let underline = container(Space::new())
+        .width(Length::Fill)
+        .height(2)
+        .style(move |_| {
+            if shown {
+                theme::fill(p.accent, 1.0)
+            } else {
+                container::Style::default()
+            }
+        });
+    column![face, underline].width(Length::Shrink).into()
+}
+
+/// The task's details: everything about it, and the ways to change it.
+fn detail_body<'a>(gui: &'a Gui, task: &'a Task) -> Column<'a, Message> {
     let (p, ui) = (gui.pal(), &gui.ui);
     let delete = if ui.confirm_delete == Some(task.id) {
         btn(
@@ -54,27 +155,21 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
         btn(p, "Delete", Style::Quiet, Message::ConfirmDelete(task.id))
     };
     let board = &gui.app.board;
-    let top = row![
-        status_dot(p, task.status),
-        text(task.short_id())
-            .size(12)
-            .font(MONO)
-            .color(rgb(p.muted)),
-    ]
-    .push(task.epic.then(|| epic_badge(p, board.progress(task.id))))
-    .extend([
-        grow(),
-        btn(
-            p,
-            "Edit",
-            Style::Normal,
-            Message::App(Action::Edit(EditTarget::Existing(task.id))),
-        ),
-        delete,
-        btn(p, "×", Style::Quiet, Message::App(Action::Select(None))),
-    ])
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let top = row![status_dot(p, task.status), copy_id(gui, task)]
+        .push(task.epic.then(|| epic_badge(p, board.progress(task.id))))
+        .extend([
+            grow(),
+            btn(
+                p,
+                "Edit",
+                Style::Normal,
+                Message::App(Action::Edit(EditTarget::Existing(task.id))),
+            ),
+            delete,
+            btn(p, "×", Style::Quiet, Message::App(Action::Select(None))),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
 
     let fmt = |d: chrono::DateTime<chrono::Utc>| {
         d.with_timezone(&chrono::Local)
@@ -94,7 +189,10 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     let mut body = column![
         top,
         text(&task.title).size(20).font(BOLD),
-        status_dropdown(gui, task),
+        row![status_dropdown(gui, task), task_assignee(gui, task)]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap(),
         path_label(p, &project, &task.project.display().to_string()),
     ];
     if gui.app.project_missing(&task.project) {
@@ -114,8 +212,37 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     let owner = Owner::Task(task.id);
     body = links_editor(gui, body, owner, &task.links);
     let files = task.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
-    body = files_editor(gui, body, owner, files);
-    side_panel(p, width, body)
+    files_editor(gui, body, owner, files)
+}
+
+/// The task's short ID, copied to the clipboard on a click; "Copied" follows
+/// it once it has been.
+fn copy_id<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
+    let p = gui.pal();
+    let id = button(text(task.short_id()).size(12).font(MONO))
+        .padding(0)
+        .style(move |_, status| button::Style {
+            text_color: rgb(match status {
+                button::Status::Hovered | button::Status::Pressed => p.accent,
+                _ => p.muted,
+            }),
+            ..button::Style::default()
+        })
+        .on_press(Message::CopyId(task.id));
+    let id = mouse_area(id).interaction(mouse::Interaction::Pointer);
+    let id = tooltip(
+        id,
+        container(text("Copy ID").size(12))
+            .padding([4, 8])
+            .style(move |_| theme::boxed(p.card, p.border, 6.0)),
+        tooltip::Position::Bottom,
+    )
+    .gap(4);
+    row![id]
+        .push((gui.ui.copied_id == Some(task.id)).then(|| label(p, "Copied")))
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// Adds an epic's child tasks, each opening on a click and removable, and
@@ -282,6 +409,114 @@ fn epic_menu<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
         .padding(6)
         .style(move |_| theme::boxed(p.panel, p.border, 8.0))
         .into()
+}
+
+/// The dropdown for `task`'s assignee.
+fn task_assignee<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
+    let board = &gui.app.board;
+    let epic = board.parent_of(task).map(|epic| board.assignee_of(epic));
+    assignee_dropdown(gui, Owner::Task(task.id), &task.assignee, epic)
+}
+
+/// Shows who `owner` is assigned to; clicking it opens a list to change that.
+/// `epic` is the assignee of its epic, if it has one.
+fn assignee_dropdown<'a>(
+    gui: &'a Gui,
+    owner: Owner,
+    chosen: &'a Assignee,
+    epic: Option<Option<&'a str>>,
+) -> El<'a> {
+    let p = gui.pal();
+    let shown = match (chosen, epic) {
+        (Assignee::Named(name), _) => name.clone(),
+        (Assignee::Inherited, Some(Some(name))) => format!("{name} (from epic)"),
+        _ => "Unassigned".to_string(),
+    };
+    let shown = shorten_name(&shown, ASSIGNEE_FACE_CHARS);
+    let face = btn(
+        p,
+        format!("{shown} ▾"),
+        Style::Normal,
+        Message::ToggleAssigneeMenu(owner),
+    );
+    let menu =
+        (gui.ui.assignee_open == Some(owner)).then(|| assignee_menu(gui, owner, chosen, epic));
+    popup(face, menu)
+        .on_dismiss(Message::CloseAssigneeMenu)
+        .into()
+}
+
+/// What `owner` can be assigned to: its epic's assignee if it has an epic,
+/// nobody, the names on the board, or a new name typed in.
+fn assignee_menu<'a>(
+    gui: &'a Gui,
+    owner: Owner,
+    chosen: &'a Assignee,
+    epic: Option<Option<&'a str>>,
+) -> El<'a> {
+    let p = gui.pal();
+    let item = |label: String, assignee: Assignee| -> El<'a> {
+        // Without an epic, having no name is all "Unassigned" can mean.
+        let current = *chosen == assignee
+            || (epic.is_none()
+                && !matches!(chosen, Assignee::Named(_))
+                && assignee == Assignee::Nobody);
+        let on_press = if current {
+            Message::CloseAssigneeMenu
+        } else {
+            Message::ChooseAssignee(owner, assignee)
+        };
+        button(
+            text(label)
+                .size(13)
+                .color(rgb(if current { p.accent } else { p.text })),
+        )
+        .width(Length::Fill)
+        .padding([p.pad_y(13.0 * LINE_HEIGHT, 5.0), 10.0])
+        .style(move |_, status| menu_item_style(p, status))
+        .on_press(on_press)
+        .into()
+    };
+    let mut items: Vec<El<'a>> = Vec::new();
+    if let Some(name) = epic {
+        let name = name.unwrap_or("unassigned");
+        items.push(item(format!("From epic: {name}"), Assignee::Inherited));
+    }
+    items.push(item("Unassigned".to_string(), Assignee::Nobody));
+    for name in gui.app.board.assignee_names() {
+        items.push(item(name.to_string(), Assignee::Named(name.to_string())));
+    }
+    let names = scrollable(column(items).spacing(2))
+        .direction(Direction::Vertical(
+            Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .style(move |_, s| theme::scroll_style(p, s));
+    let new_name = row![
+        input(
+            p,
+            NEW_ASSIGNEE,
+            "New name",
+            &gui.ui.new_assignee,
+            false,
+            Message::NewAssignee
+        )
+        .on_submit(Message::AddAssignee(owner))
+        .width(Length::Fill),
+        btn(p, "Add", Style::Normal, Message::AddAssignee(owner)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    container(
+        column![
+            container(names).max_height(ASSIGNEE_NAMES_MAX_HEIGHT),
+            new_name
+        ]
+        .spacing(6),
+    )
+    .width(ASSIGNEE_MENU_WIDTH)
+    .padding(6)
+    .style(move |_| theme::boxed(p.panel, p.border, 8.0))
+    .into()
 }
 
 /// Says the project at `path` has no folder any more, with ways to point it
@@ -654,9 +889,13 @@ pub fn editor<'a>(gui: &'a Gui, width: Length) -> El<'a> {
         label(p, "Description (Markdown)"),
         desc,
     ];
-    // An existing task's links and files are changed from its details.
+    // An existing task's assignee, links and files are changed from its details.
     if matches!(app.editing, Some(EditTarget::New(_))) {
         let draft = &app.draft;
+        body = body.extend([
+            section_title(p, "Assignee"),
+            row![assignee_dropdown(gui, Owner::Draft, &draft.assignee, None)].into(),
+        ]);
         body = links_editor(gui, body, Owner::Draft, &draft.links);
         let files = draft.files.iter().map(|f| (f.id, f.kind, f.name.as_str()));
         body = files_editor(gui, body, Owner::Draft, files);
