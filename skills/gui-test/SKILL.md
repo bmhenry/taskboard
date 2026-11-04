@@ -11,7 +11,11 @@ The app is Iced over winit, which runs in an Xvfb display once `gui.sh` unsets
 That keeps testing off the user's desktop: their cursor and focus are untouched and
 the window is the same size every run. Rendering is Iced's software renderer
 (`ICED_BACKEND=tiny-skia`), so no GPU is needed; in a debug build it can take a
-second or two to catch up after input, so wait before screenshotting.
+second or two to catch up after input, so wait before screenshotting. Frames
+queue up behind each other, so an async result (a watcher reload, a path check's
+answer) can land on screen seconds after `update` applied it. That is render
+cost, not a missed redraw: a release build shows the same results within
+~0.15 s with no further input. Don't judge repaint latency from a debug build.
 
 Everything goes through `skills/gui-test/scripts/gui.sh` (run `gui.sh help`):
 
