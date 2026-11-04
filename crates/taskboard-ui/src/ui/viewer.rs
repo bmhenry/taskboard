@@ -11,7 +11,7 @@ use iced::{Border, Length, Padding, Size, mouse};
 use taskboard_core::{Attachment, FileKind, Ulid};
 
 use super::theme::{self, BOLD, MONO, Pal, Style, rgb};
-use super::widgets::{El, btn, chip, grow, label, save_keys};
+use super::widgets::{El, btn, grow, label, save_keys};
 use super::{FILE_EDITOR, Gui, Message, dialog_width};
 use crate::app::Action;
 use crate::markdown::{self, Block, BlockId, BlockKind};
@@ -223,16 +223,13 @@ fn file_contents<'a>(
     }
     let rendered = gui.ui.file_rendered;
     if att.kind != FileKind::Image {
-        header = header.extend([
-            chip(
-                p,
-                "Plain text",
-                p.accent,
-                !rendered,
-                Message::RenderFile(false),
-            ),
-            chip(p, "Markdown", p.accent, rendered, Message::RenderFile(true)),
-        ]);
+        // Names the view it switches to.
+        let other = if rendered {
+            "Show Source"
+        } else {
+            "Show Rendered"
+        };
+        header = header.push(btn(p, other, Style::Normal, Message::RenderFile(!rendered)));
         if gui.ui.file_editable {
             header = header.push(btn(p, "Edit", Style::Normal, Message::EditFile));
         }
