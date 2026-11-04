@@ -164,18 +164,29 @@ pub fn palette(theme: Theme, compact: bool) -> Pal {
 
 /// The Iced theme behind widgets the UI doesn't style itself.
 pub fn iced_theme(theme: Theme) -> IcedTheme {
-    let p = colors(theme);
-    IcedTheme::custom(
-        "Taskboard".to_string(),
-        iced::theme::Palette {
-            background: rgb(p.bg),
-            text: rgb(p.text),
-            primary: rgb(p.primary),
-            success: rgb(p.status[5]),
-            warning: rgb(p.status[2]),
-            danger: rgb(p.danger),
-        },
-    )
+    IcedTheme::custom("Taskboard".to_string(), iced_palette(colors(theme)))
+}
+
+fn iced_palette(p: &Palette) -> iced::theme::Palette {
+    iced::theme::Palette {
+        background: rgb(p.bg),
+        text: rgb(p.text),
+        primary: rgb(p.primary),
+        success: rgb(p.status[5]),
+        warning: rgb(p.status[2]),
+        danger: rgb(p.danger),
+    }
+}
+
+/// The Iced theme for `p` with its separators, such as a table's lines
+/// between cells, in the border color.
+pub fn separator_theme(p: Pal) -> IcedTheme {
+    let border = rgb(p.border);
+    IcedTheme::custom_with_fn("Taskboard".to_string(), iced_palette(&p), move |palette| {
+        let mut extended = iced::theme::palette::Extended::generate(palette);
+        extended.background.strong.color = border;
+        extended
+    })
 }
 
 pub fn rgb(c: u32) -> Color {

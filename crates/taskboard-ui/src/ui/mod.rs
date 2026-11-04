@@ -7,6 +7,7 @@ mod list;
 mod panels;
 mod popup;
 mod settings;
+mod table;
 pub mod theme;
 mod toolbar;
 mod touch;

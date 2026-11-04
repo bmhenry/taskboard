@@ -161,6 +161,7 @@ fn md_leaf<'a>(p: Pal, kind: BlockKind, body: String) -> El<'a> {
         .into(),
         // Drawn by `Md::details`.
         BlockKind::Details { .. } => text(body).into(),
+        BlockKind::Table(t) => super::table::md_table(p, t),
         BlockKind::Rule => container(iced::widget::Space::new())
             .width(Length::Fill)
             .height(1)

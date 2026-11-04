@@ -10,8 +10,11 @@
 //! `<details>`, `<summary>…</summary>` and `</details>` are understood when
 //! they're HTML blocks of their own (as GitHub writes them); any other HTML,
 //! and these tags when they don't pair up, is shown as text.
+//!
+//! GitHub's tables become a [`Table`] block, whose cells' inline formatting
+//! is reduced to its text like a paragraph's.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
@@ -30,6 +33,52 @@ pub enum BlockKind {
     Details {
         open: bool,
     },
+    Table(Table),
+}
+
+/// How a table column's cells line up, from the `:` in its delimiter row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+/// A table's cells, each row as many as there are columns.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Table {
+    pub align: Vec<Align>,
+    pub head: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+impl Table {
+    fn new(align: &[Alignment]) -> Self {
+        let align = align
+            .iter()
+            .map(|a| match a {
+                Alignment::Center => Align::Center,
+                Alignment::Right => Align::Right,
+                Alignment::None | Alignment::Left => Align::Left,
+            })
+            .collect();
+        Table {
+            align,
+            ..Table::default()
+        }
+    }
+
+    /// Trims each cell and pads or cuts each row to the column count.
+    fn tidy(&mut self) {
+        let columns = self.align.len();
+        for row in std::iter::once(&mut self.head).chain(&mut self.rows) {
+            row.resize(columns, String::new());
+            for cell in row {
+                cell.truncate(cell.trim_end().len());
+                cell.drain(..cell.len() - cell.trim_start().len());
+            }
+        }
+    }
 }
 
 /// Where a block is in the tree: its index among its siblings, after those
@@ -70,6 +119,8 @@ struct Builder {
     /// For each open details block, the HTML that opened it, shown instead
     /// if it's never closed.
     details: Vec<String>,
+    /// The table being collected, with the row it's on.
+    table: Option<(Table, Vec<String>)>,
 }
 
 impl Builder {
@@ -235,9 +286,21 @@ impl Builder {
         }
     }
 
-    /// Where inline text goes: the current leaf, else the open item's
-    /// first line, else a new paragraph.
+    /// The table cell being collected, if there's a table.
+    fn cell(&mut self) -> Option<&mut String> {
+        let (_, row) = self.table.as_mut()?;
+        if row.is_empty() {
+            row.push(String::new());
+        }
+        row.last_mut()
+    }
+
+    /// Where inline text goes: the table cell being collected, else the
+    /// current leaf, else the open item's first line, else a new paragraph.
     fn text(&mut self) -> &mut String {
+        if self.table.is_some() {
+            return self.cell().unwrap();
+        }
         if self.current.is_none() && self.item_line().is_some() {
             return &mut self.item_line().unwrap().text;
         }
@@ -355,7 +418,8 @@ pub fn parse(src: &str) -> Vec<Block> {
     // The HTML block being collected.
     let mut html: Option<String> = None;
 
-    let options = Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    let options =
+        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     for event in Parser::new_ext(src, options) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
@@ -420,6 +484,31 @@ pub fn parse(src: &str) -> Vec<Block> {
                 }) = tree.item_line()
                 {
                     *marker = if done { "☑" } else { "☐" }.to_string();
+                }
+            }
+            Event::Start(Tag::Table(align)) => {
+                tree.flush();
+                tree.table = Some((Table::new(&align), Vec::new()));
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some((_, row)) = &mut tree.table {
+                    row.push(String::new());
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some((t, row)) = &mut tree.table {
+                    t.head = std::mem::take(row);
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some((t, row)) = &mut tree.table {
+                    t.rows.push(std::mem::take(row));
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some((mut t, _)) = tree.table.take() {
+                    t.tidy();
+                    tree.push(Block::new(BlockKind::Table(t)));
                 }
             }
             Event::Start(Tag::HtmlBlock) => html = Some(String::new()),
@@ -680,6 +769,61 @@ after
                 (vec![3, 0], BlockKind::Paragraph, "with text".into()),
                 (vec![4], BlockKind::Paragraph, "<div>other</div>".into()),
                 (vec![5], BlockKind::Paragraph, "<details>".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_tables() {
+        let blocks = parse(
+            r"| Name | Qty | Note |
+|:-----|:---:|-----:|
+| **bold** `code` | 2 | [link](https://x.y) \| pipe |
+| short |
+| a | b | c | extra |
+
+after
+",
+        );
+        let BlockKind::Table(t) = &blocks[0].kind else {
+            panic!("not a table: {:?}", blocks[0]);
+        };
+        assert_eq!(t.align, [Align::Left, Align::Center, Align::Right]);
+        assert_eq!(t.head, ["Name", "Qty", "Note"]);
+        assert_eq!(
+            t.rows,
+            [
+                // Inline formatting is reduced to its text.
+                vec!["bold code", "2", "link | pipe"],
+                // Short rows are padded and long ones cut to the header's
+                // width.
+                vec!["short", "", ""],
+                vec!["a", "b", "c"],
+            ]
+        );
+        assert_eq!(
+            flatten(&blocks[1..]),
+            [(vec![1], BlockKind::Paragraph, "after".into())]
+        );
+    }
+
+    #[test]
+    fn tables_nest_in_sections_and_items() {
+        let blocks = parse("# A\n\n| x |\n|---|\n\n- item\n\n  | y |\n  |---|\n  | 1 |\n");
+        let table = |head: &str, rows: &[&str]| {
+            BlockKind::Table(Table {
+                align: vec![Align::Left],
+                head: vec![head.into()],
+                rows: rows.iter().map(|r| vec![r.to_string()]).collect(),
+            })
+        };
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], BlockKind::Heading(1), "A".into()),
+                (vec![0, 0], table("x", &[]), String::new()),
+                (vec![0, 1], item("•"), "item".into()),
+                (vec![0, 1, 0], table("y", &["1"]), String::new()),
             ]
         );
     }
