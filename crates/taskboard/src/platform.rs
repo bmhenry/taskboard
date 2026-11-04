@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use iced::Subscription;
 use taskboard_core::ops::{self, Command, FileSource, Outcome};
 use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Store, Ulid};
-use taskboard_ui::{BoxFuture, PathKind, Platform, WatchEvent};
+use taskboard_ui::{BoxFuture, Platform, ResolvedPath, WatchEvent};
 
 use crate::watch;
 
@@ -127,8 +127,8 @@ impl Platform for Desktop {
         cmd.arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 
-    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
-        Box::pin(async move { paths.iter().map(|path| PathKind::of(path)).collect() })
+    fn resolve_paths(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<ResolvedPath>> {
+        Box::pin(async move { paths.iter().map(|path| ResolvedPath::of(path)).collect() })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {

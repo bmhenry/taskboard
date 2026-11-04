@@ -16,5 +16,5 @@ mod testing;
 mod ui;
 
 pub use app::App;
-pub use platform::{BoxFuture, PathKind, Platform, WatchEvent};
+pub use platform::{BoxFuture, PathKind, Platform, ResolvedPath, WatchEvent};
 pub use ui::{Gui, Message, theme};

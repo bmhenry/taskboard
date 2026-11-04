@@ -11,7 +11,7 @@ use taskboard_core::ops::{self, Command, FileSource, Outcome};
 use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Store, Ulid};
 
 use crate::app::{Action, App, Effect};
-use crate::platform::{BoxFuture, PathKind, Platform, WatchEvent};
+use crate::platform::{BoxFuture, Platform, ResolvedPath, WatchEvent};
 
 #[derive(Clone)]
 pub struct TestPlatform {
@@ -91,17 +91,10 @@ impl Platform for TestPlatform {
         self.attaches_paths
     }
 
-    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
-        let kinds = paths
-            .iter()
-            .map(|path| match std::fs::metadata(path) {
-                Ok(m) if m.is_dir() => PathKind::Dir,
-                Ok(_) => PathKind::File,
-                Err(_) => PathKind::Missing,
-            })
-            .collect();
+    fn resolve_paths(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<ResolvedPath>> {
+        let resolved = paths.iter().map(|path| ResolvedPath::of(path)).collect();
         self.path_checks.lock().unwrap().push(paths);
-        Box::pin(async move { kinds })
+        Box::pin(async move { resolved })
     }
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>> {
@@ -223,8 +216,8 @@ impl Harness {
                     self.app.settings_saved(result);
                 }
                 Effect::CheckPaths(check) => {
-                    let kinds = now(self.platform.path_kinds(check.paths()));
-                    self.app.checked(check, kinds);
+                    let resolved = now(self.platform.resolve_paths(check.paths()));
+                    self.app.checked(check, resolved);
                 }
             }
         }

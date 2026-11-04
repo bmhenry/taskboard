@@ -13,7 +13,7 @@ use iced::Subscription;
 use iced::futures::channel::{mpsc, oneshot};
 use iced::futures::{SinkExt, Stream, StreamExt};
 use js_sys::Uint8Array;
-use taskboard_core::api::{self, BoardEvent, BoardResponse, PathKind, SettingsResponse};
+use taskboard_core::api::{self, BoardEvent, BoardResponse, ResolvedPath, SettingsResponse};
 use taskboard_core::ops::{Command, FileSource, Outcome};
 use taskboard_core::{Attachment, Board, DeviceSettings, GlobalSettings, Ulid};
 use taskboard_ui::{BoxFuture, Platform, WatchEvent};
@@ -142,10 +142,10 @@ impl Platform for Web {
 
     /// No answer at all if the daemon can't be asked: projects then aren't
     /// marked missing, but are asked about again with the next check.
-    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>> {
+    fn resolve_paths(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<ResolvedPath>> {
         Box::pin(async move {
             let asked = match Body::json(&paths) {
-                Ok(body) => crate::api::json("POST", api::PATH_KINDS, body).await,
+                Ok(body) => crate::api::json("POST", api::RESOLVE_PATHS, body).await,
                 Err(e) => Err(e),
             };
             asked.unwrap_or_else(|e| {

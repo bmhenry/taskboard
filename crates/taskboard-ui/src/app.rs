@@ -14,10 +14,10 @@ use taskboard_core::ops::{Command, FileSource, Outcome, Output};
 use taskboard_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE, NewTaskPosition, Theme};
 use taskboard_core::{
     Assignee, Board, DateField, DeviceSettings, Error, FileKind, Filter, GlobalSettings, Hook,
-    HookEvent, Link, LinkKind, NewTask, Status, Task, TaskPatch, Ulid, parse_date, project_path,
+    HookEvent, Link, LinkKind, NewTask, Status, Task, TaskPatch, Ulid, parse_date,
 };
 
-use crate::platform::PathKind;
+use crate::platform::{PathKind, ResolvedPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -93,8 +93,9 @@ pub enum ProjectInput {
     New(PathBuf),
     /// A directory that will be created when the task is saved.
     Missing(PathBuf),
-    /// A directory the platform hasn't been asked about yet; see
-    /// [`App::check_paths`]. Saving uses it whether or not it exists.
+    /// A directory the platform hasn't resolved yet, as typed; see
+    /// [`App::check_paths`]. Saving uses it whether or not it exists, and
+    /// the store resolves it.
     Unchecked(PathBuf),
 }
 
@@ -109,13 +110,8 @@ pub enum PathCheck {
     /// Adds the file at `path` to the new task's draft if it is a file, and
     /// the draft is still the `draft`th; see [`App::drafts`].
     DraftFile { path: PathBuf, draft: u64 },
-    /// Points project `from` at the folder `to`, typed as `typed`, if it
-    /// is one.
-    Relocate {
-        from: PathBuf,
-        to: PathBuf,
-        typed: String,
-    },
+    /// Points project `from` at the folder typed as `typed`, if it is one.
+    Relocate { from: PathBuf, typed: String },
 }
 
 impl PathCheck {
@@ -123,7 +119,7 @@ impl PathCheck {
         match self {
             PathCheck::Refresh { paths, .. } => paths.clone(),
             PathCheck::DraftFile { path, .. } => vec![path.clone()],
-            PathCheck::Relocate { to, .. } => vec![to.clone()],
+            PathCheck::Relocate { typed, .. } => vec![PathBuf::from(typed)],
         }
     }
 }
@@ -269,8 +265,10 @@ pub struct App {
     pub default_project: Option<PathBuf>,
     /// Projects whose directory wasn't there when last checked.
     pub missing_projects: Vec<PathBuf>,
-    /// What the platform last found at the paths it was asked about.
-    path_kinds: HashMap<PathBuf, PathKind>,
+    /// Where the platform last found each path it was asked about leads,
+    /// keyed by the path as asked: a project's directory, or one typed,
+    /// which only the machine holding the store can resolve.
+    resolved: HashMap<PathBuf, ResolvedPath>,
     /// Paths in [`PathCheck::Refresh`] checks not yet answered, so none is
     /// asked about twice at once, with the stamp of the check whose answer
     /// is awaited; answers from other checks are out of date.
@@ -318,7 +316,7 @@ impl App {
             settings_dirty: false,
             default_project: None,
             missing_projects: Vec::new(),
-            path_kinds: HashMap::new(),
+            resolved: HashMap::new(),
             checking: HashMap::new(),
             refreshes: 0,
             drafts: 0,
@@ -407,25 +405,25 @@ impl App {
         true
     }
 
-    /// Notes what the platform found at `check`'s paths, `kinds` in the
-    /// same order, and does what the check was for.
-    pub fn checked(&mut self, check: PathCheck, kinds: Vec<PathKind>) {
+    /// Notes where the platform found `check`'s paths lead, `resolved` in
+    /// the same order, and does what the check was for.
+    pub fn checked(&mut self, check: PathCheck, resolved: Vec<ResolvedPath>) {
         let paths = check.paths();
         // A path left without an answer, as when a request failed, counts
         // as missing for what a check was for, but a refresh leaves it as
         // it was, to be asked about again.
-        let kind = kinds.first().copied().unwrap_or(PathKind::Missing);
+        let first = resolved.first().cloned();
         match check {
             // Only the latest check's answer is kept: an earlier one can
             // finish later, from before the path changed.
             PathCheck::Refresh { stamp, .. } => {
-                let mut kinds = kinds.into_iter();
+                let mut resolved = resolved.into_iter();
                 for path in paths {
-                    let kind = kinds.next();
+                    let found = resolved.next();
                     if self.checking.get(&path) == Some(&stamp) {
                         self.checking.remove(&path);
-                        if let Some(kind) = kind {
-                            self.path_kinds.insert(path, kind);
+                        if let Some(found) = found {
+                            self.resolved.insert(path, found);
                         }
                     }
                 }
@@ -434,18 +432,24 @@ impl App {
                 if draft == self.drafts {
                     self.draft_checks = self.draft_checks.saturating_sub(1);
                 }
-                self.path_kinds.extend(paths.into_iter().zip(kinds));
+                self.resolved.extend(paths.into_iter().zip(resolved));
             }
-            PathCheck::Relocate { .. } => self.path_kinds.extend(paths.into_iter().zip(kinds)),
+            PathCheck::Relocate { .. } => self.resolved.extend(paths.into_iter().zip(resolved)),
         }
         self.note_missing();
-        if let Err(e) = self.act_on(check, kind) {
+        if let Err(e) = self.act_on(check, first) {
             self.error = Some(e.to_string());
         }
     }
 
-    /// Does what a [`PathCheck`] was for, given what's at its first path.
-    fn act_on(&mut self, check: PathCheck, kind: PathKind) -> taskboard_core::Result<()> {
+    /// Does what a [`PathCheck`] was for, given where its first path leads,
+    /// if the platform answered.
+    fn act_on(
+        &mut self,
+        check: PathCheck,
+        found: Option<ResolvedPath>,
+    ) -> taskboard_core::Result<()> {
+        let kind = found.as_ref().map_or(PathKind::Missing, |f| f.kind);
         match check {
             PathCheck::Refresh { .. } => {}
             // A file dialog, or the check, can finish after the new task was
@@ -458,15 +462,19 @@ impl App {
                     self.draft.attach(FileSource::Path { path })?;
                 }
             }
-            PathCheck::Relocate { from, to, typed } => {
+            PathCheck::Relocate { from, typed } => {
                 // Already relocated, as when Relocate was pressed twice, or
                 // deleted meanwhile.
                 if self.board.project(&from).is_none() {
                     return Ok(());
                 }
-                if kind != PathKind::Dir {
-                    return Err(Error::Invalid(format!("no folder at {}", to.display())));
-                }
+                let to = match found {
+                    Some(f) if f.kind == PathKind::Dir => f.path,
+                    Some(f) => {
+                        return Err(Error::Invalid(format!("no folder at {}", f.path.display())));
+                    }
+                    None => return Err(Error::Invalid(format!("no folder at {typed}"))),
+                };
                 let command = Command::RelocateProject {
                     from: from.clone(),
                     to: typed,
@@ -493,21 +501,31 @@ impl App {
             .projects
             .iter()
             .filter(|p| {
-                self.path_kinds
+                self.resolved
                     .get(&p.path)
-                    .is_some_and(|k| *k != PathKind::Dir)
+                    .is_some_and(|r| r.kind != PathKind::Dir)
             })
             .map(|p| p.path.clone())
             .collect();
     }
 
-    /// Forgets that `path` wasn't a folder when last checked, as saving a
-    /// task in it makes it one; it's checked again with the projects, and
-    /// the answer to a check from before is ignored.
+    /// Forgets that `path`, or a typed path leading to it, wasn't a folder
+    /// when last checked, as saving a task in it makes it one; it's checked
+    /// again with the projects, and the answer to a check from before is
+    /// ignored.
     fn forget_missing(&mut self, path: &Path) {
-        if self.path_kinds.get(path) != Some(&PathKind::Dir) {
-            self.path_kinds.remove(path);
-            self.checking.remove(path);
+        let stale: Vec<PathBuf> = self
+            .resolved
+            .iter()
+            .filter(|(asked, r)| {
+                (asked.as_path() == path || r.path == path) && r.kind != PathKind::Dir
+            })
+            .map(|(asked, _)| asked.clone())
+            .chain([path.to_path_buf()])
+            .collect();
+        for asked in stale {
+            self.resolved.remove(&asked);
+            self.checking.remove(&asked);
         }
     }
 
@@ -584,14 +602,17 @@ impl App {
         {
             return ProjectInput::Known(p.path.clone());
         }
-        let path = project_path(Path::new(text));
-        if self.board.project(&path).is_some() {
-            return ProjectInput::Known(path);
+        // Only the machine holding the store can say where a typed path
+        // leads, so it's as the platform last resolved it.
+        let typed = Path::new(text);
+        if self.board.project(typed).is_some() {
+            return ProjectInput::Known(typed.to_path_buf());
         }
-        match self.path_kinds.get(&path) {
-            Some(PathKind::Dir) => ProjectInput::New(path),
-            Some(_) => ProjectInput::Missing(path),
-            None => ProjectInput::Unchecked(path),
+        match self.resolved.get(typed) {
+            Some(r) if self.board.project(&r.path).is_some() => ProjectInput::Known(r.path.clone()),
+            Some(r) if r.kind == PathKind::Dir => ProjectInput::New(r.path.clone()),
+            Some(r) => ProjectInput::Missing(r.path.clone()),
+            None => ProjectInput::Unchecked(typed.to_path_buf()),
         }
     }
 
@@ -925,7 +946,6 @@ impl App {
                 // Relocated once the platform finds a folder there.
                 let check = PathCheck::Relocate {
                     from,
-                    to: project_path(Path::new(typed)),
                     typed: typed.to_string(),
                 };
                 self.outbox.push_back(Effect::CheckPaths(check));
@@ -1556,6 +1576,63 @@ mod tests {
         assert!(app.missing_projects.is_empty());
     }
 
+    /// The platform's answer that `path` leads to itself, with `kind` there.
+    fn found(path: &Path, kind: PathKind) -> ResolvedPath {
+        ResolvedPath {
+            path: path.to_path_buf(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn typed_projects_are_where_the_platform_resolves_them() {
+        let (dir, mut app) = app();
+        add(&mut app, "alpha");
+        let app_dir = app.default_project.clone().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        let take_check = |app: &mut Harness| match app.app.outbox.pop_back() {
+            Some(Effect::CheckPaths(check)) => check,
+            effect => panic!("not a check: {effect:?}"),
+        };
+
+        // `~/` and relative paths mean something only on the machine
+        // holding the store, so they're left as typed until it answers...
+        for typed in ["~/app", "app/."] {
+            assert_eq!(
+                app.project_input(typed),
+                ProjectInput::Unchecked(PathBuf::from(typed))
+            );
+            assert!(app.app.check_paths(vec![PathBuf::from(typed)]));
+            let check = take_check(&mut app);
+            // ...and then are where it says, whatever this machine thinks.
+            app.app.checked(check, vec![found(&app_dir, PathKind::Dir)]);
+            assert_eq!(
+                app.project_input(typed),
+                ProjectInput::Known(app_dir.clone())
+            );
+        }
+        assert!(app.app.check_paths(vec![PathBuf::from("~/elsewhere")]));
+        let check = take_check(&mut app);
+        app.app
+            .checked(check, vec![found(&elsewhere, PathKind::Missing)]);
+        assert_eq!(
+            app.project_input("~/elsewhere"),
+            ProjectInput::Missing(elsewhere.clone())
+        );
+
+        // Relocating goes to the folder the platform found.
+        app.app.apply(Action::RelocateProject {
+            from: app_dir.clone(),
+            to: " ~/elsewhere ".into(),
+        });
+        let check = take_check(&mut app);
+        assert_eq!(check.paths(), [PathBuf::from("~/elsewhere")]);
+        app.app
+            .checked(check, vec![found(&elsewhere, PathKind::Dir)]);
+        assert!(app.board.project(&elsewhere).is_some());
+        assert!(app.board.project(&app_dir).is_none());
+    }
+
     #[test]
     fn a_late_answer_to_an_earlier_check_is_ignored() {
         let (dir, mut app) = app();
@@ -1575,18 +1652,20 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
 
         // The first check's answer, from before, comes last...
-        app.app.checked(second, vec![PathKind::Dir]);
-        app.app.checked(first.clone(), vec![PathKind::Missing]);
+        app.app.checked(second, vec![found(&path, PathKind::Dir)]);
+        app.app
+            .checked(first.clone(), vec![found(&path, PathKind::Missing)]);
         assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
 
         // ...or while a later check is still being answered, which it
         // doesn't end, so the path isn't asked about twice at once.
         assert!(app.app.check_paths(vec![path.clone()]));
         let third = take_check(&mut app);
-        app.app.checked(first, vec![PathKind::Missing]);
+        app.app
+            .checked(first, vec![found(&path, PathKind::Missing)]);
         assert!(!app.app.check_paths(vec![path.clone()]));
         assert_eq!(app.project_input(typed), ProjectInput::New(path.clone()));
-        app.app.checked(third, vec![PathKind::Dir]);
+        app.app.checked(third, vec![found(&path, PathKind::Dir)]);
         assert!(app.app.check_paths(vec![path]));
     }
 

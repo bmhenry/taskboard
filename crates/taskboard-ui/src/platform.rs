@@ -24,7 +24,7 @@ pub enum WatchEvent {
     Failed(String),
 }
 
-pub use taskboard_core::api::PathKind;
+pub use taskboard_core::api::{PathKind, ResolvedPath};
 
 /// The program hosting the UI. Errors are strings, ready to show, since on
 /// the web they come over the network.
@@ -67,9 +67,13 @@ pub trait Platform {
     /// Opens `url` in the user's browser.
     fn open_url(&self, url: &str) -> Result<(), String>;
 
-    /// What's at each of `paths`, in order: whether projects' directories
-    /// still exist, or what a typed path names.
-    fn path_kinds(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<PathKind>>;
+    /// Resolves each of `paths`, in order, on the machine holding the store,
+    /// as [`ResolvedPath::of`] does: where a typed path leads (`~/`,
+    /// relative paths and symlinks are read there, not where the UI runs)
+    /// and what's there, such as whether projects' directories still exist.
+    /// Paths left without an answer, as when the request failed, are left
+    /// off the end.
+    fn resolve_paths(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<ResolvedPath>>;
 
     fn load_settings(&self) -> BoxFuture<Result<GlobalSettings, String>>;
 

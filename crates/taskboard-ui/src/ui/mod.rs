@@ -30,7 +30,7 @@ use crate::app::{
     Action, App, EditTarget, Effect, Owner, PathCheck, ProjectInput, View, drop_index,
     drop_position,
 };
-use crate::platform::{PathKind, Platform, WatchEvent};
+use crate::platform::{Platform, ResolvedPath, WatchEvent};
 use drag::{Drag, column_at, stacked_mids};
 use theme::{Pal, palette};
 use widgets::El;
@@ -246,7 +246,7 @@ pub enum Message {
     /// The running settings save finished.
     SettingsSaved(Result<(), String>),
     /// A path check finished: what's at each of its paths.
-    Checked(PathCheck, Vec<PathKind>),
+    Checked(PathCheck, Vec<ResolvedPath>),
     /// A board that was loaded.
     Loaded(LoadStamp, Result<Board, String>),
     Tick,
@@ -442,7 +442,7 @@ impl Gui {
             match effect {
                 Effect::CheckPaths(check @ PathCheck::Refresh { .. }) => {
                     self.refreshing.push(check.clone());
-                    let kinds = self.platform.path_kinds(check.paths());
+                    let kinds = self.platform.resolve_paths(check.paths());
                     tasks.push(Task::perform(kinds, move |kinds| {
                         Message::Checked(check.clone(), kinds)
                     }));
@@ -474,7 +474,7 @@ impl Gui {
                     Message::SettingsSaved,
                 ),
                 Effect::CheckPaths(check) => {
-                    let kinds = self.platform.path_kinds(check.paths());
+                    let kinds = self.platform.resolve_paths(check.paths());
                     Task::perform(kinds, move |kinds| Message::Checked(check.clone(), kinds))
                 }
             };
@@ -691,10 +691,12 @@ impl Gui {
                 self.app.check_projects();
                 // The typed project's folder may have been made or removed.
                 if self.app.editing.is_some()
-                    && let ProjectInput::New(path) | ProjectInput::Missing(path) =
+                    && let ProjectInput::New(_) | ProjectInput::Missing(_) =
                         self.app.project_input(&ui.edit_project)
                 {
-                    self.app.check_paths(vec![path]);
+                    // Asked about as typed, which is how it's remembered.
+                    let typed = PathBuf::from(ui.edit_project.trim());
+                    self.app.check_paths(vec![typed]);
                 }
             }
             Message::Save => {
@@ -1354,7 +1356,7 @@ mod tests {
                     Message::SettingsSaved(now(gui.platform.save_device_settings(settings)))
                 }
                 Effect::CheckPaths(check) => {
-                    let kinds = now(gui.platform.path_kinds(check.paths()));
+                    let kinds = now(gui.platform.resolve_paths(check.paths()));
                     Message::Checked(check, kinds)
                 }
             };
@@ -1752,7 +1754,7 @@ mod tests {
         let first = refresh_of(&gui, &folder.join("n")).unwrap();
         assert!(refresh_of(&gui, &folder.join("ne")).is_none());
         assert!(refresh_of(&gui, &typed).is_none());
-        let kinds = now(gui.platform.path_kinds(first.paths()));
+        let kinds = now(gui.platform.resolve_paths(first.paths()));
         let _ = gui.update(Message::Checked(first, kinds));
         assert!(refresh_of(&gui, &typed).is_some());
         run_effects(&mut gui);

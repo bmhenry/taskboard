@@ -12,7 +12,9 @@
 //!   bytes, sent as `application/octet-stream` → the [`Outcome`] of attaching
 //!   it to the task, as a [`Command::Attach`] with [`FileSource::Bytes`]
 //!   would, without base64.
-//! - `POST` [`PATH_KINDS`] with a list of paths → a [`PathKind`] for each.
+//! - `POST` [`RESOLVE_PATHS`] with a list of paths, as typed → a
+//!   [`ResolvedPath`] for each: the absolute path it names on the daemon's
+//!   machine, and what's there.
 //! - `GET` [`SETTINGS`] → [`SettingsResponse`]; `PUT` [`SETTINGS`] with
 //!   [`GlobalSettings`] saves them.
 //! - `GET` [`EVENTS`] → server-sent events, each a [`BoardEvent`] in its
@@ -39,7 +41,7 @@ pub const BOARD: &str = "/api/board";
 pub const COMMANDS: &str = "/api/commands";
 pub const FILES: &str = "/api/files";
 pub const UPLOADS: &str = "/api/uploads";
-pub const PATH_KINDS: &str = "/api/path-kinds";
+pub const RESOLVE_PATHS: &str = "/api/resolve-paths";
 pub const SETTINGS: &str = "/api/settings";
 pub const EVENTS: &str = "/api/events";
 
@@ -91,6 +93,26 @@ impl PathKind {
             Ok(_) => PathKind::File,
             Err(_) => PathKind::Missing,
         }
+    }
+}
+
+/// Where a typed path leads on the machine holding the store, from `POST`
+/// [`RESOLVE_PATHS`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPath {
+    /// The path as a project directory would be named: absolute, with `~/`
+    /// expanded and symlinks resolved; see [`crate::project_path`].
+    pub path: PathBuf,
+    /// What's at [`ResolvedPath::path`].
+    pub kind: PathKind,
+}
+
+impl ResolvedPath {
+    /// Resolves `typed` on this machine.
+    pub fn of(typed: &Path) -> ResolvedPath {
+        let path = crate::store::project_path(typed);
+        let kind = PathKind::of(&path);
+        ResolvedPath { path, kind }
     }
 }
 

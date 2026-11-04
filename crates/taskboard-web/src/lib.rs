@@ -27,7 +27,8 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::{Stream, StreamExt, stream};
 use taskboard_core::api::{
-    self, BoardEvent, BoardResponse, ErrorBody, PathKind, SettingsResponse, UploadQuery,
+    self, BoardEvent, BoardResponse, ErrorBody, PathKind, ResolvedPath, SettingsResponse,
+    UploadQuery,
 };
 use taskboard_core::ops::{self, Command, FileSource, Outcome};
 use taskboard_core::{Board, GlobalSettings, Store, Ulid, watch};
@@ -150,7 +151,7 @@ pub fn router(config: Config) -> Router {
         .route(api::COMMANDS, post(command))
         .route(&format!("{}/{{task}}/{{file}}", api::FILES), get(file))
         .route(api::UPLOADS, post(upload))
-        .route(api::PATH_KINDS, post(path_kinds))
+        .route(api::RESOLVE_PATHS, post(resolve_paths))
         .route(api::SETTINGS, get(settings).put(save_settings))
         .route(api::EVENTS, get(events))
         // Only on the routes above, not the web UI's files.
@@ -288,10 +289,10 @@ async fn upload(
     blocking(move || server.run(command).map(Json)).await
 }
 
-async fn path_kinds(
+async fn resolve_paths(
     JsonBody(paths): JsonBody<Vec<PathBuf>>,
-) -> Result<Json<Vec<PathKind>>, ApiError> {
-    blocking(move || Ok(Json(paths.iter().map(|p| PathKind::of(p)).collect()))).await
+) -> Result<Json<Vec<ResolvedPath>>, ApiError> {
+    blocking(move || Ok(Json(paths.iter().map(|p| ResolvedPath::of(p)).collect()))).await
 }
 
 async fn settings(State(server): Shared) -> Result<Json<SettingsResponse>, ApiError> {
@@ -826,16 +827,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_kinds_describe_the_server() {
+    async fn paths_are_resolved_on_the_server() {
         let f = fixture();
         let file = f.dir.path().join("file");
         std::fs::write(&file, "").unwrap();
         let missing = f.dir.path().join("missing");
+        let link = f.dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&f.project, &link).unwrap();
+        #[cfg(not(unix))]
+        let link = f.project.clone();
         let res = f
-            .post(api::PATH_KINDS, json!([f.project, file, missing]))
+            .post(api::RESOLVE_PATHS, json!([f.project, file, missing, link]))
             .await;
-        let kinds: Vec<PathKind> = read(res).await;
-        assert_eq!(kinds, [PathKind::Dir, PathKind::File, PathKind::Missing]);
+        let resolved: Vec<ResolvedPath> = read(res).await;
+        let kinds: Vec<PathKind> = resolved.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PathKind::Dir,
+                PathKind::File,
+                PathKind::Missing,
+                PathKind::Dir
+            ]
+        );
+        let project = f.project.canonicalize().unwrap();
+        assert_eq!(resolved[0].path, project);
+        assert!(resolved[2].path.is_absolute() && resolved[2].path.ends_with("missing"));
+        assert_eq!(resolved[3].path, project);
     }
 
     #[tokio::test]
