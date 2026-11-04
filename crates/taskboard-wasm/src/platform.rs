@@ -45,6 +45,12 @@ const RETRY_MAX_MS: i32 = 30_000;
 /// are reported as off (it keeps trying after that).
 const RETRIES_BEFORE_FAILING: u32 = 4;
 
+/// How long a path check waits for the daemon. Checks for attaching and
+/// relocating wait their turn with commands, so one never answered would
+/// hold up every later save. Looking at a few paths is quick, but a stuck
+/// network mount on the daemon's machine can hang it.
+const RESOLVE_TIMEOUT_SECS: u32 = 5;
+
 pub struct Web {
     /// Where the daemon saves settings, as it said when they were loaded.
     settings_location: Option<String>,
@@ -145,12 +151,16 @@ impl Platform for Web {
             .map_err(|e| format!("couldn't open {url}: {}", js_error(e)))
     }
 
-    /// No answer at all if the daemon can't be asked: projects then aren't
-    /// marked missing, but are asked about again with the next check.
+    /// No answer at all if the daemon can't be asked, or doesn't answer
+    /// within [`RESOLVE_TIMEOUT_SECS`]: projects then aren't marked missing,
+    /// but are asked about again with the next check.
     fn resolve_paths(&self, paths: Vec<PathBuf>) -> BoxFuture<Vec<ResolvedPath>> {
         Box::pin(async move {
             let asked = match Body::json(&paths) {
-                Ok(body) => crate::api::json("POST", api::RESOLVE_PATHS, body).await,
+                Ok(body) => {
+                    let url = api::RESOLVE_PATHS;
+                    crate::api::json_within("POST", url, body, RESOLVE_TIMEOUT_SECS).await
+                }
                 Err(e) => Err(e),
             };
             asked.unwrap_or_else(|e| {

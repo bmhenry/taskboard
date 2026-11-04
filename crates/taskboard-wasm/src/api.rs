@@ -145,13 +145,23 @@ pub async fn json<T: DeserializeOwned>(method: &str, url: &str, body: Body) -> R
     serde_json::from_str(&text).map_err(|e| format!("unexpected answer from the daemon: {e}"))
 }
 
-/// [`json`] for a `GET`, failing if the whole answer hasn't come within
-/// `secs`; for starting up, which would otherwise leave a blank page.
-pub async fn get_within<T: DeserializeOwned>(url: &str, secs: u32) -> Result<T, String> {
+/// [`json`], failing if the whole answer hasn't come within `secs`.
+pub async fn json_within<T: DeserializeOwned>(
+    method: &str,
+    url: &str,
+    body: Body,
+    secs: u32,
+) -> Result<T, String> {
     let deadline = Deadline::in_secs(secs)?;
-    let res = send_by("GET", url, Body::None, Some(&deadline)).await?;
+    let res = send_by(method, url, body, Some(&deadline)).await?;
     let text = text(&res).await.map_err(|e| deadline.explain(e))?;
     serde_json::from_str(&text).map_err(|e| format!("unexpected answer from the daemon: {e}"))
+}
+
+/// [`json_within`] for a `GET`; for starting up, which would otherwise
+/// leave a blank page.
+pub async fn get_within<T: DeserializeOwned>(url: &str, secs: u32) -> Result<T, String> {
+    json_within("GET", url, Body::None, secs).await
 }
 
 /// [`send`], returning the response's bytes.
