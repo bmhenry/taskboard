@@ -968,18 +968,14 @@ impl Gui {
             .is_some_and(|c| Some(c.text()) != self.ui.file_text)
     }
 
-    /// The selected task's details show in tabs: one for the details, then
-    /// one for each of its files, open in place rather than in the viewer.
-    fn tabbed(&self) -> bool {
-        self.app.view == View::InProgress
-    }
-
-    /// The (task, file) open in a tab of the selected task's details.
+    /// The (task, file) open in a tab of the selected task's details, which
+    /// show in tabs in every view: one for the details, then one for each of
+    /// its files, open in place rather than in the viewer. The editor has no
+    /// tabs, so its files open in the viewer.
     fn file_tab(&self) -> Option<(Ulid, Ulid)> {
         let app = &self.app;
         app.viewing_file.filter(|(task, file)| {
-            self.tabbed()
-                && app.editing.is_none()
+            app.editing.is_none()
                 && app.selected == Some(*task)
                 && app
                     .selected_task()
@@ -1469,14 +1465,36 @@ mod tests {
         esc(&mut gui);
         assert_eq!(gui.app.viewing_file, None);
 
-        // Picking another task, or view, doesn't leave the file in a viewer.
+        // Picking another task doesn't leave the file in a viewer.
         view_file(&mut gui, file);
         let _ = gui.update(Message::App(Action::Select(None)));
         assert_eq!(gui.app.viewing_file, None);
+
+        // Another view shows the same tabs, so the file stays in its tab.
         let _ = gui.update(Message::App(Action::Select(Some(file.0))));
         view_file(&mut gui, file);
-        let _ = gui.update(Message::App(Action::SetView(View::Board)));
-        assert_eq!(gui.app.viewing_file, None);
+        for view in [View::Board, View::List] {
+            let _ = gui.update(Message::App(Action::SetView(view)));
+            assert_eq!(gui.file_tab(), Some(file), "{view:?}");
+        }
+    }
+
+    #[test]
+    fn board_and_list_files_open_in_tabs() {
+        for view in [View::Board, View::List] {
+            let (_dir, mut gui, file) = gui_with_file("one");
+            let _ = gui.update(Message::App(Action::SetView(view)));
+            let _ = gui.update(Message::App(Action::Select(Some(file.0))));
+            view_file(&mut gui, file);
+            assert_eq!(gui.file_tab(), Some(file), "{view:?}");
+            assert_eq!(gui.ui.file_text.as_deref(), Some("one"), "{view:?}");
+
+            // The editor has no tabs, so its files open in the viewer.
+            let _ = gui.update(Message::App(Action::Edit(EditTarget::Existing(file.0))));
+            view_file(&mut gui, file);
+            assert_eq!(gui.file_tab(), None, "{view:?}");
+            assert_eq!(gui.app.viewing_file, Some(file), "{view:?}");
+        }
     }
 
     #[test]
@@ -1491,8 +1509,9 @@ mod tests {
         assert!(gui.file_edit_dirty());
         assert!(gui.app.error.is_some());
 
-        // Leaving the view keeps them too, in the viewer.
-        let _ = gui.update(Message::App(Action::SetView(View::Board)));
+        // Opening the editor keeps them too, in the viewer.
+        let _ = gui.update(Message::App(Action::Edit(EditTarget::Existing(file.0))));
+        assert_eq!(gui.file_tab(), None);
         assert_eq!(gui.app.viewing_file, Some(file));
         assert!(gui.file_edit_dirty());
 

@@ -52,13 +52,10 @@ fn panel_scroll<'a>(p: Pal, body: Column<'a, Message>) -> El<'a> {
         .into()
 }
 
-/// A task's details. Where the details are [`Gui::tabbed`], they're the
-/// first of a row of tabs, followed by one for each of the task's files.
+/// A task's details, the first of a row of tabs followed by one for each of
+/// the task's files.
 pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
     let p = gui.pal();
-    if !gui.tabbed() {
-        return side_panel(p, width, detail_body(gui, task));
-    }
     let open = gui
         .file_tab()
         .and_then(|(_, file)| task.files.iter().find(|f| f.id == file));
@@ -76,6 +73,11 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
         .spacing(2)
         .wrap()
         .vertical_spacing(2);
+    // Closing sits on the tab bar, so it's in reach whichever tab is shown.
+    let close = btn(p, "×", Style::Quiet, Message::App(Action::Select(None)));
+    let bar = row![container(tabs).width(Length::Fill), close]
+        .spacing(8)
+        .align_y(Alignment::Start);
     let rule = container(Space::new())
         .width(Length::Fill)
         .height(1)
@@ -85,7 +87,7 @@ pub fn detail<'a>(gui: &'a Gui, task: &'a Task, width: Length) -> El<'a> {
         None => panel_scroll(p, detail_body(gui, task)),
     };
     container(column![
-        container(tabs).padding(Padding::new(8.0).bottom(0)),
+        container(bar).padding(Padding::new(8.0).bottom(0)),
         rule,
         content
     ])
@@ -166,7 +168,6 @@ fn detail_body<'a>(gui: &'a Gui, task: &'a Task) -> Column<'a, Message> {
                 Message::App(Action::Edit(EditTarget::Existing(task.id))),
             ),
             delete,
-            btn(p, "×", Style::Quiet, Message::App(Action::Select(None))),
         ])
         .spacing(8)
         .align_y(Alignment::Center);

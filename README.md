@@ -143,7 +143,7 @@ taskboard ~/src/app  # ...or to another one
 - Epics have a colored edge and a badge with how many of their children are closed, and child cards name their epic
 - The dropdown next to a task's status assigns it: pick a name, Unassigned, or the epic's assignee, or type a new name; the new-task editor has the same dropdown, and cards and list rows show the name
 - In the task panel, Promote to epic makes a task an epic and Choose epic ▾ makes it a child of one in its project; an epic lists its children, which open on a click, and × takes a child out of its epic
-- Add links and attach files (by path) from the task panel; click a file to view it
+- Add links and attach files (by path) from the task panel; each file gets a tab beside the task's Details tab, in every view (in the editor, clicking a file opens it in the viewer)
 - New… in the task panel's Files creates an empty file in the store (a name without an extension gets `.md`) and opens it for editing
 - Edit in the file viewer edits any attached text file as plain text; `Ctrl+S` saves, Cancel discards. With unsaved changes, `Esc` and clicking outside don't close the viewer
 
