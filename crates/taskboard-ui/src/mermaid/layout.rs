@@ -32,6 +32,15 @@ pub const RANK_SEP: f32 = 44.0;
 pub const LOOP: f32 = 22.0;
 /// Space between a self-loop and its label.
 pub const LOOP_LABEL_GAP: f32 = 4.0;
+/// The most ranks a layout can have, counting the extra ones edge labels
+/// add, and the most bends its edges can have between them: past these a
+/// diagram would be too tall to read and slow to lay out.
+pub const MAX_RANKS: usize = 600;
+pub const MAX_BENDS: usize = 10_000;
+
+/// Why a graph wasn't laid out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TooBig(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Size {
@@ -90,8 +99,9 @@ struct V {
     solid: bool,
 }
 
-/// Lays out `nodes` (their sizes) and `edges` in `direction`.
-pub fn layout(direction: Direction, nodes: &[Size], edges: &[EdgeIn]) -> Layout {
+/// Lays out `nodes` (their sizes) and `edges` in `direction`, unless that
+/// takes more than [`MAX_RANKS`] ranks or [`MAX_BENDS`] bends.
+pub fn layout(direction: Direction, nodes: &[Size], edges: &[EdgeIn]) -> Result<Layout, TooBig> {
     let horizontal = direction.horizontal();
     // Sizes as the top-down working sees them.
     let tr = |s: Size| {
@@ -140,10 +150,25 @@ pub fn layout(direction: Direction, nodes: &[Size], edges: &[EdgeIn]) -> Layout 
             } else {
                 (e.from, e.to)
             };
-            (a, b, e.min_len.max(1) * stretch, i)
+            (a, b, e.min_len.clamp(1, MAX_RANKS) * stretch, i)
         })
         .collect();
     rank(&mut vs, &dag);
+    let ranks = vs.iter().map(|v| v.rank + 1).max().unwrap_or(0);
+    if ranks > MAX_RANKS {
+        return Err(TooBig(format!(
+            "the flowchart is too deep to draw: it needs {ranks} ranks, and at most {MAX_RANKS} fit"
+        )));
+    }
+    let bends: usize = dag
+        .iter()
+        .map(|&(a, b, _, _)| vs[b].rank - vs[a].rank - 1)
+        .sum();
+    if bends > MAX_BENDS {
+        return Err(TooBig(format!(
+            "the flowchart's links are too long to draw: they bend {bends} times, and at most {MAX_BENDS} fit"
+        )));
+    }
 
     // 3. Each edge's chain of vertices, from its upper end.
     let mut chains: Vec<Vec<usize>> = vec![Vec::new(); edges.len()];
@@ -241,12 +266,12 @@ pub fn layout(direction: Direction, nodes: &[Size], edges: &[EdgeIn]) -> Layout 
     } else {
         (breadth, depth)
     };
-    Layout {
+    Ok(Layout {
         width,
         height,
         nodes: (0..n).map(at).collect(),
         edges: routes,
-    }
+    })
 }
 
 /// Phase 1: which edges to turn round so the graph has no cycles: those a
@@ -604,12 +629,12 @@ mod tests {
 
     #[test]
     fn empty_and_single() {
-        let l = layout(Direction::TopDown, &[], &[]);
+        let l = layout(Direction::TopDown, &[], &[]).unwrap();
         assert_eq!((l.width, l.height), (0.0, 0.0));
         assert!(l.nodes.is_empty());
 
         let s = [sq(50.0, 20.0)];
-        let l = layout(Direction::LeftRight, &s, &[]);
+        let l = layout(Direction::LeftRight, &s, &[]).unwrap();
         assert_eq!((l.width, l.height), (50.0, 20.0));
         assert_eq!(l.nodes, [Point { x: 25.0, y: 10.0 }]);
     }
@@ -619,7 +644,7 @@ mod tests {
         // A diamond with a shortcut, and a longer edge.
         let s = sizes(5);
         let edges = [e(0, 1), e(0, 2), e(1, 3), e(2, 3), e(0, 3), e(3, 4)];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&l, &s);
         for (edge, route) in edges.iter().zip(&l.edges) {
             let (a, b) = (l.nodes[edge.from], l.nodes[edge.to]);
@@ -640,7 +665,7 @@ mod tests {
         let s = sizes(3);
         let mut long = e(0, 2);
         long.min_len = 3;
-        let l = layout(Direction::TopDown, &s, &[e(0, 1), long]);
+        let l = layout(Direction::TopDown, &s, &[e(0, 1), long]).unwrap();
         check(&l, &s);
         assert_eq!(l.edges[1].points.len(), 4);
         assert!(l.nodes[2].y > l.nodes[1].y);
@@ -651,7 +676,7 @@ mod tests {
         let s = sizes(3);
         let edges = [labelled(0, 1), e(1, 2), labelled(2, 0)];
         for dir in [Direction::TopDown, Direction::LeftRight] {
-            let l = layout(dir, &s, &edges);
+            let l = layout(dir, &s, &edges).unwrap();
             check(&l, &s);
             for (edge, route) in edges.iter().zip(&l.edges) {
                 let (a, b) = (l.nodes[edge.from], l.nodes[edge.to]);
@@ -681,7 +706,7 @@ mod tests {
             labelled(0, 3),
             labelled(1, 3),
         ];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         let mut all = s.clone();
         let mut with_labels = l.clone();
         for (edge, route) in edges.iter().zip(&l.edges) {
@@ -705,7 +730,7 @@ mod tests {
             e(2, 3),
             e(3, 2),
         ];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&l, &s);
         assert!(l.edges[3].points.is_empty());
         assert!(l.edges[4].points.is_empty());
@@ -722,7 +747,7 @@ mod tests {
     fn disconnected_parts_sit_side_by_side() {
         let s = sizes(6);
         let edges = [e(0, 1), e(2, 3), e(4, 4)];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&l, &s);
         assert_eq!(l.nodes[0].y, l.nodes[2].y);
         assert_eq!(l.nodes[5].y, l.nodes[0].y);
@@ -732,10 +757,10 @@ mod tests {
     fn deterministic() {
         let s = sizes(12);
         let edges: Vec<EdgeIn> = (0..30).map(|i| e((i * 7) % 12, (i * 5 + 3) % 12)).collect();
-        let a = layout(Direction::TopDown, &s, &edges);
+        let a = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&a, &s);
         for _ in 0..3 {
-            assert_eq!(layout(Direction::TopDown, &s, &edges), a);
+            assert_eq!(layout(Direction::TopDown, &s, &edges).unwrap(), a);
         }
     }
 
@@ -743,7 +768,7 @@ mod tests {
     fn directions_transpose_and_flip() {
         let s = sizes(5);
         let edges = [e(0, 1), labelled(0, 2), e(1, 3), e(2, 3), e(3, 4), e(4, 4)];
-        let td = layout(Direction::TopDown, &s, &edges);
+        let td = layout(Direction::TopDown, &s, &edges).unwrap();
         // LR of the transposed sizes is TD transposed.
         let t: Vec<Size> = s.iter().map(|s| sq(s.h, s.w)).collect();
         let transposed_edges: Vec<EdgeIn> = edges
@@ -753,7 +778,7 @@ mod tests {
                 ..*e
             })
             .collect();
-        let lr = layout(Direction::LeftRight, &t, &transposed_edges);
+        let lr = layout(Direction::LeftRight, &t, &transposed_edges).unwrap();
         check(&lr, &t);
         assert_eq!((lr.width, lr.height), (td.height, td.width));
         let swap = |p: &Point| Point { x: p.y, y: p.x };
@@ -762,12 +787,12 @@ mod tests {
             assert_eq!(a.points, b.points.iter().map(swap).collect::<Vec<_>>());
             assert_eq!(a.label, b.label.as_ref().map(swap));
         }
-        let bt = layout(Direction::BottomUp, &s, &edges);
+        let bt = layout(Direction::BottomUp, &s, &edges).unwrap();
         check(&bt, &s);
         for (a, b) in bt.nodes.iter().zip(&td.nodes) {
             assert_eq!((a.x, a.y), (b.x, td.height - b.y));
         }
-        let rl = layout(Direction::RightLeft, &t, &transposed_edges);
+        let rl = layout(Direction::RightLeft, &t, &transposed_edges).unwrap();
         for (a, b) in rl.nodes.iter().zip(&lr.nodes) {
             assert_eq!((a.x, a.y), (lr.width - b.x, b.y));
         }
@@ -778,14 +803,14 @@ mod tests {
         // Two parents each with two children, listed crossed: 0 → 3, 1 → 2.
         let s = sizes(4);
         let edges = [e(0, 3), e(1, 2)];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         let dx = |a: usize, b: usize| l.nodes[a].x - l.nodes[b].x;
         assert!(dx(0, 1).signum() == dx(3, 2).signum(), "{l:?}");
 
         // K(2,2) plus a chain under it lays out without crossings.
         let s = sizes(6);
         let edges = [e(0, 2), e(0, 3), e(1, 3), e(2, 4), e(3, 5), e(1, 5)];
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&l, &s);
     }
 
@@ -806,8 +831,32 @@ mod tests {
                 }
             })
             .collect();
-        let l = layout(Direction::TopDown, &s, &edges);
+        let l = layout(Direction::TopDown, &s, &edges).unwrap();
         check(&l, &s);
+    }
+
+    #[test]
+    fn too_deep_or_bendy_is_an_error() {
+        // A chain one rank too long.
+        let s = sizes(MAX_RANKS + 1);
+        let chain: Vec<EdgeIn> = (0..MAX_RANKS).map(|i| e(i, i + 1)).collect();
+        let err = layout(Direction::TopDown, &s, &chain).unwrap_err();
+        assert!(err.0.contains("too deep"), "{err:?}");
+        assert!(layout(Direction::TopDown, &s[..MAX_RANKS], &chain[..MAX_RANKS - 1]).is_ok());
+        // Labels double the ranks.
+        let mut labelled_chain = chain[..MAX_RANKS / 2].to_vec();
+        labelled_chain[0].label = Some(sq(10.0, 10.0));
+        assert!(layout(Direction::TopDown, &s, &labelled_chain).is_err());
+        // Huge lengths from a caller other than the parser.
+        let mut long = e(0, 1);
+        long.min_len = usize::MAX;
+        assert!(layout(Direction::TopDown, &s[..2], &[long]).is_err());
+        // Many long edges side by side.
+        let s = sizes(120);
+        let mut edges: Vec<EdgeIn> = (0..119).map(|i| e(i, i + 1)).collect();
+        edges.extend((0..100).map(|i| e(i % 10, 119 - i % 10)));
+        let err = layout(Direction::TopDown, &s, &edges).unwrap_err();
+        assert!(err.0.contains("bend"), "{err:?}");
     }
 
     #[test]

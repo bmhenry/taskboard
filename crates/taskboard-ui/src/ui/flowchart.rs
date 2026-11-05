@@ -118,9 +118,11 @@ fn prepare(src: &str) -> Rc<Result<Prepared, MermaidError>> {
         if let Some(hit) = cache.borrow().get(src) {
             return hit.clone();
         }
-        let prepared = Rc::new(mermaid::parse(src).map(|d| match d {
-            Diagram::Flowchart(f) => Prepared::Flowchart(Rc::new(Model::new(f))),
-            Diagram::Unsupported(kind) => Prepared::Unsupported(kind),
+        let prepared = Rc::new(mermaid::parse(src).and_then(|d| {
+            Ok(match d {
+                Diagram::Flowchart(f) => Prepared::Flowchart(Rc::new(Model::new(f)?)),
+                Diagram::Unsupported(kind) => Prepared::Unsupported(kind),
+            })
         }));
         let mut cache = cache.borrow_mut();
         if cache.len() >= PREPARED_DIAGRAMS {
@@ -200,7 +202,8 @@ struct Model {
 }
 
 impl Model {
-    fn new(chart: Flowchart) -> Model {
+    /// `chart` measured and laid out, or why it's too big to be.
+    fn new(chart: Flowchart) -> Result<Model, MermaidError> {
         let labels: Vec<TextBlock> = chart
             .nodes
             .iter()
@@ -231,8 +234,11 @@ impl Model {
                 }),
             })
             .collect();
-        let layout = layout::layout(chart.direction, &sizes, &edges);
-        Model {
+        let layout = layout::layout(chart.direction, &sizes, &edges).map_err(|e| MermaidError {
+            message: e.0,
+            line: None,
+        })?;
+        Ok(Model {
             width: layout.width + 2.0 * MARGIN,
             height: layout.height + 2.0 * MARGIN,
             chart,
@@ -240,7 +246,7 @@ impl Model {
             sizes,
             edge_labels,
             layout,
-        }
+        })
     }
 }
 
@@ -727,6 +733,22 @@ mod tests {
             Ok(Prepared::Unsupported(k)) => panic!("unsupported {k}"),
             Err(e) => panic!("{e}"),
         }
+    }
+
+    #[test]
+    fn too_big_to_lay_out_is_an_error() {
+        // 150 nodes in a chain of labelled links, each 4 ranks long: within
+        // the parser's limits, but 1192 ranks deep.
+        let mut src = String::from("graph TD\n");
+        for i in 0..149 {
+            src += &format!("n{i} ----->|x| n{}\n", i + 1);
+        }
+        match &*prepare(&src) {
+            Err(e) => assert!(e.message.contains("too deep"), "{e}"),
+            Ok(_) => panic!("laid out"),
+        }
+        let p = theme::palette(taskboard_core::settings::Theme::Dark, false);
+        let _: Element<'_, ()> = diagram(p, &src);
     }
 
     #[test]

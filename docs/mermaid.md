@@ -33,13 +33,18 @@ by a direction:
 | `RL`         | right to left  |
 
 Statements go on separate lines, or are separated by `;`, as in
-`graph LR; A --> B; B --> C`. Lines that start with `%%` are comments, and `%%{init: ...}%%`
-directives are skipped.
+`graph LR; A --> B; B --> C`. Lines that start with `%%` are comments. These are skipped,
+since the theme decides how a chart looks:
+
+- `%%{init: ...}%%` directives, including ones that run over several lines
+- a YAML front matter block at the very start, between two `---` lines (`title:`,
+  `config:` and so on)
 
 ## Nodes
 
-A node is an id, optionally followed by its shape and text. Ids are letters, digits, `_`
-and `-`. A node that's never given text shows its id.
+A node is an id, optionally followed by its shape and text. Ids are letters and digits (in
+any script), `_` and `-`. A node that's never given text shows its id. The statement
+keywords below (`style`, `class`, `click` and so on) can't be used as ids.
 
 | Syntax            | Shape |
 |-------------------|-------|
@@ -72,7 +77,7 @@ and `-`. A node that's never given text shows its id.
 - **Text:** `A -->|text| B`, or `A -- text --> B`. The second form works for the other
   strokes too: `A -. text .-> B` and `A == text ==> B`.
 - **Length:** each extra `-`, `=` or `.` makes the link at least one rank longer, so
-  `A ---> B` puts `B` two ranks below `A`.
+  `A ---> B` puts `B` two ranks below `A`. A link can span at most 10 ranks this way.
 - **Chains:** `A --> B --> C` links A to B and B to C.
 - **Groups:** `A & B --> C & D` links each of A and B to each of C and D.
 - A node can link to itself (`A --> A`). The loop is drawn on its right, or underneath it
@@ -95,6 +100,10 @@ Each of these is an error that names its line, rather than something drawn wrong
 - other shapes: `A>text]`, `A[/text/]`, `A[\text\]`, trapezoids, `A(((text)))` and
   `A@{ shape: ... }`
 - more than 150 nodes or 300 links in one flowchart
+- a link longer than 10 ranks (`A ------------> B`, with 12 dashes, is too long)
+- a chart too big to draw even within those limits: more than 600 ranks (the extra
+  rank each labelled link adds in the middle counts), or links bending more than 10,000
+  times in all on their way past other ranks. These errors don't name a line.
 
 ## How flowcharts are drawn
 

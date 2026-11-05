@@ -17,6 +17,9 @@ use std::fmt;
 pub const MAX_NODES: usize = 150;
 /// The most edges a flowchart can have.
 pub const MAX_EDGES: usize = 300;
+/// The most ranks one link can be made to span with extra dashes, `=`s
+/// or dots (`A ----> B` spans 3).
+pub const MAX_LINK_LEN: usize = 10;
 
 /// Which way the ranks of a flowchart run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,12 +126,7 @@ pub enum Diagram {
 
 /// Parses a ` ```mermaid ` block.
 pub fn parse(src: &str) -> Result<Diagram, MermaidError> {
-    let mut lines = src
-        .lines()
-        .enumerate()
-        .map(|(i, l)| (i + 1, l.trim()))
-        // `%%` comments and `%%{init: ...}%%` directives take whole lines.
-        .filter(|(_, l)| !l.is_empty() && !l.starts_with("%%"));
+    let mut lines = statement_lines(src)?.into_iter();
     let Some((header_line, header)) = lines.next() else {
         return Err(MermaidError {
             message: "the diagram is empty: start it with `flowchart TD` or `graph LR`".into(),
@@ -195,6 +193,40 @@ pub fn parse(src: &str) -> Result<Diagram, MermaidError> {
     Ok(Diagram::Flowchart(b.chart))
 }
 
+/// The lines of `src` that hold statements, numbered from 1: without blank
+/// lines, `%%` comments, `%%{ ... }%%` directives (which can run over
+/// several lines) and a leading `---` front matter block.
+fn statement_lines(src: &str) -> Result<Vec<(usize, &str)>, MermaidError> {
+    let unclosed = |line: usize, what: &str| MermaidError {
+        message: format!("{what} isn't closed"),
+        line: Some(line),
+    };
+    let mut lines = src
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.trim()))
+        .skip_while(|(_, l)| l.is_empty())
+        .peekable();
+    // Front matter (`---`, YAML config, `---`) before anything else.
+    if let Some(&(start, "---")) = lines.peek() {
+        lines.next();
+        if !lines.by_ref().any(|(_, l)| l == "---") {
+            return Err(unclosed(start, "the front matter's `---`"));
+        }
+    }
+    let mut out = Vec::new();
+    while let Some((n, line)) = lines.next() {
+        if line.starts_with("%%{") && !line.contains("}%%") {
+            if !lines.by_ref().any(|(_, l)| l.contains("}%%")) {
+                return Err(unclosed(n, "the `%%{` directive"));
+            }
+        } else if !line.is_empty() && !line.starts_with("%%") {
+            out.push((n, line));
+        }
+    }
+    Ok(out)
+}
+
 /// Statements that only style or annotate a diagram: accepted and skipped,
 /// since its colours come from the theme.
 const IGNORED: &[&str] = &[
@@ -206,6 +238,9 @@ const IGNORED: &[&str] = &[
     "accTitle",
     "accDescr",
 ];
+
+/// What can follow a node: a link, `&` or the end of a statement.
+const LINK_STARTS: &[char] = &['-', '=', '<', '&', '~', '.', ';'];
 
 /// Mermaid statements this subset can't draw.
 const UNSUPPORTED: &[&str] = &["subgraph", "end", "direction"];
@@ -256,6 +291,13 @@ impl Builder {
     fn statement(&mut self, cur: &mut Cursor) -> Result<(), String> {
         if let Some(word) = keyword(cur.rest()) {
             if IGNORED.contains(&word) {
+                // `style --> B` uses the keyword as a node, which mermaid
+                // rejects too.
+                let arg = cur.rest()[word.len()..].trim_start();
+                let annotation = word.starts_with("acc");
+                if !annotation && (arg.is_empty() || arg.starts_with(LINK_STARTS)) {
+                    return Err(format!("`{word}` is a keyword, so it can't be a node id"));
+                }
                 cur.take_while(|c| c != ';');
                 return Ok(());
             }
@@ -576,6 +618,11 @@ impl<'a> Cursor<'a> {
                 return Err(self.expected("a link (`-->`, `---`, `-.->`, `==>`)"));
             }
         };
+        if min_len > MAX_LINK_LEN {
+            return Err(format!(
+                "the link is too long: it can span at most {MAX_LINK_LEN} ranks"
+            ));
+        }
         Ok((arrow, min_len))
     }
 }
@@ -863,6 +910,68 @@ mod tests {
         let (m, l) = error(&format!("graph TD\n{left} --> {right}"));
         assert!(m.contains("too many links"), "{m}");
         assert_eq!(l, Some(2));
+    }
+
+    #[test]
+    fn long_links_are_capped() {
+        let link = |n: usize| format!("graph TD\nA {}> B", "-".repeat(n));
+        assert_eq!(fc(&link(MAX_LINK_LEN + 1)).edges[0].min_len, MAX_LINK_LEN);
+        let (m, l) = error(&link(MAX_LINK_LEN + 2));
+        assert!(m.contains("too long"), "{m}");
+        assert_eq!(l, Some(2));
+        let (m, l) = error(&format!("graph TD\n\nA -- x {}- B", "-".repeat(20_000)));
+        assert!(m.contains("too long"), "{m}");
+        assert_eq!(l, Some(3));
+        let dotted = format!("graph TD\nA -{}-> B", ".".repeat(MAX_LINK_LEN + 1));
+        assert!(error(&dotted).0.contains("too long"));
+        let thick = format!("graph TD\nA {}= B", "=".repeat(MAX_LINK_LEN + 3));
+        assert!(error(&thick).0.contains("too long"));
+    }
+
+    #[test]
+    fn front_matter_and_directives_are_skipped() {
+        let f = fc("---\ntitle: Hello\nconfig:\n  theme: forest\n---\nflowchart LR\nA --> B");
+        assert_eq!(f.direction, Direction::LeftRight);
+        assert_eq!(f.edges.len(), 1);
+        let f = fc(
+            "\n%%{\n  init: {\"theme\": \"dark\"}\n}%%\ngraph TD\nA --> B\n%%{ init: {} }%%\nB --> C",
+        );
+        assert_eq!(f.edges.len(), 2);
+        // Line numbers still count the skipped lines.
+        assert_eq!(error("---\ntitle: x\n---\ngraph TD\nA[oops").1, Some(5));
+        assert_eq!(
+            parse("---\ntitle: x\n---\nsequenceDiagram"),
+            Ok(Diagram::Unsupported("sequenceDiagram".into()))
+        );
+        // Only at the start.
+        let (m, l) = error("graph TD\nA --> B\n---");
+        assert!(m.contains("expected a node id"), "{m}");
+        assert_eq!(l, Some(3));
+        let (m, l) = error("\n---\ntitle: x\ngraph TD");
+        assert!(m.contains("front matter"), "{m}");
+        assert_eq!(l, Some(2));
+        let (m, l) = error("graph TD\n%%{ init: {\nA --> B");
+        assert!(m.contains("directive"), "{m}");
+        assert_eq!(l, Some(2));
+    }
+
+    #[test]
+    fn keywords_arent_node_ids() {
+        for src in [
+            "graph TD\nstyle --> B",
+            "graph TD\nclass --> B",
+            "graph TD\nclick & A --> B",
+            "graph TD\nclassDef",
+        ] {
+            let (m, l) = error(src);
+            assert!(m.contains("is a keyword"), "{src}: {m}");
+            assert_eq!(l, Some(2));
+        }
+        // As statements they're still skipped.
+        let f = fc("graph TD\nstyle A fill:#f00\nclass A,B big\nA --> B");
+        assert_eq!(f.edges.len(), 1);
+        // Ids that only start with a keyword are fine.
+        assert_eq!(fc("graph TD\nstyled --> classy").nodes.len(), 2);
     }
 
     #[test]
