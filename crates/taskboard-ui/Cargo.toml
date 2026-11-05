@@ -12,6 +12,9 @@ iced = { version = "0.14", features = ["image", "canvas", "advanced"] }
 iced_drop = "=0.2.54"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+serde.workspace = true
+# YAML for ```chart blocks (and dashboard files); JSON Vega-Lite parses too.
+serde_norway = "0.9"
 
 # Natively, `iced::time::every` needs an executor; on wasm32 iced uses
 # wasm-bindgen-futures.

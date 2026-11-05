@@ -8,6 +8,9 @@
 //! [`theme`] fonts.
 
 mod app;
+// Not drawn yet: the chart widget (ui/chart.rs) and dashboards will use it.
+#[allow(dead_code)]
+mod chart_spec;
 mod markdown;
 mod platform;
 mod source_link;
