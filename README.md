@@ -36,6 +36,7 @@ Taskboard is actually two distinct programs:
     - Provides search to filter by name, description, or link text, as well as separate filtering for status and datetime
     - Provides prioritization of tasks by reordering them on the board
     - Enables Markdown formatting in the description of a task
+    - Draws charts from ` ```chart ` blocks in Markdown (see [docs/charts.md](docs/charts.md))
     - Allows users to view other files (as markdown or plain text)
     - Watches files for change to update the tasks live (for example, when the CLI updates a task)
 - `tb`: The CLI application, which enables adding tasks or retrieving task information

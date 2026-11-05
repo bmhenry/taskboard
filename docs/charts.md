@@ -61,10 +61,28 @@ Each channel (`x`, `y`, `color`) takes these keys:
 - A `null` value, or a field left out of a row, means that row has no value for the field.
 - Data is given inline. There is no aggregation, so give each bar or point its final value.
 
+## How charts are drawn
+
+- With `color`, each series gets the next of the theme's eight series colours, in the
+  order its value first appears in the data, and a legend on the right names them.
+  Bars of different series side by side are grouped, not stacked, and the areas of an
+  `area` chart overlap rather than stack.
+- Categories (`nominal` and `ordinal` values) are laid out in the order they first
+  appear in the data, left to right or top to bottom. A row with no value for `x` or
+  `y` isn't drawn.
+- Bars and areas start from 0; other numeric axes fit the data. Numeric axes are
+  rounded out to whole ticks; time axes tick on calendar boundaries (days, months,
+  years) and start and end with the data.
+- A line or area runs through its points in order along the category or time axis.
+- Pointing at a bar or point, or anywhere over a line or area chart, shows the
+  nearest row's values.
+- Without `width`, the chart fills the width it's in, and the plot is 220 pixels tall
+  unless `height` says otherwise.
+
 ## Errors
 
-When a spec is invalid, the viewer shows the error and the block's source instead of a
-chart. Some examples:
+When a spec is invalid, the viewer shows the error and the block's source, with the
+error's line marked when it has one, instead of a chart. Some examples:
 
 ```text
 mark: unknown variant `arc`, expected one of `bar`, `line`, `area`, `point` at line 1 column 7

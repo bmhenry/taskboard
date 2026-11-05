@@ -2,6 +2,7 @@
 //! into [`Action`]s. All changes to the board go through those actions.
 
 mod board;
+mod chart;
 mod drag;
 mod list;
 mod panels;

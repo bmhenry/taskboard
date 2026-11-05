@@ -14,7 +14,7 @@
 //! GitHub's tables become a [`Table`] block, whose cells' inline formatting
 //! is reduced to its text like a paragraph's.
 
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
@@ -26,6 +26,9 @@ pub enum BlockKind {
         marker: String,
     },
     Code,
+    /// A fenced code block whose language is `chart`: its text is the
+    /// chart's spec, drawn by `ui::chart`.
+    Chart,
     Quote,
     Rule,
     /// A `<details>` block, whose text is its summary. `open` is whether it
@@ -135,7 +138,8 @@ impl Builder {
     fn flush(&mut self) {
         if let Some(mut b) = self.current.take() {
             b.text.truncate(b.text.trim_end().len());
-            if !b.text.is_empty() {
+            // An empty chart is still shown, as an error.
+            if !b.text.is_empty() || b.kind == BlockKind::Chart {
                 self.push(b);
             }
         }
@@ -413,6 +417,17 @@ fn number(blocks: &mut [Block], parent: &[usize]) {
     }
 }
 
+/// A fenced block whose info string's first word is `chart` is a chart;
+/// any other code block is code.
+fn code_kind(kind: &CodeBlockKind) -> BlockKind {
+    match kind {
+        CodeBlockKind::Fenced(info) if info.split_whitespace().next() == Some("chart") => {
+            BlockKind::Chart
+        }
+        _ => BlockKind::Code,
+    }
+}
+
 pub fn parse(src: &str) -> Vec<Block> {
     let mut tree = Builder::default();
     // Each open list's next number, or None for bullet lists.
@@ -441,7 +456,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                     });
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => tree.start(BlockKind::Code),
+            Event::Start(Tag::CodeBlock(kind)) => tree.start(code_kind(&kind)),
             Event::Start(Tag::BlockQuote(_)) => {
                 tree.flush();
                 tree.quotes.push(tree.open.len());
@@ -566,6 +581,20 @@ mod tests {
                 (vec![0, 2], item("2."), "two".into()),
                 (vec![0, 2, 0], item("•"), "nested".into()),
                 (vec![0, 3], BlockKind::Code, "let x = 1;".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chart_blocks() {
+        let blocks = parse("```chart\nmark: bar\n```\n\n```chart\n```\n\n```rust\nchart\n```\n");
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], BlockKind::Chart, "mark: bar".into()),
+                // Empty, but kept so it shows its error.
+                (vec![1], BlockKind::Chart, String::new()),
+                (vec![2], BlockKind::Code, "chart".into()),
             ]
         );
     }

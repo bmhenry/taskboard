@@ -49,6 +49,10 @@ pub struct Palette {
     pub danger_text: u32,
     pub danger_text_hover: u32,
     pub error_bar: u32,
+    /// Chart series, assigned in this order. The same eight hues in both
+    /// themes, each stepped for its background, chosen so neighbours stay
+    /// apart with colour blindness.
+    pub series: [u32; 8],
 }
 
 static DARK: Palette = Palette {
@@ -73,6 +77,9 @@ static DARK: Palette = Palette {
     danger_text: 0xFFD7D4,
     danger_text_hover: 0xFFFFFF,
     error_bar: 0x3A1D1C,
+    series: [
+        0x3987E5, 0xD95926, 0x199E70, 0xC98500, 0xD55181, 0x008300, 0x9085E9, 0xE66767,
+    ],
 };
 
 /// Neutral grays in the style of Apple's site: a white window, columns only a
@@ -100,6 +107,9 @@ static LIGHT: Palette = Palette {
     danger_text: 0xB0000F,
     danger_text_hover: 0x8A000C,
     error_bar: 0xFFEBEB,
+    series: [
+        0x2A78D6, 0xEB6834, 0x1BAF7A, 0xEDA100, 0xE87BA4, 0x008300, 0x6250D6, 0xE34948,
+    ],
 };
 
 /// The least height and width of something tapped in compact mode.

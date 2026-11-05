@@ -2,14 +2,16 @@
 
 use std::path::Path;
 
+use iced::advanced::text::Paragraph as _;
 use iced::alignment::Vertical;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::canvas::{self, Frame, Geometry, LineCap, LineJoin, Stroke};
-use iced::widget::text::Wrapping;
+use iced::widget::text::{LineHeight, Shaping, Wrapping};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{Space, button, column, container, mouse_area, row, text, text_input, tooltip};
 use iced::{
-    Alignment, Background, Border, Element, Length, Point, Rectangle, Renderer, Theme, mouse,
+    Alignment, Background, Border, Element, Length, Pixels, Point, Rectangle, Renderer, Size,
+    Theme, mouse,
 };
 use taskboard_core::{Progress, Status};
 
@@ -386,6 +388,22 @@ pub fn shorten_path(path: &str, max_chars: usize) -> String {
         start = sep;
     }
     format!("…{}", &path[start..])
+}
+
+/// How wide `content` is on one line, for laying out canvas text.
+pub fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
+    <Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(iced::advanced::Text {
+        content,
+        bounds: Size::INFINITE,
+        size: Pixels(size),
+        line_height: LineHeight::default(),
+        font,
+        align_x: iced::advanced::text::Alignment::Left,
+        align_y: Vertical::Top,
+        shaping: Shaping::Basic,
+        wrapping: Wrapping::None,
+    })
+    .min_width()
 }
 
 #[cfg(test)]

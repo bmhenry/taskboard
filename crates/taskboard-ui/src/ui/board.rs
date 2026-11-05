@@ -4,11 +4,10 @@ use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
 use std::sync::{LazyLock, Mutex};
 
-use iced::advanced::text::Paragraph as _;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, Path};
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::text::{LineHeight, Shaping, Wrapping};
+use iced::widget::text::Wrapping;
 use iced::widget::{
     Id, Space, button, column, container, hover, image, keyed_column, mouse_area, row, scrollable,
     text,
@@ -20,7 +19,7 @@ use super::drag::{CARD_GAP, Slot};
 use super::theme::{self, BOLD, Pal, Style, rgb, status_index};
 use super::widgets::{
     El, assignee_label, btn, count_badge, dot, epic_badge, grow, missing_project_badge,
-    parent_label, plural,
+    parent_label, plural, text_width,
 };
 use super::{Gui, Message, edge, side_width};
 use crate::app::{Action, DRAG_THRESHOLD, EditTarget, View};
@@ -550,19 +549,4 @@ fn spine_text(content: &str, x: f32, size: f32, font: iced::Font, color: u32) ->
         align_y: Vertical::Center,
         ..canvas::Text::default()
     }
-}
-
-fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
-    <Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(iced::advanced::Text {
-        content,
-        bounds: Size::INFINITE,
-        size: Pixels(size),
-        line_height: LineHeight::default(),
-        font,
-        align_x: iced::advanced::text::Alignment::Left,
-        align_y: Vertical::Top,
-        shaping: Shaping::Basic,
-        wrapping: Wrapping::None,
-    })
-    .min_width()
 }
