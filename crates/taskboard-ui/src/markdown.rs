@@ -29,6 +29,9 @@ pub enum BlockKind {
     /// A fenced code block whose language is `chart`: its text is the
     /// chart's spec, drawn by `ui::chart`.
     Chart,
+    /// A fenced code block whose language is `mermaid`: its text is a
+    /// diagram, drawn by `ui::flowchart`.
+    Mermaid,
     Quote,
     Rule,
     /// A `<details>` block, whose text is its summary. `open` is whether it
@@ -138,8 +141,8 @@ impl Builder {
     fn flush(&mut self) {
         if let Some(mut b) = self.current.take() {
             b.text.truncate(b.text.trim_end().len());
-            // An empty chart is still shown, as an error.
-            if !b.text.is_empty() || b.kind == BlockKind::Chart {
+            // An empty chart or diagram is still shown, as an error.
+            if !b.text.is_empty() || matches!(b.kind, BlockKind::Chart | BlockKind::Mermaid) {
                 self.push(b);
             }
         }
@@ -417,13 +420,15 @@ fn number(blocks: &mut [Block], parent: &[usize]) {
     }
 }
 
-/// A fenced block whose info string's first word is `chart` is a chart;
-/// any other code block is code.
+/// A fenced block whose info string's first word is `chart` is a chart,
+/// and `mermaid` a diagram; any other code block is code.
 fn code_kind(kind: &CodeBlockKind) -> BlockKind {
-    match kind {
-        CodeBlockKind::Fenced(info) if info.split_whitespace().next() == Some("chart") => {
-            BlockKind::Chart
-        }
+    let CodeBlockKind::Fenced(info) = kind else {
+        return BlockKind::Code;
+    };
+    match info.split_whitespace().next() {
+        Some("chart") => BlockKind::Chart,
+        Some("mermaid") => BlockKind::Mermaid,
         _ => BlockKind::Code,
     }
 }
@@ -595,6 +600,25 @@ mod tests {
                 // Empty, but kept so it shows its error.
                 (vec![1], BlockKind::Chart, String::new()),
                 (vec![2], BlockKind::Code, "chart".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn mermaid_blocks() {
+        let blocks = parse(
+            "```mermaid\ngraph TD\n  A --> B\n```\n\n```mermaid\n```\n\n~~~mermaid title\nsequenceDiagram\n~~~\n\n    mermaid\n\n```text\nmermaid\n```\n",
+        );
+        assert_eq!(
+            flatten(&blocks),
+            [
+                (vec![0], BlockKind::Mermaid, "graph TD\n  A --> B".into()),
+                // Empty, but kept so it shows its error.
+                (vec![1], BlockKind::Mermaid, String::new()),
+                (vec![2], BlockKind::Mermaid, "sequenceDiagram".into()),
+                // Indented code has no language.
+                (vec![3], BlockKind::Code, "mermaid".into()),
+                (vec![4], BlockKind::Code, "mermaid".into()),
             ]
         );
     }

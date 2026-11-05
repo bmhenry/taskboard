@@ -390,6 +390,72 @@ pub fn shorten_path(path: &str, max_chars: usize) -> String {
     format!("…{}", &path[start..])
 }
 
+/// What a [`source_note`] says about its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Note {
+    /// The source is invalid.
+    Error,
+    /// The source is fine but isn't drawn.
+    Info,
+}
+
+/// A block whose source can't be drawn, as the docs promise it's shown:
+/// `head` and `message` over the source with line numbers, `line` marked.
+/// Charts and diagrams share it.
+pub fn source_note<'a, M: 'a>(
+    p: Pal,
+    note: Note,
+    head: &str,
+    message: &str,
+    line: Option<usize>,
+    src: &str,
+) -> Element<'a, M> {
+    let (tone, border) = match note {
+        Note::Error => (p.danger, p.danger),
+        Note::Info => (p.muted, p.border),
+    };
+    let head = text(head.to_string()).size(13).font(BOLD).color(rgb(tone));
+    let message = text(message.to_string())
+        .size(13)
+        .line_height(18.0 / 13.0)
+        .color(rgb(p.text));
+    let lines: Vec<&str> = if src.is_empty() {
+        vec![""]
+    } else {
+        src.lines().collect()
+    };
+    let digits = lines.len().to_string().len();
+    let source = column(lines.into_iter().enumerate().map(|(i, content)| {
+        let number = text(format!("{:>digits$}", i + 1))
+            .size(13)
+            .font(MONO)
+            .color(rgb(p.muted));
+        let numbered = row![number, text(content.to_string()).size(13).font(MONO)]
+            .spacing(12)
+            .padding([1, 6]);
+        let marked = line == Some(i + 1);
+        container(numbered)
+            .width(Length::Fill)
+            .style(move |_| {
+                if marked {
+                    theme::fill(p.error_bar, 3.0)
+                } else {
+                    container::Style::default()
+                }
+            })
+            .into()
+    }));
+    let source = container(source)
+        .width(Length::Fill)
+        .padding(4)
+        .style(move |_| theme::fill(p.input, 6.0));
+    container(column![head, message, source].spacing(8))
+        .width(Length::Fill)
+        .padding(10)
+        .style(move |_| theme::boxed(p.panel, border, 6.0))
+        .into()
+}
+
 /// How wide `content` is on one line, for laying out canvas text.
 pub fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
     <Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(iced::advanced::Text {

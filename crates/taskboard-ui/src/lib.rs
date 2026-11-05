@@ -10,6 +10,7 @@
 mod app;
 mod chart_spec;
 mod markdown;
+mod mermaid;
 mod platform;
 mod source_link;
 #[cfg(test)]

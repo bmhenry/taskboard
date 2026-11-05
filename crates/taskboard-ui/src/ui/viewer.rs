@@ -160,6 +160,7 @@ fn md_leaf<'a>(p: Pal, kind: BlockKind, body: String) -> El<'a> {
         .padding([2, 0])
         .into(),
         BlockKind::Chart => super::chart::chart(p, &body),
+        BlockKind::Mermaid => super::flowchart::diagram(p, &body),
         // Drawn by `Md::details`.
         BlockKind::Details { .. } => text(body).into(),
         BlockKind::Table(t) => super::table::md_table(p, t),

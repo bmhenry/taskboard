@@ -4,6 +4,7 @@
 mod board;
 mod chart;
 mod drag;
+mod flowchart;
 mod list;
 mod panels;
 mod popup;

@@ -21,8 +21,8 @@ use iced::{
     Theme, mouse,
 };
 
-use super::theme::{self, BOLD, MONO, Pal, REGULAR, rgb};
-use super::widgets::{LINE_HEIGHT, text_width};
+use super::theme::{self, BOLD, Pal, REGULAR, rgb};
+use super::widgets::{LINE_HEIGHT, Note, source_note, text_width};
 use crate::chart_spec::{self, Channel, ChartError, Datum, FieldType, Mark, Spec};
 
 /// Plot height when the spec doesn't give one.
@@ -54,7 +54,9 @@ pub fn chart<'a, M: 'a>(p: Pal, src: &str) -> Element<'a, M> {
     let prepared = prepare(src);
     let prepared = match &*prepared {
         Ok(prepared) => prepared,
-        Err(e) => return error_view(p, e, src),
+        Err(e) => {
+            return source_note(p, Note::Error, "Chart error", &e.message, e.line, src);
+        }
     };
     let (width, height) = (prepared.width, prepared.height);
     let model = prepared.model.clone();
@@ -156,51 +158,6 @@ fn legend<'a, M: 'a>(p: Pal, model: &Model) -> Option<Element<'a, M>> {
             .wrap()
             .into(),
     )
-}
-
-/// What the docs promise for an invalid spec: the error, over the block's
-/// source with line numbers, the error's line marked.
-fn error_view<'a, M: 'a>(p: Pal, err: &ChartError, src: &str) -> Element<'a, M> {
-    let head = text("Chart error").size(13).font(BOLD).color(rgb(p.danger));
-    let message = text(err.message.clone())
-        .size(13)
-        .line_height(18.0 / 13.0)
-        .color(rgb(p.text));
-    let lines: Vec<&str> = if src.is_empty() {
-        vec![""]
-    } else {
-        src.lines().collect()
-    };
-    let digits = lines.len().to_string().len();
-    let source = column(lines.into_iter().enumerate().map(|(i, line)| {
-        let number = text(format!("{:>digits$}", i + 1))
-            .size(13)
-            .font(MONO)
-            .color(rgb(p.muted));
-        let line = row![number, text(line.to_string()).size(13).font(MONO)]
-            .spacing(12)
-            .padding([1, 6]);
-        let marked = err.line == Some(i + 1);
-        container(line)
-            .width(Length::Fill)
-            .style(move |_| {
-                if marked {
-                    theme::fill(p.error_bar, 3.0)
-                } else {
-                    container::Style::default()
-                }
-            })
-            .into()
-    }));
-    let source = container(source)
-        .width(Length::Fill)
-        .padding(4)
-        .style(move |_| theme::fill(p.input, 6.0));
-    container(column![head, message, source].spacing(8))
-        .width(Length::Fill)
-        .padding(10)
-        .style(move |_| theme::boxed(p.panel, p.danger, 6.0))
-        .into()
 }
 
 /// Where a value sits along an axis, before it's scaled to pixels: a number
