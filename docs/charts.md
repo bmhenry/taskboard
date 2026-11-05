@@ -32,7 +32,7 @@ Dashboard files use the same spec for their charts.
 | `encoding`    | yes      | Which field goes on which channel. Takes `x` and `y` (both required) and an optional `color`. |
 | `data`        | yes      | `values`: a list of rows. Each row is a flat map of field name to number, string, boolean or null. |
 | `title`       | no       | Text shown above the chart. |
-| `width`, `height` | no   | Plot size in pixels, as a positive number. The viewer picks a size when these are left out. |
+| `width`, `height` | no   | Plot size in pixels, a positive number up to 4096. The viewer picks a size when these are left out. |
 | `description` | no       | A note for readers of the source. It isn't drawn. |
 | `$schema`     | no       | Ignored, so a pasted Vega-Lite spec still parses. |
 
@@ -64,7 +64,7 @@ Each channel (`x`, `y`, `color`) takes these keys:
 ## How charts are drawn
 
 - With `color`, each series gets the next of the theme's eight series colours, in the
-  order its value first appears in the data, and a legend on the right names them.
+  order its value first appears in the data, and a legend under the chart names them.
   Bars of different series side by side are grouped, not stacked, and the areas of an
   `area` chart overlap rather than stack.
 - Categories (`nominal` and `ordinal` values) are laid out in the order they first
@@ -72,12 +72,16 @@ Each channel (`x`, `y`, `color`) takes these keys:
   `y` isn't drawn.
 - Bars and areas start from 0; other numeric axes fit the data. Numeric axes are
   rounded out to whole ticks; time axes tick on calendar boundaries (days, months,
-  years) and start and end with the data.
+  years) and start and end with the data, except that a bar chart's leaves half the
+  smallest gap between bars at each end, so the end bars fit.
 - A line or area runs through its points in order along the category or time axis.
 - Pointing at a bar or point, or anywhere over a line or area chart, shows the
   nearest row's values.
 - Without `width`, the chart fills the width it's in, and the plot is 220 pixels tall
-  unless `height` says otherwise.
+  unless `height` says otherwise. A `width` wider than the space there is is cut to
+  fit.
+- Very large or very small numbers are labelled in scientific notation (`2e-9`,
+  `1.5e300`).
 
 ## Errors
 

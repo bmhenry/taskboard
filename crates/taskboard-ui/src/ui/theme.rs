@@ -131,6 +131,13 @@ impl Deref for Pal {
     }
 }
 
+/// The same theme, sized the same way.
+impl PartialEq for Pal {
+    fn eq(&self, other: &Pal) -> bool {
+        std::ptr::eq(self.colors, other.colors) && self.compact == other.compact
+    }
+}
+
 impl Pal {
     /// The height of a control that's `height` tall outside compact mode.
     pub fn control(self, height: f32) -> f32 {

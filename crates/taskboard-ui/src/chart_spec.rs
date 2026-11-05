@@ -14,6 +14,9 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 
+/// The largest `width` or `height`, in pixels.
+pub const MAX_SIZE: f32 = 4096.0;
+
 /// A parsed, checked chart.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -300,6 +303,13 @@ impl Spec {
             {
                 return Err(ChartError::new(format!(
                     "{key} must be a positive number, not {size}"
+                )));
+            }
+            if let Some(size) = size
+                && size > MAX_SIZE
+            {
+                return Err(ChartError::new(format!(
+                    "{key} can be at most {MAX_SIZE} pixels, not {size:e}"
                 )));
             }
         }
@@ -607,6 +617,11 @@ data:
             err(&format!("height: -5\n{SALES}")).message,
             "height must be a positive number, not -5"
         );
+        assert_eq!(
+            err(&format!("width: 1e30\n{SALES}")).message,
+            "width can be at most 4096 pixels, not 1e30"
+        );
+        assert!(parse(&format!("height: 4096\n{SALES}")).is_ok());
     }
 
     #[test]

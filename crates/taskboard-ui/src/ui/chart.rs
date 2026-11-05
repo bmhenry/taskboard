@@ -1,6 +1,6 @@
 //! Charts: a parsed chart spec (`crate::chart_spec`, see `docs/charts.md`)
-//! drawn on an iced canvas, with axes, gridlines, a legend and a tooltip for
-//! the mark nearest the pointer. A spec that doesn't parse is shown as its
+//! drawn on an iced canvas, with axes, gridlines and a tooltip for the mark
+//! nearest the pointer, over a legend of its series. A spec that doesn't parse is shown as its
 //! error over its source, never as nothing.
 //!
 //! [`chart`] is the whole widget; it's generic over the message type and
@@ -8,14 +8,17 @@
 //! use it. The maths (scales, ticks, which mark is nearest) is plain
 //! functions, tested below; [`Chart::draw`] only paints what they work out.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime};
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Frame, Geometry, LineJoin, Path, Stroke};
-use iced::widget::{column, container, row, stack, text};
+use iced::widget::{Space, column, container, row, stack, text};
 use iced::{
-    Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, mouse,
+    Alignment, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Renderer, Size,
+    Theme, mouse,
 };
 
 use super::theme::{self, BOLD, MONO, Pal, REGULAR, rgb};
@@ -34,8 +37,12 @@ const Y_TITLE_HEIGHT: f32 = 20.0;
 /// Room under the plot: tick, label, axis title.
 const X_AXIS_HEIGHT: f32 = 44.0;
 const TICK: f32 = 4.0;
-/// Widest a category or legend label gets before it's cut short.
+/// Widest a category label gets before it's cut short.
 const MAX_LABEL: f32 = 140.0;
+/// Room right of the plot, for the last x tick label to stick out into.
+const RIGHT_MARGIN: f32 = 12.0;
+/// Most ticks a numeric axis gets, whatever its numbers.
+const MAX_TICKS: f64 = 200.0;
 /// Pixels between ticks on each axis, at least.
 const X_TICK_SPACING: f32 = 80.0;
 const Y_TICK_SPACING: f32 = 40.0;
@@ -44,42 +51,111 @@ const HOVER_REACH: f32 = 24.0;
 
 /// The chart `src` describes, or its error and source if it's invalid.
 pub fn chart<'a, M: 'a>(p: Pal, src: &str) -> Element<'a, M> {
-    match chart_spec::parse(src) {
-        Ok(spec) => {
+    let prepared = prepare(src);
+    let prepared = match &*prepared {
+        Ok(prepared) => prepared,
+        Err(e) => return error_view(p, e, src),
+    };
+    let (width, height) = (prepared.width, prepared.height);
+    let model = prepared.model.clone();
+    let layer = |hover| {
+        canvas::Canvas::new(Chart {
+            model: model.clone(),
+            p,
+            hover,
+        })
+        .width(width)
+        .height(height)
+    };
+    // The hover layer is a canvas of its own on top, since text in a canvas
+    // is drawn over all its shapes, and the tooltip has to cover the axis
+    // labels. A fixed width wider than the space there is is cut to fit.
+    let plot = stack![layer(false), layer(true)]
+        .width(width)
+        .height(height);
+    let mut body = column![plot].spacing(6);
+    if let Some(legend) = legend(p, &model) {
+        body = body.push(legend);
+    }
+    container(body).width(Length::Fill).into()
+}
+
+/// A parsed chart and its size, as [`chart`] needs it.
+struct Prepared {
+    model: Rc<Model>,
+    width: Length,
+    height: f32,
+}
+
+/// How many parsed charts [`prepare`] keeps.
+const PREPARED_CHARTS: usize = 64;
+
+thread_local! {
+    /// Parsed charts by source, so redrawing a view doesn't parse its
+    /// charts again. Markdown is itself parsed on every view, so the parse
+    /// can't be kept on its blocks.
+    static PREPARED: RefCell<HashMap<String, Rc<Result<Prepared, ChartError>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// `src` parsed and worked out, from the cache when it's been seen.
+fn prepare(src: &str) -> Rc<Result<Prepared, ChartError>> {
+    PREPARED.with(|cache| {
+        if let Some(hit) = cache.borrow().get(src) {
+            return hit.clone();
+        }
+        let parsed = Rc::new(chart_spec::parse(src).map(|spec| {
             let model = Model::new(&spec);
             let plot_h = spec.height.unwrap_or(DEFAULT_PLOT_HEIGHT);
-            let height = model.top() + plot_h + X_AXIS_HEIGHT;
             let width = match spec.width {
                 Some(w) => {
-                    let (left, right) = model.margins(plot_h);
-                    Length::Fixed(left + w + right)
+                    let (_, ticks) = axis_ticks(&model.y.domain, plot_h, Dir::Y);
+                    Length::Fixed(left_margin(&ticks, MAX_LABEL) + w + RIGHT_MARGIN)
                 }
                 None => Length::Fill,
             };
-            let model = Rc::new(model);
-            let layer = |hover| {
-                canvas::Canvas::new(Chart {
-                    model: model.clone(),
-                    p,
-                    hover,
-                })
-                .width(width)
-                .height(height)
-            };
-            // The hover layer is a canvas of its own on top, since text in
-            // a canvas is drawn over all its shapes, and the tooltip has to
-            // cover the axis labels. A fixed width wider than the space
-            // there is is cut to fit.
-            container(
-                stack![layer(false), layer(true)]
-                    .width(width)
-                    .height(height),
-            )
-            .width(Length::Fill)
-            .into()
+            Prepared {
+                height: model.top() + plot_h + X_AXIS_HEIGHT,
+                model: Rc::new(model),
+                width,
+            }
+        }));
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= PREPARED_CHARTS {
+            cache.clear();
         }
-        Err(e) => error_view(p, &e, src),
-    }
+        cache.insert(src.to_string(), parsed.clone());
+        parsed
+    })
+}
+
+/// The colour legend under the chart, wrapping onto more lines as needed,
+/// when there's a colour channel.
+fn legend<'a, M: 'a>(p: Pal, model: &Model) -> Option<Element<'a, M>> {
+    let (title, names) = model.legend.as_ref()?;
+    let title: Element<'a, M> = text(title.clone())
+        .size(SMALL)
+        .font(BOLD)
+        .color(rgb(p.text))
+        .into();
+    let entries = names.iter().enumerate().map(|(i, name)| -> Element<'a, M> {
+        let color = p.series[i % p.series.len()];
+        let swatch = container(Space::new())
+            .width(10)
+            .height(10)
+            .style(move |_| theme::fill(color, 2.0));
+        row![swatch, text(name.clone()).size(SMALL).color(rgb(p.text))]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+    });
+    Some(
+        row(std::iter::once(title).chain(entries))
+            .spacing(14)
+            .align_y(Alignment::Center)
+            .wrap()
+            .into(),
+    )
 }
 
 /// What the docs promise for an invalid spec: the error, over the block's
@@ -151,6 +227,15 @@ enum Dir {
     Y,
 }
 
+impl Dir {
+    fn other(self) -> Dir {
+        match self {
+            Dir::X => Dir::Y,
+            Dir::Y => Dir::X,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Domain {
     /// Numbers, or times when `time`, from `lo` to `hi`.
@@ -202,10 +287,7 @@ impl Model {
             } else {
                 Dir::X
             };
-        let base = match value {
-            Dir::X => Dir::Y,
-            Dir::Y => Dir::X,
-        };
+        let base = value.other();
         let mut x_cats = Vec::new();
         let mut y_cats = Vec::new();
         let mut series: Vec<String> = Vec::new();
@@ -291,10 +373,7 @@ impl Model {
     }
 
     fn base(&self) -> Dir {
-        match self.value {
-            Dir::X => Dir::Y,
-            Dir::Y => Dir::X,
-        }
+        self.value.other()
     }
 
     fn series_count(&self) -> usize {
@@ -312,29 +391,17 @@ impl Model {
         // sticks out above the top tick.
         title + Y_TITLE_HEIGHT + 8.0
     }
+}
 
-    /// The space left of the plot (the y axis) and right of it (the
-    /// legend), for a plot `plot_h` tall.
-    fn margins(&self, plot_h: f32) -> (f32, f32) {
-        let (_, ticks) = axis_ticks(&self.y.domain, plot_h, Dir::Y);
-        let widest = ticks
-            .iter()
-            .map(|(_, l)| text_width(l, SMALL, REGULAR).min(MAX_LABEL))
-            .fold(0.0, f32::max);
-        // Labels, gap, tick.
-        let left = 4.0 + widest + 4.0 + TICK;
-        let right = match &self.legend {
-            Some((title, names)) => {
-                let widest = names
-                    .iter()
-                    .map(|n| text_width(n, SMALL, REGULAR).min(MAX_LABEL) + 18.0)
-                    .fold(text_width(title, SMALL, BOLD), f32::max);
-                16.0 + widest + 8.0
-            }
-            None => 12.0,
-        };
-        (left, right)
-    }
+/// The space left of the plot for the y axis with `ticks`, their labels
+/// cut to `cap`.
+fn left_margin(ticks: &[(Pos, String)], cap: f32) -> f32 {
+    let widest = ticks
+        .iter()
+        .map(|(_, l)| text_width(l, SMALL, REGULAR).min(cap))
+        .fold(0.0, f32::max);
+    // Labels, gap, tick.
+    4.0 + widest + 4.0 + TICK
 }
 
 /// A row's value as a position, adding a category to `cats` when it's new.
@@ -401,12 +468,20 @@ fn min_gap(positions: impl Iterator<Item = Pos>) -> Option<f64> {
 }
 
 /// Round tick values from `lo` to `hi`, about `count` of them at most, a
-/// step of 1, 2 or 5 times a power of ten apart, with the step.
+/// step of 1, 2 or 5 times a power of ten apart, with the step. Numbers too
+/// far apart to step between (or that would need more than [`MAX_TICKS`])
+/// get just their two ends.
 fn nice_ticks(lo: f64, hi: f64, count: usize) -> (Vec<f64>, f64) {
+    let ends = || (vec![lo, hi], hi - lo);
     let step = nice_step((hi - lo) / count.max(1) as f64);
-    let first = (lo / step - 1e-9).ceil() as i64;
-    let last = (hi / step + 1e-9).floor() as i64;
-    let ticks = (first..=last).map(|i| clean(i as f64 * step)).collect();
+    let first = (lo / step - 1e-9).ceil();
+    let last = (hi / step + 1e-9).floor();
+    if !(first.is_finite() && last.is_finite() && last - first <= MAX_TICKS) {
+        return ends();
+    }
+    let ticks = (first as i64..=last as i64)
+        .map(|i| clean(i as f64 * step, step))
+        .collect();
     (ticks, step)
 }
 
@@ -421,41 +496,87 @@ fn nice_step(raw: f64) -> f64 {
         .map(|m| m * power)
         .find(|s| *s >= raw * (1.0 - 1e-9))
         .unwrap_or(10.0 * power);
-    clean(step)
+    clean(step, step)
 }
 
-/// `v` without float noise like 0.30000000000000004.
-fn clean(v: f64) -> f64 {
-    let rounded = (v * 1e9).round() / 1e9;
-    if rounded == 0.0 { 0.0 } else { rounded }
+/// `v`, a multiple of `step`, without float noise like 0.30000000000000004:
+/// rounded to a millionth of the step's power of ten.
+fn clean(v: f64, step: f64) -> f64 {
+    let scale = 10f64.powf(6.0 - step.abs().log10().floor());
+    if !(scale.is_finite() && scale > 0.0) {
+        return v;
+    }
+    let rounded = (v * scale).round() / scale;
+    if !rounded.is_finite() {
+        v
+    } else if rounded == 0.0 {
+        0.0
+    } else {
+        rounded
+    }
 }
 
 /// `lo..hi` widened to whole `step`s.
 fn nice_domain(lo: f64, hi: f64, step: f64) -> (f64, f64) {
     (
-        clean((lo / step + 1e-9).floor() * step),
-        clean((hi / step - 1e-9).ceil() * step),
+        clean((lo / step + 1e-9).floor() * step, step),
+        clean((hi / step - 1e-9).ceil() * step, step),
     )
 }
 
+/// The power of ten `v` is in: 2 for 250, -3 for 0.005.
+fn exponent(v: f64) -> i32 {
+    v.abs().log10().floor() as i32
+}
+
+/// How many digits after the point `v`'s mantissa needs: 0 for 2e5, 1 for
+/// 2.5e5.
+fn mantissa_decimals(v: f64) -> i32 {
+    let mantissa = v.abs() / 10f64.powi(exponent(v));
+    (0..6)
+        .find(|d| {
+            let scaled = mantissa * 10f64.powi(*d);
+            (scaled - scaled.round()).abs() < 1e-6 * scaled
+        })
+        .unwrap_or(6)
+}
+
 /// Labels for numeric ticks `step` apart: as many decimals as the step
-/// needs, and thousands as k, M and B once they're 10 000 or more.
+/// needs, thousands as k, M and B once they're 10 000 or more, and
+/// scientific notation for the very big and the very small.
 fn number_labels(ticks: &[f64], step: f64) -> Vec<String> {
     let biggest = ticks.iter().fold(0.0f64, |m, t| m.max(t.abs()));
+    if !(step.is_finite() && step > 0.0 && biggest.is_finite()) {
+        return ticks.iter().map(|t| format!("{t:e}")).collect();
+    }
+    let digits = mantissa_decimals(step) - exponent(step);
+    if biggest >= 1e12 || digits > 6 {
+        // Enough digits after the point to tell the ticks apart.
+        let top = if biggest > 0.0 {
+            exponent(biggest)
+        } else {
+            exponent(step)
+        };
+        let decimals = (top + digits).clamp(0, 12) as usize;
+        return ticks
+            .iter()
+            .map(|t| {
+                if *t == 0.0 {
+                    "0".to_string()
+                } else {
+                    format!("{:.*e}", decimals, t)
+                }
+            })
+            .collect();
+    }
     let (div, suffix) = match biggest {
         b if b >= 1e9 => (1e9, "B"),
         b if b >= 1e6 => (1e6, "M"),
         b if b >= 1e4 => (1e3, "k"),
         _ => (1.0, ""),
     };
-    // As many decimals as the step has.
     let step = step / div;
-    let decimals = (0..10)
-        .find(|d| {
-            let scaled = step * 10f64.powi(*d);
-            (scaled - scaled.round()).abs() < 1e-6 * scaled.max(1.0)
-        })
-        .unwrap_or(10) as usize;
+    let decimals = (mantissa_decimals(step) - exponent(step)).max(0) as usize;
     ticks
         .iter()
         .map(|t| {
@@ -620,7 +741,10 @@ fn axis_ticks(domain: &Domain, len: f32, dir: Dir) -> (Domain, Vec<(Pos, String)
             time: false,
         } => {
             let (_, step) = nice_ticks(*lo, *hi, count);
-            let (lo, hi) = nice_domain(*lo, *hi, step);
+            let (lo, hi) = match nice_domain(*lo, *hi, step) {
+                (nlo, nhi) if nlo.is_finite() && nhi.is_finite() && nhi > nlo => (nlo, nhi),
+                _ => (*lo, *hi),
+            };
             let (ticks, step) = nice_ticks(lo, hi, count);
             let labels = number_labels(&ticks, step);
             (
@@ -648,7 +772,12 @@ impl Scale {
     fn at(&self, pos: Pos) -> f32 {
         match (&self.domain, pos) {
             (Domain::Linear { lo, hi, .. }, Pos::Num(v)) => {
-                let t = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
+                // Halved, so values near f64::MAX don't overflow.
+                let t = if hi > lo {
+                    (v / 2.0 - lo / 2.0) / (hi / 2.0 - lo / 2.0)
+                } else {
+                    0.5
+                };
                 self.start + (self.end - self.start) * t as f32
             }
             (Domain::Band(cats), Pos::Cat(i)) => {
@@ -671,7 +800,7 @@ impl Scale {
     fn per_unit(&self) -> f32 {
         match &self.domain {
             Domain::Linear { lo, hi, .. } if hi > lo => {
-                ((self.end - self.start) / (hi - lo) as f32).abs()
+                ((self.end - self.start) as f64 / (hi / 2.0 - lo / 2.0) / 2.0).abs() as f32
             }
             _ => 0.0,
         }
@@ -687,6 +816,8 @@ impl Scale {
 /// Where everything goes in a chart of a given size.
 struct Layout {
     plot: Rectangle,
+    /// How wide a y tick label can be.
+    label_cap: f32,
     x: Scale,
     y: Scale,
     x_ticks: Vec<(f32, String)>,
@@ -699,15 +830,17 @@ impl Layout {
     fn new(model: &Model, size: Size) -> Layout {
         let top = model.top();
         let plot_h = (size.height - top - X_AXIS_HEIGHT).max(10.0);
-        let (left, right) = model.margins(plot_h);
+        let (y_domain, y_ticks) = axis_ticks(&model.y.domain, plot_h, Dir::Y);
+        // Long category names get less of a narrow chart.
+        let label_cap = (size.width * 0.3).clamp(30.0, MAX_LABEL);
+        let left = left_margin(&y_ticks, label_cap);
         let plot = Rectangle {
             x: left,
             y: top,
-            width: (size.width - left - right).max(10.0),
+            width: (size.width - left - RIGHT_MARGIN).max(10.0),
             height: plot_h,
         };
         let (x_domain, x_ticks) = axis_ticks(&model.x.domain, plot.width, Dir::X);
-        let (y_domain, y_ticks) = axis_ticks(&model.y.domain, plot.height, Dir::Y);
         let x = Scale {
             domain: x_domain,
             start: plot.x,
@@ -728,6 +861,7 @@ impl Layout {
         let marks = marks(model, &x, &y);
         Layout {
             plot,
+            label_cap,
             x,
             y,
             x_ticks,
@@ -837,15 +971,24 @@ fn fit(s: &str, width: f32, size: f32) -> String {
     if text_width(s, size, REGULAR) <= width {
         return s.to_string();
     }
-    let mut chars: Vec<char> = s.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let cut: String = chars.iter().collect::<String>() + "…";
-        if text_width(&cut, size, REGULAR) <= width {
-            return cut;
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |n: usize| chars[..n].iter().collect::<String>() + "…";
+    // The most characters that fit with the ellipsis: between `lo` (fits,
+    // or none) and `hi` (doesn't).
+    let (mut lo, mut hi) = (0, chars.len());
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if text_width(&cut(mid), size, REGULAR) <= width {
+            lo = mid;
+        } else {
+            hi = mid;
         }
     }
-    String::new()
+    if lo == 0 && text_width("…", size, REGULAR) > width {
+        String::new()
+    } else {
+        cut(lo)
+    }
 }
 
 /// The canvas program: a model, drawn in a theme. The chart is two of
@@ -857,16 +1000,54 @@ struct Chart {
     hover: bool,
 }
 
-/// The item under the pointer.
+/// A canvas's state: what it last laid out and drew, and for the hover
+/// layer, the item under the pointer.
 #[derive(Default)]
-struct Hover(Option<usize>);
+struct State {
+    hover: Option<usize>,
+    /// The base layer's drawing, until the layout changes.
+    cache: canvas::Cache,
+    layout: RefCell<Option<Laid>>,
+}
+
+/// A layout, and what it was made for.
+struct Laid {
+    model: Rc<Model>,
+    p: Pal,
+    size: Size,
+    layout: Rc<Layout>,
+}
+
+impl State {
+    /// `chart`'s layout at `size`, kept until either changes. Clears the
+    /// drawing when it's made again.
+    fn layout(&self, chart: &Chart, size: Size) -> Rc<Layout> {
+        let mut laid = self.layout.borrow_mut();
+        if let Some(l) = &*laid
+            && Rc::ptr_eq(&l.model, &chart.model)
+            && l.p == chart.p
+            && l.size == size
+        {
+            return l.layout.clone();
+        }
+        self.cache.clear();
+        let layout = Rc::new(Layout::new(&chart.model, size));
+        *laid = Some(Laid {
+            model: chart.model.clone(),
+            p: chart.p,
+            size,
+            layout: layout.clone(),
+        });
+        layout
+    }
+}
 
 impl<M> canvas::Program<M> for Chart {
-    type State = Hover;
+    type State = State;
 
     fn update(
         &self,
-        state: &mut Hover,
+        state: &mut State,
         event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
@@ -879,40 +1060,44 @@ impl<M> canvas::Program<M> for Chart {
         {
             return None;
         }
-        let hovered = cursor.position_in(bounds).and_then(|at| {
-            let layout = Layout::new(&self.model, bounds.size());
-            layout.hovered(&self.model, at)
-        });
-        if hovered == state.0 {
+        let hovered = match cursor.position_in(bounds) {
+            // Outside, nothing's hovered, and there's nothing to work out.
+            None if state.hover.is_none() => return None,
+            None => None,
+            Some(at) => state.layout(self, bounds.size()).hovered(&self.model, at),
+        };
+        if hovered == state.hover {
             return None;
         }
-        state.0 = hovered;
+        state.hover = hovered;
         Some(canvas::Action::request_redraw())
     }
 
     fn draw(
         &self,
-        state: &Hover,
+        state: &State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let hovered = state.0.zip(cursor.position_in(bounds));
-        if self.hover && hovered.is_none() {
+        let size = bounds.size();
+        if !self.hover {
+            let layout = state.layout(self, size);
+            return vec![state.cache.draw(renderer, size, |frame| {
+                self.draw_axes(frame, &layout);
+                self.draw_marks(frame, &layout);
+            })];
+        }
+        let Some((i, at)) = state.hover.zip(cursor.position_in(bounds)) else {
+            return Vec::new();
+        };
+        if i >= self.model.items.len() {
             return Vec::new();
         }
-        let mut frame = Frame::new(renderer, bounds.size());
-        let layout = Layout::new(&self.model, bounds.size());
-        if !self.hover {
-            self.draw_axes(&mut frame, &layout);
-            self.draw_marks(&mut frame, &layout);
-            self.draw_legend(&mut frame, &layout, bounds.size());
-        } else if let Some((i, at)) = hovered
-            && i < self.model.items.len()
-        {
-            self.draw_hover(&mut frame, &layout, i, at, bounds.size());
-        }
+        let layout = state.layout(self, size);
+        let mut frame = Frame::new(renderer, size);
+        self.draw_hover(&mut frame, &layout, i, at, size);
         vec![frame.into_geometry()]
     }
 }
@@ -1014,7 +1199,7 @@ impl Chart {
                 axis,
             );
             let t = label(
-                &fit(text, MAX_LABEL, SMALL),
+                &fit(text, l.label_cap, SMALL),
                 Point::new(plot.x - TICK - 4.0, *py),
                 SMALL,
                 REGULAR,
@@ -1109,38 +1294,6 @@ impl Chart {
         }
     }
 
-    fn draw_legend(&self, frame: &mut Frame, l: &Layout, size: Size) {
-        let Some((title, names)) = &self.model.legend else {
-            return;
-        };
-        let p = self.p;
-        let x = l.plot.x + l.plot.width + 16.0;
-        let mut y = l.plot.y;
-        frame.fill_text(label(title, Point::new(x, y), SMALL, BOLD, rgb(p.text)));
-        y += 20.0;
-        let row = 18.0;
-        for (i, name) in names.iter().enumerate() {
-            if y + row > size.height && i + 1 < names.len() {
-                let more = format!("+{} more", names.len() - i);
-                frame.fill_text(label(&more, Point::new(x, y), SMALL, REGULAR, rgb(p.muted)));
-                break;
-            }
-            frame.fill(
-                &Path::rounded_rectangle(Point::new(x, y + 2.0), Size::new(10.0, 10.0), 2.0.into()),
-                self.color(i),
-            );
-            let name = fit(name, MAX_LABEL, SMALL);
-            frame.fill_text(label(
-                &name,
-                Point::new(x + 18.0, y),
-                SMALL,
-                REGULAR,
-                rgb(p.text),
-            ));
-            y += row;
-        }
-    }
-
     /// Marks item `i` and shows its values in a box by the pointer.
     fn draw_hover(&self, frame: &mut Frame, l: &Layout, i: usize, cursor: Point, size: Size) {
         let p = self.p;
@@ -1155,21 +1308,21 @@ impl Chart {
         } else {
             let c = mark.center();
             if matches!(self.model.mark, Mark::Line | Mark::Area) {
-                // A guide down from the point to the base axis.
-                let guide = match self.model.value {
-                    Dir::Y => Path::line(
-                        Point::new(c.x, l.plot.y),
-                        Point::new(c.x, l.plot.y + l.plot.height),
+                // A guide across the plot through the point. It's a filled
+                // rectangle rather than a stroked line: the software
+                // renderer finds what to redraw from a shape's bounds, and
+                // a straight line's are zero wide.
+                let (at, size) = match self.model.value {
+                    Dir::Y => (
+                        Point::new(c.x - 0.5, l.plot.y),
+                        Size::new(1.0, l.plot.height),
                     ),
-                    Dir::X => Path::line(
-                        Point::new(l.plot.x, c.y),
-                        Point::new(l.plot.x + l.plot.width, c.y),
+                    Dir::X => (
+                        Point::new(l.plot.x, c.y - 0.5),
+                        Size::new(l.plot.width, 1.0),
                     ),
                 };
-                frame.stroke(
-                    &guide,
-                    Stroke::default().with_color(rgb(p.muted)).with_width(1.0),
-                );
+                frame.fill_rectangle(at, size, rgb(p.muted));
             }
             frame.fill(&Path::circle(c, 6.0), rgb(p.bg));
             frame.fill(&Path::circle(c, 4.5), color);
@@ -1368,6 +1521,85 @@ mod tests {
         assert!(l.marks[0].y < l.marks[1].y);
         assert!((l.marks[0].width - 2.0 * l.marks[1].width).abs() < 0.5);
         assert_eq!(l.marks[0].x, l.plot.x);
+    }
+
+    /// A spec with `y` values `values`, on a line.
+    fn line(values: &[&str]) -> String {
+        let rows: Vec<String> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("    - {{x: {i}, y: {v}}}\n"))
+            .collect();
+        format!(
+            "mark: line\nencoding:\n  x: {{field: x, type: quantitative}}\n  y: {{field: y, type: quantitative}}\ndata:\n  values:\n{}",
+            rows.concat()
+        )
+    }
+
+    #[test]
+    fn extreme_ranges_lay_out() {
+        // A span past f64::MAX gets its two ends, rather than panicking.
+        let (ticks, _) = nice_ticks(-1.5e308, 1.5e308, 5);
+        assert_eq!(ticks, [-1.5e308, 1.5e308]);
+        for values in [
+            &["-1.5e308", "1.5e308"][..],
+            &["1e-10", "9e-10"],
+            &["0", "3e-9"],
+            &["1e300", "2e300"],
+        ] {
+            let m = model(&line(values));
+            let l = Layout::new(&m, Size::new(400.0, 300.0));
+            let Domain::Linear { lo, hi, .. } = l.y.domain else {
+                panic!("y should be numeric");
+            };
+            assert!(
+                lo.is_finite() && hi.is_finite() && hi > lo,
+                "{values:?}: {lo}..{hi}"
+            );
+            assert!(l.marks.iter().all(|r| r.y.is_finite()), "{values:?}");
+            // Every tick has its own label.
+            let mut labels: Vec<_> = l.y_ticks.iter().map(|(_, t)| t.clone()).collect();
+            assert!(labels.len() >= 2, "{values:?}: {labels:?}");
+            labels.dedup();
+            assert_eq!(labels.len(), l.y_ticks.len(), "{values:?}: {labels:?}");
+        }
+    }
+
+    #[test]
+    fn tiny_and_huge_labels() {
+        let (ticks, step) = nice_ticks(0.0, 3e-9, 3);
+        assert_eq!(number_labels(&ticks, step), ["0", "1e-9", "2e-9", "3e-9"]);
+        let (ticks, step) = nice_ticks(1e300, 2e300, 2);
+        assert_eq!(
+            number_labels(&ticks, step),
+            ["1.0e300", "1.5e300", "2.0e300"]
+        );
+    }
+
+    #[test]
+    fn narrow_charts_stay_in_bounds() {
+        let m = model(
+            "mark: bar\nencoding:\n  x: {field: n, type: quantitative}\n  y: {field: s, type: nominal}\n  color: {field: s, type: nominal}\ndata:\n  values:\n    - {s: a very long category name indeed, n: 4}\n    - {s: b, n: 2}\n",
+        );
+        let l = Layout::new(&m, Size::new(200.0, 200.0));
+        assert!(l.plot.x + l.plot.width + RIGHT_MARGIN <= 200.0);
+        assert!(l.plot.width > 100.0);
+    }
+
+    #[test]
+    fn fit_cuts_to_width() {
+        let full = "a very long category name";
+        let width = text_width("a very…", SMALL, REGULAR);
+        assert_eq!(fit(full, width, SMALL), "a very…");
+        assert_eq!(fit(full, 1000.0, SMALL), full);
+        assert_eq!(fit(full, 1.0, SMALL), "");
+    }
+
+    #[test]
+    fn charts_are_parsed_once() {
+        let src = line(&["1", "2"]);
+        let (a, b) = (prepare(&src), prepare(&src));
+        assert!(Rc::ptr_eq(&a, &b));
     }
 
     #[test]
