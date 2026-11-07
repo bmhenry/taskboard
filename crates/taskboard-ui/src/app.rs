@@ -214,6 +214,8 @@ pub enum Action {
     SetTheme(Theme),
     SetNewTaskPosition(NewTaskPosition),
     ToggleColumn(Status),
+    /// Hide or show an epic's open and backlog children on the board.
+    ToggleEpic(Ulid),
     AddHook,
     RemoveHook(usize),
     SetHookEvent(usize, HookEvent),
@@ -538,12 +540,31 @@ impl App {
     }
 
     /// Tasks in a status column that pass the current filter, in board order.
-    pub fn visible_column(&self, status: Status) -> Vec<&Task> {
+    fn filtered_column(&self, status: Status) -> Vec<&Task> {
         self.board
             .column(status)
             .into_iter()
             .filter(|t| self.filter.matches(t))
             .collect()
+    }
+
+    /// The tasks a board column shows: those passing the filter, less the
+    /// open and backlog children of epics the user collapsed.
+    pub fn visible_column(&self, status: Status) -> Vec<&Task> {
+        let mut tasks = self.filtered_column(status);
+        if matches!(status, Status::Open | Status::Backlog) {
+            tasks.retain(|t| {
+                self.board
+                    .parent_of(t)
+                    .is_none_or(|epic| !self.epic_collapsed(epic.id))
+            });
+        }
+        tasks
+    }
+
+    /// Whether the board hides an epic's open and backlog children.
+    pub fn epic_collapsed(&self, id: Ulid) -> bool {
+        self.settings.collapsed_epics.contains(&id)
     }
 
     /// Whether a board column is drawn as a thin strip: as the user last set
@@ -562,7 +583,7 @@ impl App {
     pub fn visible_list(&self) -> Vec<&Task> {
         Status::ALL
             .into_iter()
-            .flat_map(|s| self.visible_column(s))
+            .flat_map(|s| self.filtered_column(s))
             .collect()
     }
 
@@ -1008,6 +1029,16 @@ impl App {
             Action::ToggleColumn(status) => {
                 let collapsed = self.column_collapsed(status);
                 self.settings.collapsed_columns.insert(status, !collapsed);
+                self.save_settings();
+            }
+            Action::ToggleEpic(id) => {
+                let epics = &mut self.settings.collapsed_epics;
+                if !epics.remove(&id) {
+                    epics.insert(id);
+                }
+                // Forget epics that are gone, so the set doesn't only grow.
+                let board = &self.board;
+                epics.retain(|e| board.get(*e).is_some_and(|t| t.epic));
                 self.save_settings();
             }
             Action::AddHook => {
@@ -1876,6 +1907,47 @@ mod tests {
 
         let reopened = settings_app(dir.path(), &path);
         assert_eq!(reopened.device.theme, Theme::Light);
+    }
+
+    #[test]
+    fn collapsed_epic_hides_open_and_backlog_children_from_the_board() {
+        let (dir, mut app) = app();
+        let settings = dir.path().join("settings.json");
+        app.platform.settings_path = Some(settings.clone());
+        let epic = add(&mut app, "epic");
+        let waiting = add(&mut app, "waiting");
+        let working = add(&mut app, "working");
+        let loose = add(&mut app, "loose");
+        app.apply(Action::Promote(epic));
+        for id in [waiting, working] {
+            app.apply(Action::SetParent {
+                id,
+                parent: Some(epic),
+            });
+        }
+        app.apply(Action::Move {
+            id: working,
+            status: Status::InProgress,
+            position: None,
+        });
+        assert_eq!(app.error, None);
+        let ids = |app: &Harness, status| -> Vec<Ulid> {
+            app.visible_column(status).iter().map(|t| t.id).collect()
+        };
+        assert!(!app.epic_collapsed(epic));
+        assert_eq!(ids(&app, Status::Backlog), [epic, waiting, loose]);
+
+        app.apply(Action::ToggleEpic(epic));
+        assert!(app.epic_collapsed(epic));
+        assert_eq!(ids(&app, Status::Backlog), [epic, loose]);
+        assert_eq!(ids(&app, Status::InProgress), [working]);
+        // Only the board hides them; the list still has every task.
+        assert!(app.visible_list().iter().any(|t| t.id == waiting));
+        let reopened = settings_app(app.platform.store.dir(), &settings);
+        assert!(reopened.epic_collapsed(epic));
+
+        app.apply(Action::ToggleEpic(epic));
+        assert_eq!(ids(&app, Status::Backlog), [epic, waiting, loose]);
     }
 
     #[test]

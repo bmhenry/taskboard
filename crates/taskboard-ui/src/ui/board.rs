@@ -349,7 +349,8 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
     let app = &gui.app;
     let project = Some(app.board.project_name(&task.project));
     let missing = app.project_missing(&task.project);
-    let face = container(card_body(p, &app.board, task, project, missing))
+    let collapsed = task.epic.then(|| app.epic_collapsed(id));
+    let face = container(card_body(p, &app.board, task, project, missing, collapsed))
         .padding(10)
         .width(Length::Fill)
         .style(move |_| theme::boxed(bg, edge, 6.0));
@@ -373,13 +374,15 @@ fn card<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
 
 /// A card's title, counts and source link, its epic badge or parent epic, its
 /// assignee, plus its project's name if given, and a warning if its project's folder is
-/// `missing`.
+/// `missing`. An epic gets an arrow to hide or show its open and backlog
+/// children if `collapsed` says whether they're hidden.
 pub fn card_body<'a>(
     p: Pal,
     board: &'a Board,
     task: &'a Task,
     project: Option<String>,
     missing: bool,
+    collapsed: Option<bool>,
 ) -> El<'a> {
     let mut meta = row![].spacing(10).align_y(Alignment::Center);
     if missing {
@@ -396,7 +399,14 @@ pub fn card_body<'a>(
     }
     let mut body = column![].spacing(6);
     if task.epic {
-        body = body.push(epic_badge(p, board.progress(task.id)));
+        let badge = epic_badge(p, board.progress(task.id));
+        body = body.push(match collapsed {
+            Some(collapsed) => row![badge, epic_toggle(p, task.id, collapsed)]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into(),
+            None => badge,
+        });
     }
     body = body.push(text(&task.title).size(14));
     if let Some(epic) = board.parent_of(task) {
@@ -410,6 +420,39 @@ pub fn card_body<'a>(
         body = body.push(source_pill(p, &link.url));
     }
     body.into()
+}
+
+/// The arrow beside an epic's badge: down while its open and backlog children
+/// show on the board, right while they're hidden. Like the source pill, it
+/// takes its own press, so it neither drags nor selects the card.
+fn epic_toggle<'a>(p: Pal, id: Ulid, collapsed: bool) -> El<'a> {
+    let face = move |hovered: bool| -> El<'a> {
+        container(
+            text(if collapsed { "▸" } else { "▾" })
+                .size(13)
+                .color(rgb(if hovered { p.text } else { p.epic })),
+        )
+        .center_x(18)
+        .center_y(18)
+        .into()
+    };
+    let tip = if collapsed {
+        "Show open and backlog tasks"
+    } else {
+        "Hide open and backlog tasks"
+    };
+    iced::widget::tooltip(
+        button(hover(face(false), face(true)))
+            .padding(0)
+            .style(theme::bare_button)
+            .on_press(Message::App(Action::ToggleEpic(id))),
+        container(text(tip).size(12).color(rgb(p.text)))
+            .padding([4, 8])
+            .style(move |_| theme::boxed(p.card, p.border, 6.0)),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
 }
 
 fn small<'a>(p: Pal, s: String) -> El<'a> {

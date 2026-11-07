@@ -3,7 +3,7 @@
 //! (falling back to `~/.config`). [`DeviceSettings`] are how the GUI looks on
 //! one device, so a phone can use a bigger font than the desktop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::Ulid;
 use crate::hooks::Hook;
 use crate::model::Status;
 use crate::{Error, Result};
@@ -50,6 +51,9 @@ pub struct GlobalSettings {
     /// Board columns the user collapsed (`true`) or expanded (`false`) by
     /// hand. Columns not listed follow `collapse_empty_columns`.
     pub collapsed_columns: BTreeMap<Status, bool>,
+    /// Epics whose open and backlog children the board leaves out. Only how
+    /// the board looks: the children are still there for `tb` and the list.
+    pub collapsed_epics: BTreeSet<Ulid>,
 }
 
 impl Default for GlobalSettings {
@@ -59,6 +63,7 @@ impl Default for GlobalSettings {
             new_task_position: NewTaskPosition::Top,
             hooks: Vec::new(),
             collapsed_columns: BTreeMap::new(),
+            collapsed_epics: BTreeSet::new(),
         }
     }
 }
@@ -181,6 +186,7 @@ mod tests {
                 pass_task_id: true,
             }],
             collapsed_columns: BTreeMap::from([(Status::InProgress, true)]),
+            collapsed_epics: BTreeSet::from([Ulid::from(7u128)]),
         };
         s.save(&path).unwrap();
         assert!(

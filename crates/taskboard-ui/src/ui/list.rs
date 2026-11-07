@@ -265,6 +265,7 @@ fn in_progress_item<'a>(gui: &'a Gui, task: &'a Task) -> El<'a> {
             task,
             None,
             gui.app.project_missing(&task.project),
+            None,
         ))
         .padding(10)
         .width(Length::Fill),
